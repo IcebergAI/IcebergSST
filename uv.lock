@@ -1,0 +1,83 @@
+version = 1
+revision = 3
+requires-python = ">=3.13"
+
+[manifest]
+members = [
+    "iceberg-api",
+    "iceberg-connectors",
+    "iceberg-core",
+    "iceberg-detect",
+    "iceberg-engine",
+    "icebergsst",
+]
+
+[[package]]
+name = "iceberg-api"
+version = "0.1.0"
+source = { editable = "apps/api" }
+dependencies = [
+    { name = "iceberg-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "iceberg-core", editable = "packages/core" }]
+
+[[package]]
+name = "iceberg-connectors"
+version = "0.1.0"
+source = { editable = "packages/connectors" }
+dependencies = [
+    { name = "iceberg-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "iceberg-core", editable = "packages/core" }]
+
+[[package]]
+name = "iceberg-core"
+version = "0.1.0"
+source = { editable = "packages/core" }
+
+[[package]]
+name = "iceberg-detect"
+version = "0.1.0"
+source = { editable = "packages/detect" }
+dependencies = [
+    { name = "iceberg-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "iceberg-core", editable = "packages/core" }]
+
+[[package]]
+name = "iceberg-engine"
+version = "0.1.0"
+source = { editable = "apps/engine" }
+dependencies = [
+    { name = "iceberg-connectors" },
+    { name = "iceberg-core" },
+    { name = "iceberg-detect" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "iceberg-connectors", editable = "packages/connectors" },
+    { name = "iceberg-core", editable = "packages/core" },
+    { name = "iceberg-detect", editable = "packages/detect" },
+]
+
+[[package]]
+name = "icebergsst"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "iceberg-api" },
+    { name = "iceberg-engine" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "iceberg-api", editable = "apps/api" },
+    { name = "iceberg-engine", editable = "apps/engine" },
+]

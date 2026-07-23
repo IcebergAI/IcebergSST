@@ -1,0 +1,23 @@
+[project]
+name = "icebergsst"
+version = "0.1.0"
+description = "IcebergSST — secret scanning for non-git enterprise sources (workspace root)"
+requires-python = ">=3.13"
+dependencies = [
+    "iceberg-api",
+    "iceberg-engine",
+]
+
+[tool.uv]
+# The root is a virtual aggregator, not an installable package.
+package = false
+
+[tool.uv.workspace]
+members = ["apps/*", "packages/*"]
+
+[tool.uv.sources]
+iceberg-api = { workspace = true }
+iceberg-engine = { workspace = true }
+iceberg-core = { workspace = true }
+iceberg-detect = { workspace = true }
+iceberg-connectors = { workspace = true }

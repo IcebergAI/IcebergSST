@@ -1,0 +1,15 @@
+[project]
+name = "iceberg-detect"
+version = "0.1.0"
+description = "Detection engine and versioned rule packs (regex + entropy + keyword proximity)."
+requires-python = ">=3.13"
+dependencies = [
+    "iceberg-core",
+]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+iceberg-core = { workspace = true }

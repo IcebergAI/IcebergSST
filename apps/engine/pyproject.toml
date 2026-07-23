@@ -1,0 +1,19 @@
+[project]
+name = "iceberg-engine"
+version = "0.1.0"
+description = "Dramatiq scanner worker: connector fetch, detection, redaction. No DB credentials."
+requires-python = ">=3.13"
+dependencies = [
+    "iceberg-core",
+    "iceberg-detect",
+    "iceberg-connectors",
+]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+iceberg-core = { workspace = true }
+iceberg-detect = { workspace = true }
+iceberg-connectors = { workspace = true }
