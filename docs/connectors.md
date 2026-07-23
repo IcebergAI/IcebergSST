@@ -23,11 +23,23 @@ Normalized input to detection:
 - `metadata` — free-form (author, mime type, etc.)
 
 `resource_locator` feeds directly into the finding fingerprint (ADR 0006), so it must be stable
-across scans.
+across scans and **coarse** — page id + attachment name, never line/offset (offsets are display
+metadata on the finding, not identity).
+
+## Two-phase execution (ADR 0009)
+`discover()` also runs **in an engine**, not the API: a scan begins with a single discovery
+task; the engine runs `discover()` and POSTs the resulting `TaskSpec`s back, and the API
+persists + enqueues them as fetch tasks. The connector receives its credential (and the
+fingerprint pepper) from the task **lease response** — never from env or the DB.
 
 ## Confluence connector (MVP)
 
-- **Auth:** API token / PAT, retrieved via the secret store. Credential never logged.
+**Target flavor: Confluence Cloud first** (REST v2, API tokens, cursor pagination). The
+connector interface stays flavor-agnostic so a Server/Data Center variant (PATs, older REST)
+can be added later without redesign.
+
+- **Auth:** API token, delivered via the task lease (backed by the secret store). Credential
+  never logged.
 - **Discovery:** enumerate spaces (respecting the source's scope filter), page through content.
 - **Content:**
   - page **bodies** (storage format → text)
@@ -45,3 +57,8 @@ across scans.
 A shared extraction step turns supported attachment/file formats into text before detection:
 plain/code/config as-is; PDF and office documents via a text extractor. Unsupported/binary
 formats are skipped and counted. OCR is explicitly out of scope for MVP.
+
+**Scanned content is untrusted input.** Attachments are attacker-editable and extraction
+parsers are an attack surface on the engine. Mandatory guards: per-file size caps,
+extraction timeouts, decompression-ratio limits (zip/office bombs), and failure isolation —
+one hostile file fails that unit, never the task or the worker. See `docs/security.md`.
