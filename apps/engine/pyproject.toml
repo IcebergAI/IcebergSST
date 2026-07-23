@@ -7,6 +7,7 @@ dependencies = [
     "iceberg-core",
     "iceberg-detect",
     "iceberg-connectors",
+    "dramatiq[redis]>=2.2.0",
 ]
 
 [build-system]
