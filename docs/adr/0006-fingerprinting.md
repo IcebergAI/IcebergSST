@@ -17,7 +17,18 @@ fingerprint = hash(connector_type, resource_locator, rule_id, salted_secret_hash
 Including the **resource locator** means the same secret in two places is two findings, each
 independently triageable — important for remediation ("this key is in page X *and* page Y").
 
-**Re-scan reconciliation** (run by the API on scan completion, per source):
+**Locator granularity:** the locator used in the fingerprint is **coarse and stable** — e.g.
+`(page id, attachment name)` — and explicitly **excludes line/offset**. Offsets are stored on
+the finding for display only. Otherwise any edit above a secret would re-fingerprint it and
+orphan its triage state. Corollary: the same secret value matched by the same rule multiple
+times within one locator collapses to one finding.
+
+**Rule-id stability:** `rule_id` is part of finding identity and therefore a stable contract.
+Renaming or splitting a rule requires a migration mapping old ids to new; rule packs must not
+rename ids casually.
+
+**Re-scan reconciliation** (run by the API, per source, **only when a scan reaches
+`completed`** — a `partial` or `failed` scan never auto-resolves findings; see ADR 0009):
 - new fingerprint → `open`
 - matching fingerprint → keep triage state, bump `last_seen_scan`
 - previously-open, now-missing → `resolved (auto)`

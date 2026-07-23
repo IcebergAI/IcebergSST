@@ -39,5 +39,8 @@ Alembic. Only the **api** role runs migrations (it owns the schema); engines nev
 ## Scaling model
 - Throughput scales by adding **engine** replicas — more Dramatiq consumers pulling scan tasks
   from Redis.
-- The **api** scales independently for UI/API load.
+- The **api** scales independently for UI/API load. The cron **scheduler must fire once per
+  beat regardless of replica count** — a Postgres advisory lock (leader election) guards each
+  tick so multiple api replicas never double-fire schedules.
+- Redis runs with auth + TLS; engines reach only Redis and the api (no DB route).
 - Redis and Postgres sized to the org's content volume.

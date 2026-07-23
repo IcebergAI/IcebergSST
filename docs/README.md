@@ -20,3 +20,4 @@ Design specification and reference docs. Start with [`../ARCHITECTURE.md`](../AR
 - [0006 — Fingerprint & reconciliation](./adr/0006-fingerprinting.md)
 - [0007 — Secret store: pluggable, env-key default](./adr/0007-secret-store.md)
 - [0008 — Rule management: code rules + DB suppressions](./adr/0008-rule-management.md)
+- [0009 — Task lifecycle: two-phase scans, API-authoritative leases](./adr/0009-task-lifecycle.md)

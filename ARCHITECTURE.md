@@ -82,22 +82,28 @@ never contains a usable secret.
 master key injected via environment / k8s secret. A `VaultBackend` seam is documented for
 production. This is the ".env now, Vault later" path.
 
-## 4. Data flow: a scan
+## 4. Data flow: a scan (two-phase, ADR 0009)
 
-1. A scan is triggered — **on-demand** (user or API) or by the **cron scheduler**.
-2. The API creates a `Scan` row and fans it out into `ScanTask` units (e.g. one per Confluence
-   space or page batch), enqueuing each to Redis via Dramatiq.
-3. An **engine** consumes a task, leases it (heartbeat), runs the connector to fetch content
-   units, runs detection + redaction, and POSTs findings + task completion back to the API.
-4. The API validates the engine credential, applies suppressions, and persists findings.
-5. On scan completion the API runs **reconciliation** against the source's existing open findings
-   (see §6), then fires notifications for newly opened findings.
+1. A scan is triggered — **on-demand** (user or API) or by the **cron scheduler** (guarded by a
+   Postgres advisory lock so multiple API replicas never double-fire).
+2. The API creates a `Scan` row and enqueues a single **discovery task** (the broker message is
+   an id-only hint — no secrets, no specs).
+3. An **engine** leases the discovery task — the lease response delivers the task spec, the
+   task-scoped source credential, the fingerprint pepper, and applicable suppressions — runs
+   `connector.discover()`, and POSTs the resulting `TaskSpec`s back.
+4. The API persists them as **fetch tasks** and enqueues each; engines lease fetch tasks, run
+   connector fetch → detection → redaction, and POST findings + completion (idempotency-keyed).
+5. The API validates the engine credential, applies suppressions, and persists findings. Dead
+   engines are handled by lease expiry → API reclaim (Dramatiq retries are disabled).
+6. When the **last task completes** (atomic DB count), and only if the scan reached
+   `completed`, the API runs **reconciliation** (see §6), then fires notifications for newly
+   opened findings. `partial`/`failed` scans never auto-resolve.
 
 ## 5. Technology decisions (summary)
 
 | Area | Decision | ADR |
 |------|----------|-----|
-| Runtime | Python 3.14, containers | — |
+| Runtime | Python 3.14, containers (3.13 fallback if M0 compat spike finds blockers) | — |
 | API | FastAPI, API-first | — |
 | ORM/DB | SQLModel + PostgreSQL | — |
 | Web UI | HTMX + Alpine.js | — |
@@ -109,6 +115,7 @@ production. This is the ".env now, Vault later" path.
 | Fingerprinting | source+location+rule+secret-hash | [0006](./docs/adr/0006-fingerprinting.md) |
 | Secret store | Pluggable; env-key default, Vault later | [0007](./docs/adr/0007-secret-store.md) |
 | Rule mgmt | Code rules + DB suppressions | [0008](./docs/adr/0008-rule-management.md) |
+| Task lifecycle | Two-phase scans; API-authoritative lease; broker = dumb transport | [0009](./docs/adr/0009-task-lifecycle.md) |
 | Tenancy | Single-org | — |
 | Deployment | compose (dev) + Helm (prod) | — |
 
