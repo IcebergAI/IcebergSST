@@ -8,6 +8,8 @@ dependencies = [
     # The api is the only role that installs the [db] extra — it is the sole writer
     # of record (ADR 0002). The engine depends on bare iceberg-core.
     "iceberg-core[db]",
+    "alembic>=1.18.5",
+    "uvicorn[standard]>=0.41.0",
 ]
 
 [build-system]
