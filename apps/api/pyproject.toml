@@ -5,7 +5,9 @@ description = "FastAPI control plane: REST API, HTMX UI, scheduler, notification
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.139.2",
-    "iceberg-core",
+    # The api is the only role that installs the [db] extra — it is the sole writer
+    # of record (ADR 0002). The engine depends on bare iceberg-core.
+    "iceberg-core[db]",
 ]
 
 [build-system]
