@@ -6,7 +6,9 @@ cheap checks for expensive mistakes: an engine handed a database URL is a
 credential-isolation failure that no unit test would notice.
 """
 
+import importlib
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,10 @@ DOCKER_DIR = REPO_ROOT / "deploy" / "docker"
 API_DOCKERFILE = DOCKER_DIR / "api.Dockerfile"
 ENGINE_DOCKERFILE = DOCKER_DIR / "engine.Dockerfile"
 COMPOSE_FILE = REPO_ROOT / "deploy" / "compose" / "docker-compose.yml"
+ENV_EXAMPLE = REPO_ROOT / ".env.example"
+
+#: ${VAR}, ${VAR:-default}, ${VAR:?message}
+INTERPOLATION_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)")
 
 #: Variable names that would give a process a route to Postgres.
 DB_VARIABLE_RE = re.compile(r"\b(?:\w*DATABASE\w*|POSTGRES\w*|PG(?:HOST|USER|PASSWORD|DATABASE))\b")
@@ -175,3 +181,76 @@ def test_compose_and_dockerfiles_agree_on_the_build_context(compose: dict[str, A
         build = _service(compose, name)["build"]
         assert build["context"] == "../.."
         assert build["dockerfile"] == f"deploy/docker/{dockerfile}"
+
+
+def _documented_variables() -> set[str]:
+    return {
+        line.split("=", 1)[0].strip()
+        for line in ENV_EXAMPLE.read_text().splitlines()
+        if "=" in line and not line.strip().startswith("#")
+    }
+
+
+def test_env_example_documents_every_variable_the_stack_interpolates() -> None:
+    """A variable compose reads but .env.example omits is a stack that will not start."""
+    directives = "\n".join(
+        line for line in COMPOSE_FILE.read_text().splitlines() if not line.strip().startswith("#")
+    )
+    interpolated = set(INTERPOLATION_RE.findall(directives))
+    documented = _documented_variables()
+
+    assert interpolated <= documented, sorted(interpolated - documented)
+
+
+def test_env_example_contains_no_real_values() -> None:
+    """Placeholders only — this file is committed."""
+    for line in ENV_EXAMPLE.read_text().splitlines():
+        name, separator, value = line.partition("=")
+        if separator and re.search(r"PASSWORD|MASTER_KEY|TOKEN|PEPPER", name):
+            assert value.strip() == "CHANGE_ME", f"{name} has a committed value"
+
+
+def test_init_env_fills_every_placeholder_with_a_working_value(tmp_path: Path) -> None:
+    """The generated pepper ref must open with the generated master key.
+
+    Generating them independently would produce a file that looks right and fails
+    on the first fingerprint.
+    """
+    from iceberg_core.secrets import EnvKeyBackend
+    from iceberg_core.secrets.env_key import decode_master_key
+
+    sys.path.insert(0, str(REPO_ROOT / "deploy" / "compose"))
+    init_env = importlib.import_module("init-env")
+
+    rendered, filled = init_env.render(ENV_EXAMPLE.read_text())
+    values = dict(
+        line.split("=", 1) for line in rendered.splitlines() if "=" in line and line[0] != "#"
+    )
+
+    assert "CHANGE_ME" not in rendered.replace("# Values marked CHANGE_ME", "")
+    assert set(filled) == {
+        "POSTGRES_PASSWORD",
+        "REDIS_PASSWORD",
+        "ICEBERG_ENGINE_TOKEN",
+        "ICEBERG_MASTER_KEY",
+        "ICEBERG_FINGERPRINT_PEPPER_REF",
+    }
+
+    store = EnvKeyBackend(
+        decode_master_key(values["ICEBERG_MASTER_KEY"]),
+        pepper_ref=values["ICEBERG_FINGERPRINT_PEPPER_REF"],
+    )
+    assert len(store.get_pepper()) == 32
+
+
+def test_init_env_refuses_to_overwrite_an_existing_env(tmp_path: Path) -> None:
+    """Losing the master key makes every stored credential ref undecryptable."""
+    sys.path.insert(0, str(REPO_ROOT / "deploy" / "compose"))
+    init_env = importlib.import_module("init-env")
+    existing = tmp_path / ".env"
+    existing.write_text("ICEBERG_MASTER_KEY=precious\n")
+
+    code = init_env.main(["--example", str(ENV_EXAMPLE), "--output", str(existing)])
+
+    assert code == 1
+    assert existing.read_text() == "ICEBERG_MASTER_KEY=precious\n"
