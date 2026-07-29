@@ -11,6 +11,13 @@ autogenerate will not see it. The conventions each table follows live in
 ``docs/data-model.md``.
 """
 
+from iceberg_core.models.audit import (
+    AUDIT_TARGET_USER,
+    AUDIT_USER_DISABLED,
+    AUDIT_USER_ENABLED,
+    AUDIT_USER_ROLE_CHANGED,
+    AuditEvent,
+)
 from iceberg_core.models.base import (
     NAMING_CONVENTION,
     IcebergModel,
@@ -28,7 +35,12 @@ from iceberg_core.models.scans import Engine, Scan, ScanTask
 from iceberg_core.models.sources import Schedule, Source
 
 __all__ = [
+    "AUDIT_TARGET_USER",
+    "AUDIT_USER_DISABLED",
+    "AUDIT_USER_ENABLED",
+    "AUDIT_USER_ROLE_CHANGED",
     "NAMING_CONVENTION",
+    "AuditEvent",
     "Engine",
     "Finding",
     "FindingEvent",
