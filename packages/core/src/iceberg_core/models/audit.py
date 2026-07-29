@@ -23,9 +23,19 @@ from iceberg_core.models.base import IcebergModel, json_type
 AUDIT_USER_ROLE_CHANGED = "user.role_changed"
 AUDIT_USER_DISABLED = "user.disabled"
 AUDIT_USER_ENABLED = "user.enabled"
+AUDIT_SOURCE_CREATED = "source.created"
+AUDIT_SOURCE_UPDATED = "source.updated"
+AUDIT_SOURCE_DELETED = "source.deleted"
+AUDIT_SOURCE_CREDENTIAL_SET = "source.credential_set"
+AUDIT_SOURCE_CREDENTIAL_ROTATED = "source.credential_rotated"
+AUDIT_SCHEDULE_CREATED = "schedule.created"
+AUDIT_SCHEDULE_UPDATED = "schedule.updated"
+AUDIT_SCHEDULE_DELETED = "schedule.deleted"
 
-#: Value for ``target_type`` when the subject is a user.
+#: Values for ``target_type``.
 AUDIT_TARGET_USER = "user"
+AUDIT_TARGET_SOURCE = "source"
+AUDIT_TARGET_SCHEDULE = "schedule"
 
 
 class AuditEvent(IcebergModel, table=True):

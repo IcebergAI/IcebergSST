@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
-from sqlalchemy import Engine
+from sqlalchemy import Engine, event
 from sqlmodel import Session, create_engine
 
 from iceberg_core.config import ApiSettings, get_api_settings
@@ -25,17 +25,37 @@ def create_db_engine(database_url: str, *, echo: bool = False) -> Engine:
     ``pool_pre_ping`` is on because the API sits behind long-lived pools that
     otherwise hand out connections a restarted Postgres has already dropped.
     SQLite gets the in-memory-friendly connect args so tests can share one
-    connection across sessions.
+    connection across sessions, plus foreign-key enforcement (see
+    :func:`enforce_sqlite_foreign_keys`).
     """
     connect_args: dict[str, Any] = {}
     if database_url.startswith("sqlite"):
         connect_args["check_same_thread"] = False
-    return create_engine(
+    engine = create_engine(
         database_url,
         echo=echo,
         pool_pre_ping=True,
         connect_args=connect_args,
     )
+    if engine.dialect.name == "sqlite":
+        enforce_sqlite_foreign_keys(engine)
+    return engine
+
+
+def enforce_sqlite_foreign_keys(engine: Engine) -> None:
+    """Turn on ``PRAGMA foreign_keys`` for every SQLite connection.
+
+    SQLite ignores foreign keys unless asked per connection. Left off, an
+    ``ON DELETE CASCADE`` quietly does nothing and a test suite happily accepts
+    orphan rows that Postgres would have refused — the schema would only be wrong
+    in production. Turning it on makes the test database behave like the real one.
+    """
+
+    @event.listens_for(engine, "connect")
+    def _set_pragma(dbapi_connection: Any, _record: Any) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 
 def get_db_engine(settings: ApiSettings | None = None) -> Engine:

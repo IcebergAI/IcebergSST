@@ -41,6 +41,18 @@ system itself a high-value target. This document states the trust boundaries and
 - **RBAC.** admin/analyst/viewer enforced server-side; the UI is not the enforcement point.
 - **Transport.** TLS everywhere; engine↔API mutual auth (mTLS) available as hardening.
 
+## Outbound requests
+Two features deliberately send traffic out of the deployment, both admin-gated and logged:
+
+- **`POST /sources/{id}/test`** attaches a decrypted source credential to a single request against
+  the operator-supplied `base_url`. That URL may be internal — Confluence Server usually is — so
+  there is no address blocklist; the controls are that only an admin can trigger it, redirects are
+  never followed (a `302` must not receive the credential), nothing from the response body is
+  echoed back, exception text is reduced to its type (it can contain the URL), and the request is
+  bounded to ten seconds. It is a stopgap: ADR 0009 says the API runs no connector code, and this
+  check belongs behind the connector interface (#45) or in an engine task (#35).
+- **Webhook notification channels**, below.
+
 ## Notification egress
 Webhook channels send redacted snippets + resource locations to arbitrary URLs — a deliberate
 egress channel. Channel configuration is **admin-only**, the payload is documented, and adding

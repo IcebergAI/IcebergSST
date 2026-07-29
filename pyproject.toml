@@ -25,6 +25,8 @@ iceberg-connectors = { workspace = true }
 [dependency-groups]
 dev = [
     "httpx2>=2.7.0",
+    # croniter ships no inline types.
+    "types-croniter>=6.0.0",
     # Reads deploy/compose/docker-compose.yml in the deployment invariant tests.
     "pyyaml>=6.0.3",
     "mypy>=2.3.0",

@@ -19,6 +19,8 @@ from iceberg_core.logging import configure_logging
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from iceberg_api.auth.routes import router as auth_router
+from iceberg_api.sources.routes import router as sources_router
+from iceberg_api.sources.schedule_routes import router as schedules_router
 from iceberg_api.users.routes import router as users_router
 
 API_PREFIX = "/api/v1"
@@ -67,6 +69,8 @@ def create_app() -> FastAPI:
         return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     app.include_router(auth_router, prefix=API_PREFIX)
+    app.include_router(schedules_router, prefix=API_PREFIX)
+    app.include_router(sources_router, prefix=API_PREFIX)
     app.include_router(users_router, prefix=API_PREFIX)
 
     return app

@@ -22,12 +22,25 @@ the next request rather than at cookie expiry.
   may modify their own account (see `docs/security.md` § Bootstrap).
 
 ## Sources
-- `GET    /sources` · `POST /sources` · `GET/PATCH/DELETE /sources/{id}`
-- `POST   /sources/{id}/test` → connectivity check (uses stored credential)
-- `POST   /sources/{id}/scan` → trigger an on-demand scan
+- `GET    /sources` (paginated) · `POST /sources` · `GET/PATCH/DELETE /sources/{id}`
+  Writes are admin-only; reads are open to any authenticated role, because an analyst triaging a
+  finding needs to see where it came from.
+- `POST   /sources/{id}/test` → connectivity check using the stored credential. **Admin-only**: it
+  makes an outbound request to an operator-supplied URL with a real credential.
+- `POST   /sources/{id}/scan` → trigger an on-demand scan *(M1, #34)*
+
+The `connection` blob is validated against a per-type model on write — a bad `base_url` fails when
+the source is saved, not hours later inside a scan task. Post-MVP types (`jira`, `smb`) are refused
+with an explanation. Credentials are write-only: supplying one on `POST`/`PATCH` seals it through the
+secret store, and no response ever carries the plaintext *or* the sealed ref — `has_credential` says
+whether one exists.
 
 ## Schedules
-- `GET /schedules` · `POST /schedules` · `GET/PATCH/DELETE /schedules/{id}`
+- `GET /schedules` (paginated, `?source_id=`) · `POST /schedules` · `GET/PATCH/DELETE /schedules/{id}`
+- Cron is validated on write; `next_run_at` is computed on create, on enable, and when the expression
+  changes, so "when does this fire next?" is answerable from the row.
+- A schedule re-enabled after a week off fires on its next beat — it does not owe a scan for every
+  beat missed.
 
 ## Scans
 - `GET  /scans` (filter by source/status) · `GET /scans/{id}`

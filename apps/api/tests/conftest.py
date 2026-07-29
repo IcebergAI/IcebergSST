@@ -15,13 +15,14 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from iceberg_api.app import API_PREFIX, create_app
-from iceberg_api.auth.dependencies import get_db_session, get_settings
+from iceberg_api.auth.dependencies import get_db_session, get_secret_store, get_settings
 from iceberg_api.auth.oidc import OidcClient, OidcConfig
 from iceberg_api.auth.routes import get_oidc_client
 from iceberg_api.auth.session import SESSION_COOKIE, issue_session
 from iceberg_core.config import ApiSettings
 from iceberg_core.enums import UserRole
 from iceberg_core.models import User
+from iceberg_core.secrets import EnvKeyBackend
 from oidc_provider import BOOTSTRAP_SUBJECT, CLIENT_ID, ISSUER, FakeProvider
 from pydantic import SecretStr
 from sqlalchemy import Engine
@@ -63,7 +64,11 @@ def api_settings_fixture() -> ApiSettings:
 
 @pytest.fixture(name="app")
 def app_fixture(
-    api_settings: ApiSettings, provider: FakeProvider, db_engine: Engine, session: Session
+    api_settings: ApiSettings,
+    provider: FakeProvider,
+    db_engine: Engine,
+    session: Session,
+    secret_store: EnvKeyBackend,
 ) -> FastAPI:
     """The real app, with settings, the database, and the provider overridden."""
     app = create_app()
@@ -88,6 +93,9 @@ def app_fixture(
         )
 
     app.dependency_overrides[get_settings] = _settings
+    # The real env-key backend with an ephemeral master key: credential sealing in
+    # a route runs the same code path production does.
+    app.dependency_overrides[get_secret_store] = lambda: secret_store
     app.dependency_overrides[get_db_session] = _db
     app.dependency_overrides[get_oidc_client] = _oidc
     return app
