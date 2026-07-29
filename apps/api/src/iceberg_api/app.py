@@ -1,8 +1,11 @@
-"""FastAPI application factory — observability baseline only (issue #67).
+"""FastAPI application factory.
 
-Real routes arrive with M1; this module establishes the skeleton every route
-will inherit: JSON logs with a per-request correlation id and the Prometheus
-exposition endpoint.
+Establishes what every route inherits — JSON logs with a per-request correlation
+id (#67) and the Prometheus exposition endpoint — and mounts the routers.
+
+Human-facing routes live under ``/api/v1`` from day one (docs/api.md
+§ Conventions); ``/healthz`` and ``/metrics`` stay unversioned because operators
+and scrapers are not API clients.
 """
 
 import re
@@ -14,6 +17,10 @@ from fastapi import FastAPI, Request, Response
 from iceberg_core import metrics as _metrics  # noqa: F401  # registers iceberg_* series
 from iceberg_core.logging import configure_logging
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+from iceberg_api.auth.routes import router as auth_router
+
+API_PREFIX = "/api/v1"
 
 REQUEST_ID_HEADER = "X-Request-ID"
 
@@ -57,5 +64,7 @@ def create_app() -> FastAPI:
     @app.get("/metrics")
     async def metrics() -> Response:
         return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+    app.include_router(auth_router, prefix=API_PREFIX)
 
     return app
