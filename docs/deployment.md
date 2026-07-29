@@ -57,6 +57,11 @@ schema); engines never touch the DB. In the compose stack: `make migrate`. Direc
   from Redis.
 - The **api** scales independently for UI/API load. The cron **scheduler must fire once per
   beat regardless of replica count** — a Postgres advisory lock (leader election) guards each
-  tick so multiple api replicas never double-fire schedules.
+  tick so multiple api replicas never double-fire schedules. Implemented in
+  `iceberg_api.scheduler`: `pg_try_advisory_xact_lock` for the duration of the tick's transaction,
+  so the lock is released even if the replica dies mid-round, and a replica that loses the race
+  returns immediately instead of queuing a redundant tick. Note that on SQLite (tests, local runs)
+  there is nothing to serialise and the tick always reports leadership, so the lock itself is only
+  exercised against Postgres.
 - Redis runs with auth + TLS; engines reach only Redis and the api (no DB route).
 - Redis and Postgres sized to the org's content volume.
