@@ -1,0 +1,20 @@
+# Build context hygiene: everything the images do not need, and everything they
+# must not have. A stray .env or .git in a layer is a leak that outlives the
+# container.
+.git
+.github
+.venv
+**/.venv
+.env
+.env.*
+!.env.example
+**/__pycache__
+**/*.pyc
+.mypy_cache
+.pytest_cache
+.ruff_cache
+**/tests
+docs
+deploy/helm
+*.md
+!README.md
