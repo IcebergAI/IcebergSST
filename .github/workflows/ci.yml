@@ -6,6 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Nothing in this workflow writes back to the repository; least privilege keeps
+# a compromised build step (or a dependency it pulls in) from being able to.
+permissions:
+  contents: read
+
 jobs:
   checks:
     name: lint + type + test (py${{ matrix.python-version }})

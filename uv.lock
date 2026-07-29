@@ -197,12 +197,16 @@ source = { editable = "apps/api" }
 dependencies = [
     { name = "fastapi" },
     { name = "iceberg-core" },
+    { name = "prometheus-client" },
+    { name = "structlog" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.139.2" },
     { name = "iceberg-core", editable = "packages/core" },
+    { name = "prometheus-client", specifier = ">=0.25.0" },
+    { name = "structlog", specifier = ">=26.1.0" },
 ]
 
 [[package]]
@@ -251,6 +255,8 @@ dependencies = [
     { name = "iceberg-connectors" },
     { name = "iceberg-core" },
     { name = "iceberg-detect" },
+    { name = "prometheus-client" },
+    { name = "structlog" },
 ]
 
 [package.metadata]
@@ -259,6 +265,8 @@ requires-dist = [
     { name = "iceberg-connectors", editable = "packages/connectors" },
     { name = "iceberg-core", editable = "packages/core" },
     { name = "iceberg-detect", editable = "packages/detect" },
+    { name = "prometheus-client", specifier = ">=0.25.0" },
+    { name = "structlog", specifier = ">=26.1.0" },
 ]
 
 [[package]]
