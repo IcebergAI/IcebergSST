@@ -28,7 +28,9 @@ dev = [
     "mypy>=2.3.0",
     "pre-commit>=4.6.1",
     "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
     "ruff>=0.15.22",
+    "testcontainers[postgres]>=4.15.0",
 ]
 
 [tool.ruff]
@@ -51,6 +53,7 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 "**/tests/**" = ["S101"] # asserts are the point of tests
+"conftest.py" = ["S101"] # shared fixtures assert their own invariants
 
 [tool.mypy]
 strict = true
@@ -63,3 +66,14 @@ pretty = true
 testpaths = ["apps", "packages"]
 addopts = "-q --strict-markers"
 filterwarnings = ["error"]
+asyncio_mode = "auto"
+# Must be set explicitly: leaving it unset emits a DeprecationWarning, and
+# filterwarnings = ["error"] turns that into a hard suite failure.
+asyncio_default_fixture_loop_scope = "session"
+# Tests must share the fixtures' loop: a function-scoped loop would close while
+# the session-scoped engine's asyncpg connections are still bound to it, and the
+# resulting ResourceWarning is fatal under filterwarnings = ["error"].
+asyncio_default_test_loop_scope = "session"
+markers = [
+    "postgres: needs the session-scoped Postgres container (requires Docker)",
+]
