@@ -77,6 +77,17 @@ class Finding(TimestampedModel, table=True):
     )
     notes: str | None = Field(default=None)
 
+    #: Set when a suppression covered this finding at ingest (ADR 0008). Suppressed
+    #: findings are **recorded, not discarded** — "why is this not in my list?" has
+    #: an answer, and an expiring suppression brings the finding back rather than
+    #: losing its history. A finding is *active* when it is ``open`` and this is null.
+    suppressed_at: datetime | None = Field(default=None, sa_type=utc_timestamp_type())
+    suppressed_by_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="suppression.id",
+        ondelete="SET NULL",
+    )
+
     first_seen_scan_id: uuid.UUID = Field(foreign_key="scan.id", ondelete="CASCADE")
     last_seen_scan_id: uuid.UUID = Field(foreign_key="scan.id", ondelete="CASCADE")
 

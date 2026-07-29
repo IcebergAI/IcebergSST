@@ -80,6 +80,11 @@ class ApiSettings(SecretStoreSettings):
     #: a session anyone on the path can steal.
     cookie_secure: bool = True
 
+    # ─── Background maintenance (#33, #35) ────────────────────────────────────
+    #: The scheduler tick and lease reclaim run in-process on this cadence. Every
+    #: replica runs them; a Postgres advisory lock decides which one acts.
+    background_interval_seconds: int = Field(default=60, ge=5)
+
     #: OIDC-only auth needs a seed administrator (docs/security.md § Bootstrap).
     #: Matched at user creation, so a later demotion is not undone by re-login.
     bootstrap_admin_subject: str | None = None
