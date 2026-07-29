@@ -69,7 +69,8 @@ authoritative).
 - `status`: enum `queued | leased | running | completed | failed | cancelled`
 - `engine_id` (FK, nullable), `lease_expires_at`, `heartbeat_at`, `attempts`
 - `started_at`, `finished_at`, `error`
-- Results submission carries an idempotency key (`task id + attempt`); replays are no-ops.
+- `result_key` — the idempotency key (`<task id>:<attempt>`) of the accepted submission. A retry
+  presenting the same key replays as a no-op; a different key against a finished task is a conflict.
 
 ## Findings & triage
 
@@ -86,6 +87,9 @@ authoritative).
 - `state`: enum `open | false_positive | accepted_risk | resolved`
 - `resolution`: enum `null | manual | auto` (auto = disappeared on re-scan)
 - `assignee_id` (FK User, nullable), `notes`
+- `suppressed_at`, `suppressed_by_id` (FK Suppression, nullable) — a suppressed finding is
+  **recorded, not discarded** (ADR 0008). A finding is *active* when it is `open` and
+  `suppressed_at` is null; an expiring suppression returns it to the active view.
 - `first_seen_scan_id`, `last_seen_scan_id`, `created_at`, `updated_at`
 
 ### AuditEvent

@@ -27,7 +27,8 @@ the next request rather than at cookie expiry.
   finding needs to see where it came from.
 - `POST   /sources/{id}/test` → connectivity check using the stored credential. **Admin-only**: it
   makes an outbound request to an operator-supplied URL with a real credential.
-- `POST   /sources/{id}/scan` → trigger an on-demand scan *(M1, #34)*
+- `POST   /sources/{id}/scan` → trigger an on-demand scan (analyst+). `202`, not `201`: the scan
+  exists but nothing has been scanned until an engine leases its discovery task.
 
 The `connection` blob is validated against a per-type model on write — a bad `base_url` fails when
 the source is saved, not hours later inside a scan task. Post-MVP types (`jira`, `smb`) are refused
@@ -43,9 +44,12 @@ whether one exists.
   beat missed.
 
 ## Scans
-- `GET  /scans` (filter by source/status) · `GET /scans/{id}`
-- `GET  /scans/{id}/tasks`
-- `POST /scans/{id}/cancel`
+- `GET  /scans` (paginated; `?source_id=`, `?status=`, `?active=`) · `GET /scans/{id}`
+- `GET  /scans/{id}/tasks` — task states for the live-status view. **Specs are omitted**: they name
+  the resources being fetched.
+- `POST /scans/{id}/cancel` (analyst+) — marks the scan and its unfinished tasks. Queued tasks can
+  then never be leased; a running engine finds out at its next heartbeat. Cancelling a finished scan
+  is a `409`, and a cancelled scan never reconciles.
 
 ## Findings
 - `GET   /findings` (filter: source, state, rule, severity, assignee; paginated)
@@ -63,14 +67,27 @@ whether one exists.
 
 ## Engine-facing (per-engine token auth)
 These are the **only** routes that accept results. Lease semantics are defined in ADR 0009.
-- `POST /engines/register` → obtain/rotate engine credential (first token minted at deploy
-  time via CLI/Job — see `docs/security.md` § Bootstrap)
-- `POST /engines/{id}/heartbeat`
-- `POST /scan-tasks/{id}/lease` → claim a task; response carries the task spec, task-scoped
-  source credential, fingerprint pepper, and applicable suppressions
-- `POST /scan-tasks/{id}/results` → submit redacted findings + task completion; requires an
-  **idempotency key** (task id + attempt) so retries never duplicate findings
-- Discovery tasks return `TaskSpec`s through the same results route (two-phase scans, ADR 0009)
+Authentication is `Authorization: Bearer <engine token>`; session cookies are ignored here, and an
+engine token is ignored everywhere else.
+
+- `POST /engines/register` → mint or **rotate** an engine credential. **Admin session**, not an
+  engine token: an engine that could enrol itself would let anyone who reaches the API join the
+  fleet. The token is returned once — only its SHA-256 hash is stored. The first one is minted at
+  deploy time with `python -m iceberg_api mint-engine-token --name engine-1`
+  (`docs/security.md` § Bootstrap).
+- `GET  /engines` → fleet status for the engine-health view (admin). Never any token material.
+- `POST /engines/{id}/heartbeat` → extends the leases this engine holds and **returns any of its
+  tasks that have been cancelled**, which is the only way to tell a working engine to stop. The path
+  id must match the token.
+- `POST /scan-tasks/{id}/lease` → claim a task. `409` for every refusal (already leased, finished,
+  cancelled, unknown) because the engine's response to all of them is to drop the message. The
+  response carries the spec, the task-scoped source credential, the fingerprint pepper, and the
+  applicable suppressions.
+- `POST /scan-tasks/{id}/results` → submit redacted findings + task completion. Requires a live
+  lease held by this engine and an **idempotency key** (`<task id>:<attempt>`): the same key replays
+  as a no-op, a different key against a finished task is a `409`. An engine may report `completed`
+  or `failed` only — cancellation is the API's decision.
+- Discovery tasks return `TaskSpec`s through the same results route (two-phase scans, ADR 0009).
 
 ## Ops
 - `GET /healthz` · `GET /metrics` (Prometheus)

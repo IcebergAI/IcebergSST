@@ -19,8 +19,11 @@ from iceberg_api.auth.dependencies import get_db_session, get_secret_store, get_
 from iceberg_api.auth.oidc import OidcClient, OidcConfig
 from iceberg_api.auth.routes import get_oidc_client
 from iceberg_api.auth.session import SESSION_COOKIE, issue_session
+from iceberg_api.dispatch import get_dispatcher
+from iceberg_api.engines.auth import mint_token
 from iceberg_core.config import ApiSettings
 from iceberg_core.enums import UserRole
+from iceberg_core.models import Engine as CoreEngine
 from iceberg_core.models import User
 from iceberg_core.secrets import EnvKeyBackend
 from oidc_provider import BOOTSTRAP_SUBJECT, CLIENT_ID, ISSUER, FakeProvider
@@ -69,9 +72,11 @@ def app_fixture(
     db_engine: Engine,
     session: Session,
     secret_store: EnvKeyBackend,
+    dispatcher: "RecordingDispatcher",
 ) -> FastAPI:
     """The real app, with settings, the database, and the provider overridden."""
-    app = create_app()
+    # background=False: the tests drive the scheduler and reclaim directly.
+    app = create_app(api_settings, background=False)
 
     def _settings() -> ApiSettings:
         return api_settings
@@ -98,7 +103,28 @@ def app_fixture(
     app.dependency_overrides[get_secret_store] = lambda: secret_store
     app.dependency_overrides[get_db_session] = _db
     app.dependency_overrides[get_oidc_client] = _oidc
+    app.dependency_overrides[get_dispatcher] = lambda: dispatcher
     return app
+
+
+class RecordingDispatcher:
+    """Records dispatched task ids instead of talking to Redis.
+
+    Tests assert on *what was enqueued* — that a launch dispatches its discovery
+    task, that reclaim re-dispatches — which is the API's whole side of the broker
+    contract (ADR 0009).
+    """
+
+    def __init__(self) -> None:
+        self.enqueued: list[uuid.UUID] = []
+
+    def enqueue(self, task_id: uuid.UUID) -> None:
+        self.enqueued.append(task_id)
+
+
+@pytest.fixture(name="dispatcher")
+def dispatcher_fixture() -> RecordingDispatcher:
+    return RecordingDispatcher()
 
 
 @pytest.fixture(name="client")
@@ -154,3 +180,13 @@ def login_as_fixture(
 @pytest.fixture(name="api")
 def api_prefix_fixture() -> str:
     return API_PREFIX
+
+
+@pytest.fixture(name="engine_credential")
+def engine_credential_fixture(session: Session) -> tuple[CoreEngine, dict[str, str]]:
+    """A registered engine and the Authorization header that authenticates it."""
+    engine = CoreEngine(name=f"engine-{uuid.uuid4().hex[:6]}", token_hash="", version="0.1.0")
+    minted = mint_token(engine)
+    session.add(minted.engine)
+    session.commit()
+    return minted.engine, {"Authorization": f"Bearer {minted.token}"}

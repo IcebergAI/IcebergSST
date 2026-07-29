@@ -117,6 +117,12 @@ class ScanTask(TimestampedModel, table=True):
     lease_expires_at: datetime | None = Field(default=None, sa_type=utc_timestamp_type())
     heartbeat_at: datetime | None = Field(default=None, sa_type=utc_timestamp_type())
     attempts: int = Field(default=0)
+
+    #: The idempotency key of the accepted result submission (``<task id>:<attempt>``).
+    #: An engine that retries after an API error presents the same key and the
+    #: replay is a no-op instead of a second set of findings (ADR 0009 §2).
+    result_key: str | None = Field(default=None, max_length=128)
+
     started_at: datetime | None = Field(default=None, sa_type=utc_timestamp_type())
     finished_at: datetime | None = Field(default=None, sa_type=utc_timestamp_type())
     error: str | None = Field(default=None)
