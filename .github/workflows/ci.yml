@@ -41,6 +41,20 @@ jobs:
       - name: Test
         run: make test
 
+  images:
+    name: build + verify role images
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_BUILDKIT: "1"
+    steps:
+      - uses: actions/checkout@v5
+
+      # Builds both role images and asserts they run their entrypoints, plus
+      # the ADR 0002 invariant that the engine image carries no database
+      # client, ORM, or credentials.
+      - name: Build and verify api + engine images
+        run: make images-verify
+
   secret-scan:
     name: secret scan (gitleaks)
     runs-on: ubuntu-latest

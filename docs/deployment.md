@@ -4,11 +4,27 @@ Two packaged targets: **docker-compose** for development/small installs and a **
 production.
 
 ## Roles / images
-Built from the shared monorepo:
-- **api** — FastAPI control plane (also serves the HTMX UI). Owns Postgres.
-- **engine** — Dramatiq worker (connectors + detection). Stateless; no DB credentials.
+Built from the shared monorepo — `deploy/docker/{api,engine}.Dockerfile`, both multi-stage and
+both built from the repository root:
+
+| Image | Dockerfile | Entrypoint | Port |
+|-------|-----------|------------|------|
+| **api** — FastAPI control plane (also serves the HTMX UI). Owns Postgres. | `deploy/docker/api.Dockerfile` | `uvicorn iceberg_api.app:create_app --factory` | 8000 |
+| **engine** — Dramatiq worker (connectors + detection). Stateless; no DB credentials. | `deploy/docker/engine.Dockerfile` | `dramatiq iceberg_engine.worker:broker --processes 1` | 9191 (metrics) |
 
 Plus **PostgreSQL** and **Redis**.
+
+Each image installs only its own workspace member (`uv sync --package …`), which is what keeps
+the api's dependency graph — and any future database driver — out of the engine image. Both run
+as an unprivileged uid and carry a `HEALTHCHECK`.
+
+The engine runs **one worker process per container**: it binds a single Prometheus endpoint, so
+throughput is scaled by adding replicas (`--scale engine=N`, or the Helm HPA), not by raising
+`--processes`.
+
+`make images` builds both. `make images-verify` builds them and then asserts the properties that
+matter — entrypoints serve, both run non-root, and the engine image contains no database client,
+ORM, migration tool, or DB environment variables (ADR 0002). CI runs the same check on every PR.
 
 ## Development — docker-compose
 `deploy/compose/docker-compose.yml` brings up:

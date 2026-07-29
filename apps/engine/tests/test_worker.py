@@ -6,7 +6,37 @@ import structlog
 from dramatiq.brokers.stub import StubBroker
 from dramatiq.worker import Worker
 from iceberg_core.logging import configure_logging
-from iceberg_engine.worker import build_broker
+from iceberg_engine import worker as worker_module
+from iceberg_engine.worker import (
+    CorrelationMiddleware,
+    ObservabilityMiddleware,
+    build_broker,
+)
+
+
+def has_middleware(broker: dramatiq.Broker, kind: type[dramatiq.Middleware]) -> bool:
+    return any(isinstance(middleware, kind) for middleware in broker.middleware)
+
+
+def test_module_exposes_the_broker_the_image_entrypoint_names() -> None:
+    """deploy/docker/engine.Dockerfile runs ``dramatiq iceberg_engine.worker:broker``.
+
+    Renaming this attribute breaks the container entrypoint and nothing else,
+    so pin the name here rather than discover it from a crash-looping pod.
+    """
+    assert isinstance(worker_module.broker, dramatiq.Broker)
+
+
+def test_deployed_broker_carries_observability_middleware() -> None:
+    assert has_middleware(worker_module.broker, ObservabilityMiddleware)
+
+
+def test_build_broker_leaves_observability_to_the_deployed_broker() -> None:
+    """Tests build their own broker; booting one must not bind a port or
+    reconfigure logging out from under them."""
+    broker = build_broker()
+    assert has_middleware(broker, CorrelationMiddleware)
+    assert not has_middleware(broker, ObservabilityMiddleware)
 
 
 def test_build_broker_defaults_to_stub() -> None:

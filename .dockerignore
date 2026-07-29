@@ -1,0 +1,19 @@
+# Keep the build context small and free of anything that must not reach an
+# image layer. .env in particular: the secret-store master key lives there.
+.git
+.github
+.venv
+**/.venv
+.env
+.env.*
+!.env.example
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+docs
+web
+deploy/helm
+*.md
+!README.md
