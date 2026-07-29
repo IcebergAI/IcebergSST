@@ -88,8 +88,16 @@ authoritative).
 - `assignee_id` (FK User, nullable), `notes`
 - `first_seen_scan_id`, `last_seen_scan_id`, `created_at`, `updated_at`
 
+### AuditEvent
+Append-only audit trail for administrative actions — everything `FindingEvent` does not cover,
+starting with role changes (#69). "Who made this person an admin" must always have an answer.
+- `id`, `actor_id` (FK User, nullable for system actions), `action` (e.g. `user.role_changed`)
+- `target_type`, `target_id`, `from_value`, `to_value`, `detail`: JSON, `created_at`
+- `action` is a plain string, not an enum column: the vocabulary grows with every feature that
+  records something, and a checked enum would make each addition a migration.
+
 ### FindingEvent
-Append-only audit trail.
+Append-only audit trail for one finding.
 - `id`, `finding_id` (FK), `actor_id` (FK User, nullable for system)
 - `kind`: enum `state_change | assign | comment | suppressed | reopened`
 - `from_value`, `to_value`, `comment`, `created_at`

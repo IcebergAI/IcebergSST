@@ -227,14 +227,18 @@ def test_init_env_fills_every_placeholder_with_a_working_value(tmp_path: Path) -
         line.split("=", 1) for line in rendered.splitlines() if "=" in line and line[0] != "#"
     )
 
-    assert "CHANGE_ME" not in rendered.replace("# Values marked CHANGE_ME", "")
     assert set(filled) == {
         "POSTGRES_PASSWORD",
         "REDIS_PASSWORD",
         "ICEBERG_ENGINE_TOKEN",
         "ICEBERG_MASTER_KEY",
+        "ICEBERG_SESSION_SECRET",
         "ICEBERG_FINGERPRINT_PEPPER_REF",
     }
+    # What is left is what only the operator can supply — the OIDC client secret
+    # is issued by their identity provider, not generated here.
+    outstanding = {name for name, value in values.items() if value == "CHANGE_ME"}
+    assert outstanding == {"ICEBERG_OIDC_CLIENT_SECRET"}
 
     store = EnvKeyBackend(
         decode_master_key(values["ICEBERG_MASTER_KEY"]),
