@@ -5,10 +5,26 @@ Separate from the SQLModel tables on purpose: the OpenAPI schema is the contract
 """
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Annotated
 
 from iceberg_core.enums import UserRole
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+
+
+def _assume_utc(value: datetime) -> datetime:
+    """Attach UTC to a naive timestamp.
+
+    Every timestamp in this system is stored as UTC (`TIMESTAMP WITH TIME ZONE`),
+    but SQLite hands values back without the offset. Normalising here means the API
+    contract is "always offset-aware" regardless of which database is underneath,
+    rather than something clients have to infer from the deployment.
+    """
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+#: Use for every timestamp in a response model.
+UtcDatetime = Annotated[datetime, AfterValidator(_assume_utc)]
 
 
 class UserRead(BaseModel):
@@ -22,8 +38,8 @@ class UserRead(BaseModel):
     display_name: str
     role: UserRole
     disabled: bool
-    created_at: datetime
-    last_login_at: datetime | None
+    created_at: UtcDatetime
+    last_login_at: UtcDatetime | None
 
 
 class MeRead(BaseModel):

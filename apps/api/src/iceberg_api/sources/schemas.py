@@ -11,7 +11,6 @@ Two rules shape these:
 """
 
 import uuid
-from datetime import datetime
 from typing import Any
 
 from croniter import croniter
@@ -24,6 +23,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+from iceberg_api.schemas import UtcDatetime
 
 #: MVP scope (ARCHITECTURE.md §1). Jira and file shares are post-MVP connectors,
 #: and a source nothing can scan is worse than a clear refusal.
@@ -121,8 +122,8 @@ class SourceRead(BaseModel):
     enabled: bool
     #: Whether a credential is stored. The ref itself is deliberately not exposed.
     has_credential: bool
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
 
 
 class ConnectivityResult(BaseModel):
@@ -177,7 +178,7 @@ class ScheduleRead(BaseModel):
     source_id: uuid.UUID
     cron: str
     enabled: bool
-    next_run_at: datetime | None
-    last_run_at: datetime | None
-    created_at: datetime
-    updated_at: datetime
+    next_run_at: UtcDatetime | None
+    last_run_at: UtcDatetime | None
+    created_at: UtcDatetime
+    updated_at: UtcDatetime

@@ -16,6 +16,7 @@ import pytest
 from sqlalchemy import Engine, StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
+from iceberg_core.db import enforce_sqlite_foreign_keys
 from iceberg_core.secrets import EnvKeyBackend
 
 
@@ -31,6 +32,9 @@ def db_engine_fixture() -> Iterator[Engine]:
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+    # Without this, ON DELETE CASCADE does nothing here and a cascade bug only
+    # shows up against Postgres.
+    enforce_sqlite_foreign_keys(engine)
     SQLModel.metadata.create_all(engine)
     try:
         yield engine
