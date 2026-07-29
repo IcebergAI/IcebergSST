@@ -40,4 +40,22 @@ analysts silence known-benign matches without a code change.
 
 ## Redaction
 Each rule declares how its matches are masked for the stored snippet. The engine redacts **before**
-transmitting results — plaintext never leaves the worker (ADR 0004).
+transmitting results — plaintext never leaves the worker (ADR 0004). Implemented in
+`iceberg_core.redaction`:
+
+| Strategy | Example output |
+|---|---|
+| `full` (default) | `[20 chars redacted]` |
+| `keep_prefix` | `AKIA…[16 chars redacted]` |
+| `keep_suffix` | `[16 chars redacted]…MPLE` |
+
+`keep` is a ceiling, not a promise. Nothing is revealed from a secret shorter than
+`min_length_to_reveal` (16 by default), and never more than a third of a secret — four characters
+of an AWS key id are a vendor tag, four characters of a short password are a head start. An unknown
+strategy name raises at load time rather than falling back to something more revealing.
+
+The stored snippet is bounded context (48 chars either side by default, 300 chars hard ceiling)
+collapsed to a single line, with **every** secret in the window masked — the matched one, its
+neighbours, and any unmatched literal repeat of the same value elsewhere in the window. As a last
+defence the snippet is re-checked for the plaintext before it is returned; if it is still there the
+engine raises rather than transmits.
