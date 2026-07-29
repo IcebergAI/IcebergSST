@@ -46,9 +46,30 @@ Webhook channels send redacted snippets + resource locations to arbitrary URLs �
 egress channel. Channel configuration is **admin-only**, the payload is documented, and adding
 a channel is audit-logged.
 
+## Authentication in practice (ADR 0005)
+- **Flow:** authorization code + PKCE. `state` lives in a short-lived signed cookie (blocks a forced
+  login); `nonce` is checked inside the ID token (blocks replaying a token minted for another
+  session); the ID token is verified against the provider's JWKS for signature, issuer, audience,
+  and expiry — never merely decoded.
+- **Sessions:** signed, expiring `HttpOnly` cookies (`SameSite=Lax`, `Secure` unless explicitly
+  disabled for local HTTP). They carry the user id and a CSRF token and **no role**, so revocation
+  is immediate. `ICEBERG_SESSION_SECRET` must be at least 32 bytes (RFC 7518 §3.2) or the API
+  refuses to sign; rotating it logs everyone out, which is the intended blast radius.
+- **CSRF:** the authoritative token is inside the session cookie, not a second cookie a sibling
+  subdomain could set, and is echoed via `X-CSRF-Token` or a `csrf_token` form field on every
+  mutating route.
+- **Least privilege by default:** a first-time login lands as `viewer`. An account exists because
+  the IdP knows the person, not because anyone decided what they may do.
+- **Roles are ours, not the IdP's:** a returning user's role comes from the database, so no claim in
+  a token can promote anyone.
+
 ## Bootstrap
 - **First admin:** OIDC-only auth needs a seed — an env-configured OIDC subject (or email) is
-  granted `admin` on first login. All later role changes happen in-app and are audited.
+  granted `admin` on first login. Matched **only at user creation**, so a bootstrap admin who is
+  deliberately demoted is not re-promoted by logging in again. All later role changes happen in-app
+  and are audited in `audit_event`.
+- **No self-service role changes:** nobody may change their own role or disable their own account,
+  admins included. That blocks self-promotion and removes any path to locking the last admin out.
 - **First engine token:** minted at deploy time via a CLI/management command (compose) or a
   provisioning Job (Helm) — never a default credential baked into an image.
 

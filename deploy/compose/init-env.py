@@ -39,6 +39,8 @@ GENERATORS: dict[str, Callable[[], str]] = {
     "REDIS_PASSWORD": _password,
     "ICEBERG_ENGINE_TOKEN": _password,
     "ICEBERG_MASTER_KEY": generate_master_key,
+    # Signs session cookies; needs 32+ bytes for HS256 (RFC 7518 §3.2).
+    "ICEBERG_SESSION_SECRET": _password,
 }
 PEPPER_VARIABLE = "ICEBERG_FINGERPRINT_PEPPER_REF"
 

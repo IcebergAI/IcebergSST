@@ -5,10 +5,21 @@ is just another client of these routes. Routes are grouped into a **human-facing
 RBAC) and an **engine-facing API** (per-engine token; the only ingress for results).
 
 ## Auth
-- `GET  /auth/login` → redirect to OIDC provider
-- `GET  /auth/callback` → establish session
-- `POST /auth/logout`
-- `GET  /auth/me` → current user + role
+- `GET  /auth/login` → 307 to the OIDC provider (authorization code + PKCE). Optional `?next=`,
+  reduced to a local path so it cannot become an open redirect.
+- `GET  /auth/callback` → verifies `state`, the ID token (signature/issuer/audience/expiry), and the
+  `nonce`; provisions the user on first login; sets the session cookie; 303 to `next`.
+- `POST /auth/logout` → clears the session. A POST, and CSRF-protected.
+- `GET  /auth/me` → current user + role + **this session's CSRF token** (how the UI obtains one).
+
+Sessions are signed, expiring `HttpOnly`/`SameSite=Lax` cookies carrying the user id and CSRF
+token — never the role. Every request re-loads the user, so a demotion or a disable takes effect on
+the next request rather than at cookie expiry.
+
+## Users (admin)
+- `GET   /users` (paginated) — list users
+- `PATCH /users/{id}` — assign `role`, set `disabled`. Every change writes an `AuditEvent`; nobody
+  may modify their own account (see `docs/security.md` § Bootstrap).
 
 ## Sources
 - `GET    /sources` · `POST /sources` · `GET/PATCH/DELETE /sources/{id}`
@@ -53,10 +64,15 @@ These are the **only** routes that accept results. Lease semantics are defined i
 
 ## Conventions
 - **Versioned paths:** all routes live under `/api/v1/…` from day one (paths above omit the
-  prefix for brevity).
+  prefix for brevity). `/healthz` and `/metrics` stay unversioned — operators and scrapers are not
+  API clients.
 - RBAC enforced by a dependency on every human route (`admin`/`analyst`/`viewer`).
 - CSRF token required on every session-authenticated mutating route (HTMX posts include it).
 - Mutations that change finding state always write a `FindingEvent` for audit.
 - Engine routes reject anything but a valid engine token; human sessions cannot post results and
   engine tokens cannot read findings.
-- Pagination via `limit`/`cursor`; list endpoints return stable ordering.
+- Pagination via `limit`/`cursor`; list endpoints return stable ordering. Cursors are **keyset**
+  (the last row's `created_at` + `id`), because offsets skip and repeat rows when the underlying set
+  shifts between requests. A malformed cursor is a `400`, never a wrong page.
+- **401 vs 403:** unauthenticated requests get `401`; authenticated requests with the wrong role, or
+  a missing CSRF token, get `403`. Failure messages never say *which* check failed.
