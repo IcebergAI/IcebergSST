@@ -6,6 +6,8 @@ requires-python = ">=3.13"
 dependencies = [
     # Only the api role owns the schema and runs migrations (docs/deployment.md).
     "alembic>=1.18.5",
+    # Cron expression parsing for the schedule model and scheduler tick.
+    "croniter>=6.0.0",
     "fastapi>=0.139.2",
     "iceberg-core",
     "psycopg[binary]>=3.2.12",

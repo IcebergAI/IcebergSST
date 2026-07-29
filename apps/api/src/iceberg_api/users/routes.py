@@ -26,6 +26,7 @@ from iceberg_core.models import (
 )
 from sqlmodel import Session, select
 
+from iceberg_api import audit
 from iceberg_api.auth.dependencies import CsrfProtected, SessionDep
 from iceberg_api.auth.rbac import AdminUser
 from iceberg_api.pagination import (
@@ -95,72 +96,36 @@ async def update_user(
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "user not found")
 
-    events: list[AuditEvent] = []
-
     if changes.role is not None and changes.role is not user.role:
-        events.append(
-            _audit(
-                admin.id,
-                AUDIT_USER_ROLE_CHANGED,
-                user.id,
-                from_value=user.role.value,
-                to_value=changes.role.value,
-            )
+        audit.record(
+            db,
+            actor_id=admin.id,
+            action=AUDIT_USER_ROLE_CHANGED,
+            target_type=AUDIT_TARGET_USER,
+            target_id=user.id,
+            from_value=user.role.value,
+            to_value=changes.role.value,
         )
         user.role = changes.role
 
     if changes.disabled is not None and changes.disabled != user.disabled:
-        events.append(
-            _audit(
-                admin.id,
-                AUDIT_USER_DISABLED if changes.disabled else AUDIT_USER_ENABLED,
-                user.id,
-                from_value=str(user.disabled).lower(),
-                to_value=str(changes.disabled).lower(),
-            )
+        audit.record(
+            db,
+            actor_id=admin.id,
+            action=AUDIT_USER_DISABLED if changes.disabled else AUDIT_USER_ENABLED,
+            target_type=AUDIT_TARGET_USER,
+            target_id=user.id,
+            from_value=str(user.disabled).lower(),
+            to_value=str(changes.disabled).lower(),
         )
         user.disabled = changes.disabled
 
-    for event in events:
-        db.add(event)
-        logger.info(
-            "user_administered",
-            action=event.action,
-            actor_id=str(admin.id),
-            target_user_id=str(user.id),
-            from_value=event.from_value,
-            to_value=event.to_value,
-        )
     db.add(user)
     db.commit()
     db.refresh(user)
     return UserRead.model_validate(user)
 
 
-def _audit(
-    actor_id: uuid.UUID,
-    action: str,
-    target_id: uuid.UUID,
-    *,
-    from_value: str,
-    to_value: str,
-) -> AuditEvent:
-    return AuditEvent(
-        actor_id=actor_id,
-        action=action,
-        target_type=AUDIT_TARGET_USER,
-        target_id=target_id,
-        from_value=from_value,
-        to_value=to_value,
-    )
-
-
 def audit_events_for(db: Session, target_id: uuid.UUID) -> list[AuditEvent]:
     """Every recorded action against one user, oldest first. Used by tests and #64."""
-    statement = (
-        select(AuditEvent)
-        .where(AuditEvent.target_type == AUDIT_TARGET_USER)
-        .where(AuditEvent.target_id == target_id)
-        .order_by(AuditEvent.created_at)  # type: ignore[arg-type]
-    )
-    return list(db.exec(statement))
+    return audit.events_for(db, AUDIT_TARGET_USER, target_id)

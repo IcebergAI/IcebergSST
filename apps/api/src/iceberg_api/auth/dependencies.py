@@ -15,6 +15,7 @@ from fastapi import Depends, HTTPException, Request, status
 from iceberg_core.config import ApiSettings, get_api_settings
 from iceberg_core.db import session_dependency
 from iceberg_core.models import User
+from iceberg_core.secrets import SecretStore, build_secret_store
 from sqlmodel import Session
 
 from iceberg_api.auth import csrf
@@ -37,8 +38,14 @@ def get_db_session() -> Iterator[Session]:
     yield from session_dependency()
 
 
+def get_secret_store(settings: "SettingsDep") -> SecretStore:
+    """The secret store as a dependency (ADR 0007), overridable in tests."""
+    return build_secret_store(settings)
+
+
 SettingsDep = Annotated[ApiSettings, Depends(get_settings)]
 SessionDep = Annotated[Session, Depends(get_db_session)]
+SecretStoreDep = Annotated[SecretStore, Depends(get_secret_store)]
 
 
 def current_session(request: Request, settings: SettingsDep) -> SessionData:
