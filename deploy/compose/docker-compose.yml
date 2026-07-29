@@ -1,0 +1,107 @@
+# The development stack: api + engine + postgres + redis on one host.
+#
+#   make up            # build, start, wait for health, migrate
+#   make scale N=3     # more engine replicas
+#   make down          # stop and remove
+#
+# Driven by .env at the repository root (see .env.example). Every secret here is
+# a ${VARIABLE} reference — nothing sensitive is committed, and a missing value
+# fails the command with a message instead of starting a half-configured stack.
+
+name: icebergsst
+
+x-iceberg-common: &iceberg-common
+  restart: unless-stopped
+  environment: &iceberg-common-env
+    ICEBERG_ENVIRONMENT: ${ICEBERG_ENVIRONMENT:-dev}
+    ICEBERG_LOG_LEVEL: ${ICEBERG_LOG_LEVEL:-INFO}
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-iceberg}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-iceberg}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    # Nothing outside the stack needs Postgres. Uncomment for a local psql.
+    # ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    # Auth even in dev, because the broker is a shared trust surface
+    # (docs/security.md, boundary 3). --save "" disables persistence: broker
+    # messages are id-only hints and the API is authoritative, so there is
+    # nothing here worth surviving a restart (ADR 0009).
+    command:
+      [
+        "redis-server",
+        "--requirepass",
+        "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}",
+        "--save",
+        "",
+        "--appendonly",
+        "no",
+      ]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $${REDIS_PASSWORD} ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    restart: unless-stopped
+
+  api:
+    <<: *iceberg-common
+    build:
+      context: ../..
+      dockerfile: deploy/docker/api.Dockerfile
+    environment:
+      <<: *iceberg-common-env
+      # The api role is the only one given a database URL (ADR 0002).
+      ICEBERG_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-iceberg}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-iceberg}
+      ICEBERG_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      ICEBERG_SECRET_STORE_BACKEND: ${ICEBERG_SECRET_STORE_BACKEND:-env_key}
+      ICEBERG_MASTER_KEY: ${ICEBERG_MASTER_KEY:?generate one with `make secrets`}
+      ICEBERG_FINGERPRINT_PEPPER_REF: ${ICEBERG_FINGERPRINT_PEPPER_REF:?generate one with `make secrets`}
+    ports:
+      - "${ICEBERG_API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  engine:
+    <<: *iceberg-common
+    build:
+      context: ../..
+      dockerfile: deploy/docker/engine.Dockerfile
+    # Deliberately absent, and asserted by tests/test_deploy_invariants.py:
+    #   * any DATABASE/POSTGRES variable — engines reach the DB through the API
+    #     or not at all (ADR 0002);
+    #   * ICEBERG_MASTER_KEY — the fingerprint pepper arrives per task in the
+    #     lease response, never as engine configuration (ADR 0007/0009);
+    #   * a published port and a container_name — either one breaks
+    #     `--scale engine=N`.
+    environment:
+      <<: *iceberg-common-env
+      ICEBERG_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      ICEBERG_API_BASE_URL: http://api:8000
+      ICEBERG_ENGINE_TOKEN: ${ICEBERG_ENGINE_TOKEN:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

@@ -8,11 +8,16 @@ credential-isolation failure that no unit test would notice.
 
 import re
 from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCKER_DIR = REPO_ROOT / "deploy" / "docker"
 API_DOCKERFILE = DOCKER_DIR / "api.Dockerfile"
 ENGINE_DOCKERFILE = DOCKER_DIR / "engine.Dockerfile"
+COMPOSE_FILE = REPO_ROOT / "deploy" / "compose" / "docker-compose.yml"
 
 #: Variable names that would give a process a route to Postgres.
 DB_VARIABLE_RE = re.compile(r"\b(?:\w*DATABASE\w*|POSTGRES\w*|PG(?:HOST|USER|PASSWORD|DATABASE))\b")
@@ -81,3 +86,92 @@ def test_only_the_api_image_owns_migrations() -> None:
     """Schema ownership is the api role's alone (docs/deployment.md § Migrations)."""
     assert "alembic" not in ENGINE_DOCKERFILE.read_text()
     assert "--package iceberg-api" in API_DOCKERFILE.read_text()
+
+
+@pytest.fixture(name="compose", scope="module")
+def compose_fixture() -> dict[str, Any]:
+    loaded: dict[str, Any] = yaml.safe_load(COMPOSE_FILE.read_text())
+    return loaded
+
+
+def _service(compose: dict[str, Any], name: str) -> dict[str, Any]:
+    service: dict[str, Any] = compose["services"][name]
+    return service
+
+
+def _environment(service: dict[str, Any]) -> dict[str, str]:
+    """Service environment as a mapping, with the shared anchor merged in.
+
+    PyYAML expands ``<<`` merge keys for mappings, so an inherited variable is
+    visible here exactly as Compose would see it.
+    """
+    environment = service.get("environment", {})
+    if isinstance(environment, list):
+        pairs = [item.split("=", 1) for item in environment]
+        return {key: value for key, *rest in pairs for value in (rest or [""])}
+    return {str(key): str(value) for key, value in environment.items()}
+
+
+def test_the_stack_is_the_four_documented_services(compose: dict[str, Any]) -> None:
+    assert set(compose["services"]) == {"api", "engine", "postgres", "redis"}
+
+
+def test_only_the_api_service_is_given_a_database(compose: dict[str, Any]) -> None:
+    """The invariant, at the deployment layer (ADR 0002)."""
+    engine_env = _environment(_service(compose, "engine"))
+
+    offenders = sorted(name for name in engine_env if DB_VARIABLE_RE.search(name))
+
+    assert offenders == [], f"engine service is configured for the database: {offenders}"
+    assert "ICEBERG_DATABASE_URL" in _environment(_service(compose, "api"))
+
+
+def test_the_engine_service_is_not_wired_to_postgres_at_all(compose: dict[str, Any]) -> None:
+    assert "postgres" not in _service(compose, "engine").get("depends_on", {})
+
+
+def test_the_engine_never_receives_the_master_key(compose: dict[str, Any]) -> None:
+    """The pepper arrives per task in the lease response, not as config (ADR 0007)."""
+    engine_env = _environment(_service(compose, "engine"))
+
+    assert "ICEBERG_MASTER_KEY" not in engine_env
+    assert "ICEBERG_FINGERPRINT_PEPPER_REF" not in engine_env
+
+
+def test_the_engine_service_can_be_scaled(compose: dict[str, Any]) -> None:
+    """`--scale engine=N` needs no fixed name and no published host port."""
+    engine = _service(compose, "engine")
+
+    assert "container_name" not in engine
+    assert "ports" not in engine
+
+
+def test_infrastructure_services_report_health_and_the_apps_wait_for_it(
+    compose: dict[str, Any],
+) -> None:
+    for name in ("postgres", "redis"):
+        assert "healthcheck" in _service(compose, name), name
+
+    api_dependencies = _service(compose, "api")["depends_on"]
+    assert {"postgres", "redis"} == set(api_dependencies)
+    assert all(
+        dependency["condition"] == "service_healthy" for dependency in api_dependencies.values()
+    )
+
+
+def test_no_secret_is_committed_in_the_compose_file(compose: dict[str, Any]) -> None:
+    """Every credential is a ${VARIABLE} reference resolved from .env."""
+    secretish = re.compile(r"PASSWORD|MASTER_KEY|TOKEN|PEPPER", re.IGNORECASE)
+
+    for name in compose["services"]:
+        for variable, value in _environment(_service(compose, name)).items():
+            if secretish.search(variable):
+                assert "${" in value, f"{name}.{variable} looks like a committed secret"
+
+
+def test_compose_and_dockerfiles_agree_on_the_build_context(compose: dict[str, Any]) -> None:
+    """The build context is the workspace root, because uv.lock lives there."""
+    for name, dockerfile in (("api", "api.Dockerfile"), ("engine", "engine.Dockerfile")):
+        build = _service(compose, name)["build"]
+        assert build["context"] == "../.."
+        assert build["dockerfile"] == f"deploy/docker/{dockerfile}"
