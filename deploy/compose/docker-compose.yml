@@ -1,0 +1,93 @@
+# Development stack (issue #21): api, engine, postgres, redis.
+#
+#   make up            bring it up healthy
+#   make down          tear it down
+#   make migrate       apply migrations (api role only)
+#   make scale N=3     run three engines
+#
+# Note the asymmetry between the api and engine environments — it is the point,
+# not an oversight. The engine has no POSTGRES_* and no ICEBERG_DATABASE_URL,
+# and it never will: engines hold no database credentials (ADR 0002), receive
+# source credentials and the fingerprint pepper in the task lease response
+# (ADR 0009), and reach only Redis and the api.
+
+name: icebergsst
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      # `:?` so a missing value fails loudly at `up` instead of silently
+      # resolving to "" and surfacing later as an asyncpg auth error.
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${ICEBERG_POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    ports:
+      - "127.0.0.1:${ICEBERG_REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    environment:
+      ICEBERG_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      ICEBERG_REDIS_URL: ${ICEBERG_REDIS_URL:-redis://redis:6379/0}
+      ICEBERG_SECRET_KEY: ${ICEBERG_SECRET_KEY:?set ICEBERG_SECRET_KEY in .env}
+      ICEBERG_FINGERPRINT_PEPPER: ${ICEBERG_FINGERPRINT_PEPPER:?set ICEBERG_FINGERPRINT_PEPPER in .env}
+      ICEBERG_LOG_LEVEL: ${ICEBERG_LOG_LEVEL:-INFO}
+    ports:
+      - "127.0.0.1:${ICEBERG_API_PORT:-8000}:8000"
+    volumes:
+      # Dev-only: `make revision` runs alembic in this container, so the
+      # generated file has to land in the working tree rather than inside the
+      # image. The image itself still bakes migrations/ in for production.
+      - ../../migrations:/app/migrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  engine:
+    build:
+      context: ../..
+      dockerfile: apps/engine/Dockerfile
+    environment:
+      # Redis and the api. No database credentials — see the header.
+      ICEBERG_REDIS_URL: ${ICEBERG_REDIS_URL:-redis://redis:6379/0}
+      ICEBERG_API_BASE_URL: ${ICEBERG_API_BASE_URL:-http://api:8000}
+      ICEBERG_ENGINE_TOKEN: ${ICEBERG_ENGINE_TOKEN:-}
+      ICEBERG_LOG_LEVEL: ${ICEBERG_LOG_LEVEL:-INFO}
+      ICEBERG_METRICS_PORT: ${ICEBERG_METRICS_PORT:-9191}
+    # No `ports:` and no `container_name:` — both would break
+    # `--scale engine=N`, which is how throughput scales (docs/deployment.md).
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+volumes:
+  postgres-data:
+  redis-data:
