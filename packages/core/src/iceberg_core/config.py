@@ -61,6 +61,30 @@ class ApiSettings(SecretStoreSettings):
     redis_url: str = "redis://localhost:6379/0"
     db_echo: bool = False
 
+    # ─── Authentication (ADR 0005) ────────────────────────────────────────────
+    # Optional so the migration CLI, the seed command, and the test suite can
+    # build settings without an identity provider. Routes that need OIDC call
+    # oidc_config(), which fails loudly rather than half-configuring a login.
+    oidc_issuer: str | None = None
+    oidc_client_id: str | None = None
+    oidc_client_secret: SecretStr | None = None
+    oidc_redirect_url: str = "http://localhost:8000/api/v1/auth/callback"
+    oidc_scopes: str = "openid profile email"
+
+    #: Signs the session and login-state cookies (HS256). Rotating it logs
+    #: everyone out, which is the intended blast radius.
+    session_secret: SecretStr | None = None
+    session_ttl_minutes: int = Field(default=480, ge=1)
+
+    #: False only for local HTTP development; a session cookie sent in clear is
+    #: a session anyone on the path can steal.
+    cookie_secure: bool = True
+
+    #: OIDC-only auth needs a seed administrator (docs/security.md § Bootstrap).
+    #: Matched at user creation, so a later demotion is not undone by re-login.
+    bootstrap_admin_subject: str | None = None
+    bootstrap_admin_email: str | None = None
+
     @field_validator("database_url", "redis_url")
     @classmethod
     def _require_url_scheme(cls, value: str) -> str:
