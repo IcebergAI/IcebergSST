@@ -52,6 +52,36 @@ a channel is audit-logged.
 - **First engine token:** minted at deploy time via a CLI/management command (compose) or a
   provisioning Job (Helm) — never a default credential baked into an image.
 
+## Secret store in practice (`EnvKeyBackend`)
+The default backend (ADR 0007) is AES-256-GCM with a master key injected as
+`ICEBERG_MASTER_KEY`. Secrets are stored as **sealed refs** — self-contained, opaque strings safe
+to keep in a database column (`Source.credential_ref`), to log, and to return from the API:
+
+```
+envkey:1:<purpose>:<base64url(nonce || ciphertext || tag)>
+```
+
+- **Purpose binding.** `credential`, `pepper`, and `generic` refs are cryptographically distinct:
+  the purpose is authenticated data, so a credential ref cannot be opened as the pepper, and
+  editing the purpose in a database row makes the ref fail to open rather than open as something
+  else.
+- **Single reader of the environment.** Only `iceberg_core.config` reads env vars; everything else
+  goes through the `SecretStore` interface. `packages/core/tests/test_no_raw_env_reads.py` walks the
+  shipped source and fails on any `os.environ`/`os.getenv` elsewhere.
+- **Bootstrap commands** (see `.env.example`):
+
+  ```
+  python -m iceberg_core.secrets generate-master-key   # → ICEBERG_MASTER_KEY
+  python -m iceberg_core.secrets generate-pepper       # → ICEBERG_FINGERPRINT_PEPPER_REF
+  python -m iceberg_core.secrets seal < credential     # → an opaque credential ref
+  ```
+
+  `generate-pepper` prints only the sealed ref — the pepper itself is never displayed. `seal` reads
+  from stdin, never from arguments, because arguments are visible in `ps`.
+- **Vault seam.** `ICEBERG_SECRET_STORE_BACKEND=vault` is recognised and fails with a pointer to
+  ADR 0007 until the backend lands. A Vault backend implements the same two primitives, with the
+  ref naming a Vault path instead of carrying ciphertext; no call site changes.
+
 ## Operator responsibilities (env-key backend)
 With the default `EnvKeyBackend`, the operator owns:
 - Protecting and rotating the master encryption key (via env/k8s secret).

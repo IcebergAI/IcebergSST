@@ -40,18 +40,25 @@ class CoreSettings(BaseSettings):
     log_level: str = "INFO"
 
 
-class ApiSettings(CoreSettings):
-    """API-role settings: the only role that holds database credentials."""
+class SecretStoreSettings(CoreSettings):
+    """Secret-store configuration (ADR 0007).
 
-    database_url: str
-    redis_url: str = "redis://localhost:6379/0"
+    Split out from :class:`ApiSettings` so the key-management CLI can run without
+    a database URL — but still API-role-only: the master key never leaves this
+    role, and engines receive the fingerprint pepper per task in the lease
+    response (ADR 0009).
+    """
 
-    # Secret store (ADR 0007). The master key never leaves this role: engines
-    # receive the fingerprint pepper per task in the lease response (ADR 0009).
     secret_store_backend: SecretStoreBackend = "env_key"  # noqa: S105  # a backend name
     master_key: SecretStr | None = None
     fingerprint_pepper_ref: str | None = None
 
+
+class ApiSettings(SecretStoreSettings):
+    """API-role settings: the only role that holds database credentials."""
+
+    database_url: str
+    redis_url: str = "redis://localhost:6379/0"
     db_echo: bool = False
 
     @field_validator("database_url", "redis_url")
@@ -82,6 +89,12 @@ def get_api_settings() -> ApiSettings:
 
 
 @lru_cache(maxsize=1)
+def get_secret_store_settings() -> SecretStoreSettings:
+    """Process-wide secret-store settings (used by the API and the key CLI)."""
+    return SecretStoreSettings()
+
+
+@lru_cache(maxsize=1)
 def get_engine_settings() -> EngineSettings:
     """Process-wide engine settings, read from the environment on first use."""
     return EngineSettings()
@@ -90,4 +103,5 @@ def get_engine_settings() -> EngineSettings:
 def reset_settings_cache() -> None:
     """Drop cached settings. For tests that manipulate the environment."""
     get_api_settings.cache_clear()
+    get_secret_store_settings.cache_clear()
     get_engine_settings.cache_clear()

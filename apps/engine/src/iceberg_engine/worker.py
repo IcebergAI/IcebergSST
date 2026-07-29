@@ -7,18 +7,15 @@ Prometheus metrics server (engines have no web framework to piggyback on).
 Engines talk to Redis and the API only — never the database (ADR 0002).
 """
 
-import os
-
 import dramatiq
 import structlog
 from dramatiq.broker import MessageProxy
 from dramatiq.brokers.redis import RedisBroker
 from dramatiq.brokers.stub import StubBroker
 from iceberg_core import metrics as _metrics  # noqa: F401  # registers iceberg_* series
+from iceberg_core.config import EngineSettings, get_engine_settings
 from iceberg_core.logging import configure_logging
 from prometheus_client import start_http_server
-
-DEFAULT_METRICS_PORT = 9191
 
 logger = structlog.get_logger()
 
@@ -59,13 +56,18 @@ def build_broker(redis_url: str | None = None) -> dramatiq.Broker:
     return broker
 
 
-def main() -> None:
-    """Process entrypoint: logging, metrics server, broker registration."""
+def main(settings: EngineSettings | None = None) -> None:
+    """Process entrypoint: logging, metrics server, broker registration.
+
+    Configuration comes from :class:`~iceberg_core.config.EngineSettings` — the
+    engine reads no environment variable directly, which is what keeps the
+    "no raw env reads" invariant checkable (ADR 0007).
+    """
+    resolved = settings or get_engine_settings()
     configure_logging(role="engine")
-    metrics_port = int(os.environ.get("ICEBERG_METRICS_PORT", DEFAULT_METRICS_PORT))
-    start_http_server(metrics_port)
-    build_broker(os.environ.get("ICEBERG_REDIS_URL"))
-    logger.info("engine_bootstrap_complete", metrics_port=metrics_port)
+    start_http_server(resolved.metrics_port)
+    build_broker(resolved.redis_url)
+    logger.info("engine_bootstrap_complete", metrics_port=resolved.metrics_port)
 
 
 if __name__ == "__main__":
