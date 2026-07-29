@@ -4,9 +4,21 @@ version = "0.1.0"
 description = "Shared models, config, secret-store, fingerprinting, and redaction utilities."
 requires-python = ">=3.13"
 dependencies = [
+    "cryptography>=49.0.0",
     "prometheus-client>=0.25.0",
+    "pydantic-settings>=2.13.0",
+    "sqlmodel>=0.0.39",
     "structlog>=26.1.0",
 ]
+
+[project.optional-dependencies]
+# Only needed to load the pytest plugin below; production images skip this.
+testing = ["pytest>=9.1.1"]
+
+[project.entry-points.pytest11]
+# Publishes iceberg_core.testing so every workspace member gets the shared
+# fixtures (db_engine, session) without duplicating conftest wiring.
+iceberg_core = "iceberg_core.testing"
 
 [build-system]
 requires = ["uv_build>=0.11,<0.12"]

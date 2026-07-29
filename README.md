@@ -7,10 +7,10 @@ Most secret-scanning tooling is git-centric. IcebergSST targets the *non-git* lo
 credentials quietly accumulate — **Confluence**, **Jira**, and **network file shares** — with an
 API-first management plane and horizontally scalable, isolated scanner engines.
 
-> ⚠️ **Status: design phase.** This repository currently contains the design specification and
-> the planned work breakdown only. No product code has been written yet. See
-> [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`docs/`](./docs/) for the spec, and the GitHub
-> milestones/issues for the backlog.
+> ⚠️ **Status: M0 foundations.** The workspace, core package (config, secret store, redaction,
+> fingerprinting, schema), and the local container stack exist; the API routes, detection engine,
+> connectors, and UI do not yet. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`docs/`](./docs/)
+> for the spec, and the GitHub milestones/issues for what is left.
 
 ## What it does
 
@@ -39,7 +39,21 @@ API-first management plane and horizontally scalable, isolated scanner engines.
 See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full picture and
 [`docs/adr/`](./docs/adr/) for the rationale behind each decision.
 
-## Repository layout (planned)
+## Quickstart
+
+Needs [uv](https://docs.astral.sh/uv/) and Docker.
+
+```bash
+make init-env   # .env from .env.example, with a master key and sealed pepper generated
+make up         # build, start api + engine + postgres + redis, wait for health, migrate
+make seed       # optional: a disabled demo source to click around
+make scale N=3  # more engine replicas
+make down       # stop; `make destroy` also drops the data volume
+```
+
+`make check` runs what CI runs: `ruff`, `mypy`, and `pytest`. `make help` lists every target.
+
+## Repository layout
 
 ```
 apps/api        FastAPI control plane
@@ -47,9 +61,12 @@ apps/engine     Dramatiq scanner worker
 packages/core   shared models, config, secret-store, fingerprinting, redaction
 packages/detect rule packs + detection engine
 packages/connectors  connector interface + Confluence (Jira/SMB later)
-web/            HTMX templates + Alpine components
-deploy/         docker-compose (dev) + Helm chart (prod)
+web/            HTMX templates + Alpine components (M3)
+deploy/compose  docker-compose development stack
+deploy/docker   role Dockerfiles (api, engine)
+deploy/helm     Helm chart (M4)
 docs/           design spec, ADRs, threat model
+tests/          cross-cutting invariants (deployment boundaries)
 ```
 
 ## License

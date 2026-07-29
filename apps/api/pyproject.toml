@@ -4,12 +4,17 @@ version = "0.1.0"
 description = "FastAPI control plane: REST API, HTMX UI, scheduler, notifications. Sole writer of record."
 requires-python = ">=3.13"
 dependencies = [
+    # Only the api role owns the schema and runs migrations (docs/deployment.md).
+    "alembic>=1.18.5",
     "fastapi>=0.139.2",
     "iceberg-core",
+    "psycopg[binary]>=3.2.12",
     # Imported directly by app.py — declared rather than leaned on transitively
     # through iceberg-core.
     "prometheus-client>=0.25.0",
     "structlog>=26.1.0",
+    # ASGI server for the container entrypoint.
+    "uvicorn[standard]>=0.34.0",
 ]
 
 [build-system]

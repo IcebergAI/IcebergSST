@@ -18,9 +18,23 @@ engine     →  Dramatiq worker         (depends on redis, api)
 postgres   →  system of record
 redis      →  Dramatiq broker
 ```
-- Scale engines with `--scale engine=N`.
-- Secrets via `.env` (env-key secret-store backend).
-- A `Makefile` wraps common tasks (up, migrate, seed, test).
+- Scale engines with `--scale engine=N` (`make scale N=3`). The engine service publishes no host
+  port and has no `container_name`, because either would make scaling fail.
+- Secrets via `.env` (env-key secret-store backend). `make init-env` generates them — including a
+  fingerprint pepper sealed with the master key it just generated.
+- A `Makefile` wraps the common tasks:
+
+| Target | What it does |
+|---|---|
+| `make up` | build, start, wait for every healthcheck, then migrate |
+| `make down` / `make destroy` | stop; `destroy` also deletes the Postgres volume |
+| `make migrate` | `alembic upgrade head` in the api container |
+| `make seed` | development fixtures (refuses to run with `ICEBERG_ENVIRONMENT=prod`) |
+| `make scale N=3` | run N engine replicas |
+| `make check` | lint + types + tests, the same as CI |
+
+Postgres publishes no host port by default, and Redis requires a password even in dev — the broker
+is a shared trust surface (`docs/security.md`).
 
 ## Production — Helm
 `deploy/helm/` chart:
@@ -34,7 +48,9 @@ redis      →  Dramatiq broker
   secret-store backend selection (env-key vs Vault).
 
 ## Migrations
-Alembic. Only the **api** role runs migrations (it owns the schema); engines never touch the DB.
+Alembic, configured at `apps/api/alembic.ini`. Only the **api** role runs migrations (it owns the
+schema); engines never touch the DB. In the compose stack: `make migrate`. Directly:
+`uv run alembic -c apps/api/alembic.ini upgrade head`, which reads `ICEBERG_DATABASE_URL`.
 
 ## Scaling model
 - Throughput scales by adding **engine** replicas — more Dramatiq consumers pulling scan tasks
