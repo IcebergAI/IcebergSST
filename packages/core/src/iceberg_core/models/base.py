@@ -18,7 +18,7 @@ Conventions (see ``docs/data-model.md``):
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, cast
+from typing import Any
 
 from sqlalchemy import JSON, DateTime, MetaData, Text
 from sqlalchemy import Enum as SAEnum
@@ -52,8 +52,13 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def utc_timestamp_type() -> DateTime:
-    """Column type for every timestamp: ``TIMESTAMP WITH TIME ZONE``."""
+def utc_timestamp_type() -> Any:
+    """Column type for every timestamp: ``TIMESTAMP WITH TIME ZONE``.
+
+    Returns ``Any`` because SQLModel annotates ``Field(sa_type=...)`` as
+    ``type[Any]`` while parameterized SQLAlchemy types must be passed as
+    instances; the alternative is a cast at every model field.
+    """
     return DateTime(timezone=True)
 
 
@@ -66,7 +71,7 @@ def json_type() -> Any:
     return JSON().with_variant(postgresql.JSONB(astext_type=Text()), "postgresql")
 
 
-def enum_type[EnumT: StrEnum](enum_class: type[EnumT], *, name: str) -> SAEnum:
+def enum_type[EnumT: StrEnum](enum_class: type[EnumT], *, name: str) -> Any:
     """Column type for a :class:`~enum.StrEnum`, stored as a checked VARCHAR.
 
     ``native_enum=False`` is deliberate. Native Postgres enum types make adding
@@ -84,13 +89,6 @@ def enum_type[EnumT: StrEnum](enum_class: type[EnumT], *, name: str) -> SAEnum:
     )
 
 
-# SQLModel's ``Field(sa_type=...)`` is annotated as ``type[Any]``, but a
-# parameterized type has to be passed as an instance. Casting at the two call
-# sites below beats a blanket ignore that would hide real overload mistakes.
-def _timestamp_sa_type() -> type[Any]:
-    return cast("type[Any]", utc_timestamp_type())
-
-
 class IcebergModel(SQLModel):
     """Base for all tables: UUID primary key plus a creation timestamp.
 
@@ -103,7 +101,7 @@ class IcebergModel(SQLModel):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     created_at: datetime = Field(
         default_factory=utc_now,
-        sa_type=_timestamp_sa_type(),
+        sa_type=utc_timestamp_type(),
         nullable=False,
     )
 
@@ -113,7 +111,7 @@ class TimestampedModel(IcebergModel):
 
     updated_at: datetime = Field(
         default_factory=utc_now,
-        sa_type=_timestamp_sa_type(),
+        sa_type=utc_timestamp_type(),
         sa_column_kwargs={"onupdate": utc_now},
         nullable=False,
     )

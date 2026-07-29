@@ -34,7 +34,9 @@ redis      →  Dramatiq broker
   secret-store backend selection (env-key vs Vault).
 
 ## Migrations
-Alembic. Only the **api** role runs migrations (it owns the schema); engines never touch the DB.
+Alembic, configured at `apps/api/alembic.ini`. Only the **api** role runs migrations (it owns the
+schema); engines never touch the DB. In the compose stack: `make migrate`. Directly:
+`uv run alembic -c apps/api/alembic.ini upgrade head`, which reads `ICEBERG_DATABASE_URL`.
 
 ## Scaling model
 - Throughput scales by adding **engine** replicas — more Dramatiq consumers pulling scan tasks
