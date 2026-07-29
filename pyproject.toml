@@ -50,7 +50,10 @@ select = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"**/tests/**" = ["S101"] # asserts are the point of tests
+# Asserts are the point of tests, and a secret scanner's test suite is full of
+# deliberately fake secret-shaped fixtures — S105/S106 flag every one of them.
+# Real leaks are caught by the gitleaks job over the whole repo, not by this rule.
+"**/tests/**" = ["S101", "S105", "S106"]
 
 [tool.mypy]
 strict = true

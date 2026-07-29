@@ -163,7 +163,7 @@ def test_factory_requires_a_master_key() -> None:
 
 
 def test_vault_backend_is_a_documented_seam() -> None:
-    settings = SecretStoreSettings(secret_store_backend="vault")  # noqa: S106  # a backend name
+    settings = SecretStoreSettings(secret_store_backend="vault")  # a backend name
 
     with pytest.raises(SecretStoreConfigError, match="ADR 0007"):
         build_secret_store(settings)

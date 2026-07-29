@@ -29,7 +29,7 @@ def test_api_settings_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert settings.database_url == "postgresql+psycopg://api:pw@db:5432/iceberg"
     assert settings.environment == "prod"
-    assert settings.secret_store_backend == "env_key"  # noqa: S105  # a backend name, not a secret
+    assert settings.secret_store_backend == "env_key"  # a backend name, not a secret
     assert settings.master_key is not None
     assert settings.master_key.get_secret_value() == "not-a-real-key"
 
