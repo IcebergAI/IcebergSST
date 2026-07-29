@@ -13,9 +13,12 @@ system itself a high-value target. This document states the trust boundaries and
 1. **Browser ↔ API** — OIDC-authenticated sessions, RBAC on every route (ADR 0005). Session
    cookies + HTMX form posts require **CSRF protection** (token per session, enforced on every
    mutating route).
-2. **Engine ↔ API** — per-engine token over mandatory TLS; engines may lease tasks and submit
+2. **Engine ↔ API** — per-engine bearer token over mandatory TLS; engines may lease tasks and submit
    results, nothing else. The **lease response carries the source credential (task-scoped) and
-   the fingerprint pepper** — the only moment either transits to an engine (ADR 0002, 0009).
+   the fingerprint pepper** — the only moment either transits to an engine (ADR 0002, 0009). The
+   separation is enforced by which dependency each route declares: an engine token cannot read
+   findings or scans, and a browser session cannot lease a task or post results. Both directions are
+   tested.
 3. **Engine ↔ Redis** — a shared trust surface: any engine can read/enqueue broker messages.
    Mitigations: payloads are task-id hints only (no secrets, no specs), everything is validated
    at lease time, and Redis runs with auth + TLS.
@@ -82,8 +85,12 @@ a channel is audit-logged.
   and are audited in `audit_event`.
 - **No self-service role changes:** nobody may change their own role or disable their own account,
   admins included. That blocks self-promotion and removes any path to locking the last admin out.
-- **First engine token:** minted at deploy time via a CLI/management command (compose) or a
-  provisioning Job (Helm) — never a default credential baked into an image.
+- **First engine token:** minted at deploy time with
+  `python -m iceberg_api mint-engine-token --name engine-1` (compose) or a provisioning Job (Helm) —
+  never a default credential baked into an image. Only the token's SHA-256 hash is stored, so it
+  cannot be shown twice; re-running the command **rotates** it, which is also how an operator
+  replaces a token they believe has leaked. Registration through the API requires an admin session,
+  because an engine that could enrol itself would let anyone reaching the API join the fleet.
 
 ## Secret store in practice (`EnvKeyBackend`)
 The default backend (ADR 0007) is AES-256-GCM with a master key injected as
