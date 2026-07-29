@@ -8,6 +8,10 @@ dependencies = [
     "iceberg-detect",
     "iceberg-connectors",
     "dramatiq[redis]>=2.2.0",
+    # Imported directly by worker.py — declared rather than leaned on
+    # transitively through iceberg-core.
+    "prometheus-client>=0.25.0",
+    "structlog>=26.1.0",
 ]
 
 [build-system]

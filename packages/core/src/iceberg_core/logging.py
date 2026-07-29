@@ -8,32 +8,57 @@ reach log output, even by accident (see docs/security.md).
 
 import re
 import sys
-from typing import TextIO
+from collections.abc import Mapping
+from typing import Any, TextIO
 
 import structlog
 from structlog.typing import EventDict, WrappedLogger
 
 SENSITIVE_KEY_RE = re.compile(
-    r"password|passwd|secret|token|credential|authorization|api_?key|pepper",
+    r"password|passwd|pwd|passphrase|secret|token|credential|authorization"
+    r"|bearer|cookie|api_?key|private[_-]?key|access[_-]?key|salt|pepper",
     re.IGNORECASE,
 )
 MASK = "[REDACTED]"
 
+# Containers nested deeper than this are dropped rather than rendered. The cap is
+# what makes the walk total: it bounds cost on pathological payloads and stops a
+# self-referential structure from recursing forever. Truncation replaces the
+# subtree with a marker — never the raw value — so exceeding the cap can only
+# lose detail, never leak a secret.
+MAX_CONTAINER_DEPTH = 6
+TRUNCATED = "[TRUNCATED]"
+
 
 def redact_sensitive(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
-    """Mask the value of any event key that looks like it holds a secret."""
-    return _redact_mapping(event_dict)
+    """Mask the value of any event key that looks like it holds a secret.
+
+    Masking follows the whole structure — dicts and lists/tuples at any depth,
+    in any combination — because a credential buried in a list of dicts is still
+    a credential. The walk copies as it goes: callers routinely pass live config
+    or connection objects as event values, and a log call must never leave the
+    caller's own data masked.
+    """
+    return {key: _redact_value(key, value, 0) for key, value in event_dict.items()}
 
 
-def _redact_mapping(mapping: EventDict) -> EventDict:
-    for key, value in mapping.items():
-        if SENSITIVE_KEY_RE.search(key):
-            mapping[key] = MASK
-        elif isinstance(value, dict):
-            mapping[key] = _redact_mapping(value)
-        elif isinstance(value, list):
-            mapping[key] = [_redact_mapping(v) if isinstance(v, dict) else v for v in value]
-    return mapping
+def _redact_value(key: object, value: object, depth: int) -> Any:
+    if SENSITIVE_KEY_RE.search(str(key)):
+        return MASK
+    return _redact_container(value, depth)
+
+
+def _redact_container(value: object, depth: int) -> Any:
+    if isinstance(value, Mapping):
+        if depth >= MAX_CONTAINER_DEPTH:
+            return TRUNCATED
+        return {k: _redact_value(k, v, depth + 1) for k, v in value.items()}
+    # str/bytes are sequences too; only genuine collections are worth walking.
+    if isinstance(value, list | tuple):
+        if depth >= MAX_CONTAINER_DEPTH:
+            return TRUNCATED
+        return [_redact_container(item, depth + 1) for item in value]
+    return value
 
 
 def configure_logging(*, role: str, stream: TextIO | None = None) -> None:
