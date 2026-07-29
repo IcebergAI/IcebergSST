@@ -1,0 +1,16 @@
+[project]
+name = "iceberg-api"
+version = "0.1.0"
+description = "FastAPI control plane: REST API, HTMX UI, scheduler, notifications. Sole writer of record."
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.139.2",
+    "iceberg-core",
+]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+iceberg-core = { workspace = true }
