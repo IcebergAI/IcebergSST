@@ -22,6 +22,8 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from iceberg_api.auth.routes import router as auth_router
 from iceberg_api.engines.routes import router as engines_router
+from iceberg_api.findings.routes import router as findings_router
+from iceberg_api.findings.suppression_routes import router as suppressions_router
 from iceberg_api.maintenance import background_maintenance
 from iceberg_api.scans.routes import router as scans_router
 from iceberg_api.sources.routes import router as sources_router
@@ -90,9 +92,11 @@ def create_app(settings: ApiSettings | None = None, *, background: bool = True) 
 
     app.include_router(auth_router, prefix=API_PREFIX)
     app.include_router(engines_router, prefix=API_PREFIX)
+    app.include_router(findings_router, prefix=API_PREFIX)
     app.include_router(scans_router, prefix=API_PREFIX)
     app.include_router(schedules_router, prefix=API_PREFIX)
     app.include_router(sources_router, prefix=API_PREFIX)
+    app.include_router(suppressions_router, prefix=API_PREFIX)
     app.include_router(users_router, prefix=API_PREFIX)
 
     return app

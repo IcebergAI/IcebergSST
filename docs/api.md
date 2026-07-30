@@ -52,12 +52,54 @@ whether one exists.
   is a `409`, and a cancelled scan never reconciles.
 
 ## Findings
-- `GET   /findings` (filter: source, state, rule, severity, assignee; paginated)
-- `GET   /findings/{id}` (includes FindingEvent history)
-- `PATCH /findings/{id}` (state, assignee, notes → records a FindingEvent)
+- `GET   /findings` (filter: `?source_id=`, `?state=`, `?rule_id=`, `?severity=`, `?assignee_id=`,
+  `?suppressed=`; paginated). Filters compose — every one narrows the same query. **No filter is
+  implicit**: the analyst's default view is `?state=open&suppressed=false`, sent by the client, not
+  applied silently by the server, so a count can always be reconciled against the table.
+- `GET   /findings/{id}` — the finding plus its full `FindingEvent` history, oldest first. The
+  history ships with the detail because "why is this finding in this state" is the question the
+  detail view exists to answer.
+- `PATCH /findings/{id}` (analyst+) — `state`, `assignee_id`, `notes`, plus an optional `comment`
+  recorded on the events the change writes. Returns the detail shape, history included.
+
+Responses never carry `secret_hash`. It is not reversible, but re-emitting anything derived from
+the secret would give every viewer a comparison oracle and buy a client nothing.
+
+**The state machine.** `open` → `false_positive` / `accepted_risk` / `resolved`, and any of those
+back to `open`. There is no direct move between judgements: relabelling one in place would leave an
+audit trail reading "it was always this" rather than "somebody reopened it and decided again".
+An illegal transition is a `409`, and nothing else in the same `PATCH` is applied either — a
+rejected request must not leave the assignee changed. Re-sending the state a finding is already in
+is a no-op, not a conflict: a retried request is not an error.
+
+Every real change writes a `FindingEvent` — `state_change`, `reopened` (any return to `open`,
+whoever or whatever caused it), `assign`, `comment`. Notes are recorded as events as well as on the
+row, so editing them does not erase what the last analyst wrote. `assignee_id: null` unassigns;
+omitting the field leaves the assignee alone. Assigning to an unknown or disabled user is a `422`.
+Resolving by hand sets `resolution: manual`; reopening clears it, so a reopened finding never keeps
+reconciliation's `auto`.
 
 ## Suppressions
-- `GET /suppressions` · `POST /suppressions` · `DELETE /suppressions/{id}`
+- `GET  /suppressions` (paginated; `?source_id=`, `?scope=`, `?active=`) · `GET /suppressions/{id}`
+- `POST /suppressions` (analyst+) — `scope` (`path_glob` / `fingerprint` / `rule`), `pattern`,
+  optional `source_id` (null = global), `reason` (required, non-blank), optional `expires_at`
+  (must be in the future).
+- `DELETE /suppressions/{id}` (analyst+)
+
+`?source_id=` returns that source's suppressions **and the global ones**, because "what is hidden
+from this source" is the question being asked. Create and delete are audited.
+
+Suppression is applied and lifted eagerly, not only at the next scan:
+- creating one suppresses the findings it already covers;
+- deleting one releases them, with an event saying why they came back — releasing before the row
+  goes, so the finding is never left hidden pointing at a nulled foreign key;
+- the maintenance round releases findings whose suppression has expired, so expiry is a property of
+  the clock rather than of a source's scan cadence.
+
+Suppressed findings are **recorded, not discarded** (ADR 0008): they stay in the table with
+`suppressed_at`/`suppressed_by_id` set and a `suppressed` event, out of the active view but not out
+of the record. There is no `PATCH`: editing a live suppression's pattern would silently re-scope
+what it hides, and creating a replacement leaves both decisions in the audit trail.
 
 ## Rules
 - `GET /rules` → rule-pack listing + metadata (read-only; rules are code, per ADR 0008)

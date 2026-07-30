@@ -107,21 +107,11 @@ def _create(
         state=FindingState.OPEN,
         first_seen_scan_id=scan.id,
         last_seen_scan_id=scan.id,
-        suppressed_at=at if suppression else None,
-        suppressed_by_id=suppression.id if suppression else None,
     )
     db.add(finding)
     db.flush()
     if suppression is not None:
-        db.add(
-            FindingEvent(
-                finding_id=finding.id,
-                actor_id=None,
-                kind=FindingEventKind.SUPPRESSED,
-                to_value=suppression.scope.value,
-                comment=f"matched suppression {suppression.id}",
-            )
-        )
+        suppressions.suppress(db, finding, suppression, at=at)
     return finding
 
 
@@ -166,23 +156,10 @@ def _refresh(
 
     # A suppression that appeared since the last scan applies now; one that expired
     # stops applying, and the finding returns to the active view.
-    was_suppressed = finding.suppressed_at is not None
     if suppression is not None:
-        finding.suppressed_at = finding.suppressed_at or at
-        finding.suppressed_by_id = suppression.id
-        if not was_suppressed:
-            db.add(
-                FindingEvent(
-                    finding_id=finding.id,
-                    actor_id=None,
-                    kind=FindingEventKind.SUPPRESSED,
-                    to_value=suppression.scope.value,
-                    comment=f"matched suppression {suppression.id}",
-                )
-            )
+        suppressions.suppress(db, finding, suppression, at=at)
     else:
-        finding.suppressed_at = None
-        finding.suppressed_by_id = None
+        suppressions.release(db, finding, reason=f"no suppression matched in scan {scan.id}")
 
     db.add(finding)
     return reopened
