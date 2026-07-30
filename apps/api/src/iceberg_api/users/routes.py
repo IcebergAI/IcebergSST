@@ -144,9 +144,7 @@ def _guard_last_admin(db: Session, user: User, changes: UserUpdate) -> None:
         return
 
     admins = db.exec(select(User).where(col(User.role) == UserRole.ADMIN).with_for_update()).all()
-    others_enabled = [
-        other for other in admins if other.id != user.id and not other.disabled
-    ]
+    others_enabled = [other for other in admins if other.id != user.id and not other.disabled]
     if not others_enabled:
         raise HTTPException(
             status.HTTP_409_CONFLICT,

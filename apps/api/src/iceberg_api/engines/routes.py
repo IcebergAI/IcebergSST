@@ -310,9 +310,7 @@ async def submit_results(
     # the whole counts blob. Without the lock, the second commit clobbers the
     # first's tallies (findings, units_scanned, …). FOR UPDATE serialises the two
     # so each merges onto the other's committed result.
-    scan = db.exec(
-        select(Scan).where(col(Scan.id) == task.scan_id).with_for_update()
-    ).one_or_none()
+    scan = db.exec(select(Scan).where(col(Scan.id) == task.scan_id).with_for_update()).one_or_none()
     if scan is None:  # pragma: no cover — FK guarantees it
         raise HTTPException(status.HTTP_404_NOT_FOUND, "scan not found")
 

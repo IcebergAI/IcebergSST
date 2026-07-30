@@ -91,9 +91,7 @@ def matches(
             # (os.path.normcase), which would make the engine on one platform
             # pre-filter differently from the API on another — the very
             # engine/API divergence this shared module exists to prevent.
-            return any(
-                fnmatchcase(path, rule.pattern) for path in locator_paths(resource_locator)
-            )
+            return any(fnmatchcase(path, rule.pattern) for path in locator_paths(resource_locator))
 
 
 def first_match(

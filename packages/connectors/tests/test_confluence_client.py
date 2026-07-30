@@ -470,9 +470,7 @@ def test_a_run_of_throttles_waits_out_the_budget_not_the_retry_count() -> None:
     early with a misleading 'after N attempts' error."""
     site = _site(pages=1)
     site.throttle_first, site.retry_after = 3, 2.0
-    client, slept = _client(
-        site, rate_limit=RateLimitPolicy(attempts=2, max_wait_seconds=300.0)
-    )
+    client, slept = _client(site, rate_limit=RateLimitPolicy(attempts=2, max_wait_seconds=300.0))
 
     pages = list(client.paginate("/spaces/s1/pages"))
 
