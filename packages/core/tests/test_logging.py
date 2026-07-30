@@ -64,6 +64,36 @@ def test_non_sensitive_values_pass_through_unmasked() -> None:
     assert event["source_name"] == "wiki"
 
 
+def test_a_connection_url_password_is_scrubbed_but_the_host_is_kept() -> None:
+    """A DSN is a plain string under a key no pattern catches; the userinfo is
+    masked in place so the host stays useful for debugging."""
+    raw, event = capture_configured_log(
+        database_url="postgresql+psycopg://api:S3CRETPW@db:5432/iceberg",
+        redis_url="redis://:hunter2@redis:6379/0",
+    )
+    assert "S3CRETPW" not in raw and "hunter2" not in raw
+    assert event["database_url"] == "postgresql+psycopg://[REDACTED]@db:5432/iceberg"
+    assert event["redis_url"] == "redis://[REDACTED]@redis:6379/0"
+
+
+def test_a_url_password_inside_an_object_repr_is_scrubbed() -> None:
+    """An object logged under a benign key is rendered with repr; a DSN in that
+    repr must be scrubbed too, not just bare string values."""
+
+    class Settings:
+        def __repr__(self) -> str:
+            return "Settings(database_url='postgresql://api:S3CRETPW@db/iceberg')"
+
+    raw, event = capture_configured_log(settings=Settings())
+    assert "S3CRETPW" not in raw
+    assert "[REDACTED]" in str(event["settings"])
+
+
+def test_a_plain_url_without_credentials_is_untouched() -> None:
+    _, event = capture_configured_log(endpoint="http://api:8000/healthz")
+    assert event["endpoint"] == "http://api:8000/healthz"
+
+
 def test_credential_masked_at_every_nesting_shape() -> None:
     """A secret is a secret wherever it sits — lists of lists, tuples, deep dicts."""
     raw, _ = capture_configured_log(

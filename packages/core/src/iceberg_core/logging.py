@@ -21,6 +21,13 @@ SENSITIVE_KEY_RE = re.compile(
 )
 MASK = "[REDACTED]"
 
+# A connection URL carries its password in the userinfo (``scheme://user:pass@host``).
+# Database and Redis URLs are plain strings, not SecretStr, and travel under keys
+# (``database_url``, ``redis_url``) that no key pattern above would catch — so the
+# value is scrubbed instead: the userinfo is masked while the host and path stay
+# visible for debugging.
+_URL_USERINFO_RE = re.compile(r"://[^/\s@]+@")
+
 # Containers nested deeper than this are dropped rather than rendered. The cap is
 # what makes the walk total: it bounds cost on pathological payloads and stops a
 # self-referential structure from recursing forever. Truncation replaces the
@@ -58,7 +65,23 @@ def _redact_container(value: object, depth: int) -> Any:
         if depth >= MAX_CONTAINER_DEPTH:
             return TRUNCATED
         return [_redact_container(item, depth + 1) for item in value]
+    if isinstance(value, str):
+        return _scrub_url_userinfo(value)
     return value
+
+
+def _scrub_url_userinfo(text: str) -> str:
+    """Mask the ``user:pass@`` in any connection URL inside ``text``."""
+    return _URL_USERINFO_RE.sub("://[REDACTED]@", text)
+
+
+def _json_default(value: object) -> str:
+    """How the JSON renderer stringifies a non-native value: its repr, scrubbed.
+
+    An object logged under a benign key (``settings=…``) is rendered with ``repr``,
+    which for a settings object prints the database URL — password and all. Scrubbing
+    the repr here is the counterpart to scrubbing bare string values in the walk."""
+    return _scrub_url_userinfo(repr(value))
 
 
 def configure_logging(*, role: str, stream: TextIO | None = None) -> None:
@@ -80,7 +103,7 @@ def configure_logging(*, role: str, stream: TextIO | None = None) -> None:
             structlog.processors.TimeStamper(fmt="iso", utc=True),
             add_role,
             redact_sensitive,
-            structlog.processors.JSONRenderer(),
+            structlog.processors.JSONRenderer(default=_json_default),
         ],
         logger_factory=structlog.PrintLoggerFactory(stream or sys.stdout),
         cache_logger_on_first_use=False,
