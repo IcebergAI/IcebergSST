@@ -16,6 +16,10 @@ Three properties are worth stating because they are easy to get wrong:
 * **Suppressed findings are recorded, not discarded.** They are stored and marked,
   so "why is this not in my list?" has an answer and an expiring suppression brings
   the finding back rather than losing the history.
+* **One matcher, two roles.** Whether a suppression covers a finding is decided by
+  :mod:`iceberg_core.suppression`, which the engine imports too. Two
+  implementations that agreed today would drift, and a match the engine pre-filters
+  away that the API would have kept is a finding that silently never existed.
 * **Suppression is applied and lifted eagerly.** Creating one covers the findings
   it already matches, deleting one releases them, and
   :func:`release_lapsed` returns findings whose suppression has expired. Waiting
@@ -25,30 +29,27 @@ Three properties are worth stating because they are easy to get wrong:
 """
 
 import uuid
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from fnmatch import fnmatch
-from typing import Any
 
 import structlog
 from iceberg_core.enums import FindingEventKind, SuppressionScope
 from iceberg_core.models import Finding, FindingEvent, Suppression
+from iceberg_core.suppression import SuppressionRule, first_match, matches
 from sqlmodel import Session, col, or_, select
 
+__all__ = [
+    "SuppressionRule",
+    "applicable_suppressions",
+    "apply_to_existing",
+    "first_match",
+    "matches",
+    "release",
+    "release_covered_by",
+    "release_lapsed",
+    "suppress",
+]
+
 logger = structlog.get_logger()
-
-
-@dataclass(frozen=True, slots=True)
-class SuppressionRule:
-    """One suppression, flattened for matching and for the lease payload."""
-
-    id: uuid.UUID
-    scope: SuppressionScope
-    pattern: str
-
-    def as_payload(self) -> dict[str, str]:
-        """The shape sent to an engine in its lease (ADR 0009)."""
-        return {"id": str(self.id), "scope": self.scope.value, "pattern": self.pattern}
 
 
 def applicable_suppressions(
@@ -74,41 +75,6 @@ def applicable_suppressions(
         for row in rows
         if row.expires_at is None or _as_utc(row.expires_at) > at
     ]
-
-
-def matches(
-    rule: SuppressionRule,
-    *,
-    fingerprint: str,
-    rule_id: str,
-    resource_locator: dict[str, Any],
-) -> bool:
-    """Does this suppression cover this finding?"""
-    # Exhaustive over SuppressionScope on purpose: adding a scope without deciding
-    # how it matches should fail the type check, not silently match nothing.
-    match rule.scope:
-        case SuppressionScope.FINGERPRINT:
-            return rule.pattern == fingerprint
-        case SuppressionScope.RULE:
-            return rule.pattern == rule_id
-        case SuppressionScope.PATH_GLOB:
-            return any(fnmatch(path, rule.pattern) for path in _locator_paths(resource_locator))
-
-
-def first_match(
-    rules: list[SuppressionRule],
-    *,
-    fingerprint: str,
-    rule_id: str,
-    resource_locator: dict[str, Any],
-) -> SuppressionRule | None:
-    """The first suppression covering a finding, or None."""
-    for rule in rules:
-        if matches(
-            rule, fingerprint=fingerprint, rule_id=rule_id, resource_locator=resource_locator
-        ):
-            return rule
-    return None
 
 
 def suppress(
@@ -302,19 +268,6 @@ def release_lapsed(db: Session, *, now: datetime | None = None) -> int:
     if released:
         logger.info("suppressions_lapsed", findings_released=released)
     return released
-
-
-def _locator_paths(resource_locator: dict[str, Any]) -> list[str]:
-    """The parts of a locator a path glob can sensibly match.
-
-    Connectors describe location differently — a Confluence page has a URL and a
-    space key, a file share has a path — so a glob is matched against each stringy
-    identifier rather than against one field that only some connectors populate.
-    """
-    keys = ("path", "url", "space", "space_key", "resource_id", "sub_resource", "title")
-    return [
-        str(resource_locator[key]) for key in keys if isinstance(resource_locator.get(key), str)
-    ]
 
 
 def _as_utc(value: datetime) -> datetime:
