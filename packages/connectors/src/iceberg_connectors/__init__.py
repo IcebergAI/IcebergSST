@@ -13,6 +13,10 @@ Nothing here touches a database or reads the environment, which is what keeps it
 importable from an engine process.
 """
 
+from iceberg_connectors.confluence import (
+    CONFLUENCE_CONNECTOR_TYPE,
+    ConfluenceConnector,
+)
 from iceberg_connectors.extraction import (
     Extracted,
     ExtractionLimits,
@@ -35,8 +39,10 @@ from iceberg_connectors.units import GLOB_FRIENDLY_KEYS, ContentOrigin, ContentU
 __version__ = "0.1.0"
 
 __all__ = [
+    "CONFLUENCE_CONNECTOR_TYPE",
     "FAKE_CONNECTOR_TYPE",
     "GLOB_FRIENDLY_KEYS",
+    "ConfluenceConnector",
     "Connector",
     "ConnectorError",
     "ContentOrigin",

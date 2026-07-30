@@ -475,6 +475,7 @@ name = "iceberg-connectors"
 version = "0.1.0"
 source = { editable = "packages/connectors" }
 dependencies = [
+    { name = "httpx2" },
     { name = "iceberg-core" },
     { name = "pypdf" },
     { name = "structlog" },
@@ -482,6 +483,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx2", specifier = ">=2.7.0" },
     { name = "iceberg-core", editable = "packages/core" },
     { name = "pypdf", specifier = ">=6.4.0" },
     { name = "structlog", specifier = ">=25.5.0" },

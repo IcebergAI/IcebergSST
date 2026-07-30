@@ -33,7 +33,8 @@ Confluence-scan-to-triaged-finding flow). M3–M4 complete the product.
   text-extraction step with untrusted-content guards (size caps, timeouts, bomb limits).
 - **Epic: Confluence connector** — **Cloud first, DC-ready interface**; auth, space/page
   discovery + pagination, comments, text-attachment extraction, test-fixture strategy
-  (recorded/mock Confluence for CI).
+  (in-process mock Confluence for CI — see `docs/connectors.md` for why not recorded
+  fixtures). Lives in `packages/connectors/src/iceberg_connectors/confluence/`.
 - **Epic: Engine worker app** — Dramatiq consumer running lease → connector → detect → redact →
   report (ADR 0009 semantics).
 

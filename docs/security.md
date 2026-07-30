@@ -25,8 +25,17 @@ system itself a high-value target. This document states the trust boundaries and
 4. **Engine ↔ scanned content** — attachments and pages are **attacker-editable input**
    attacking the extraction parsers. Mitigations: size caps, extraction timeouts,
    decompression-ratio limits, per-unit failure isolation; consider sandboxing extraction.
-5. **API ↔ Postgres** — only the API holds DB credentials.
-6. **API ↔ secret store** — credentials and pepper accessed only through the `SecretStore`
+5. **Engine ↔ source API** — the engine holds a task-scoped source credential and talks to a
+   base URL an operator configured. The source decides what the responses say, including where
+   they point: a Confluence attachment download answers with a redirect to a signed media URL, so
+   redirects must be followed. They are followed **without the credential** — the target is named
+   by the response, and a source that could point one at a host it controls would otherwise be
+   handed the engine's token. Same reasoning as `POST /sources/{id}/test` refusing redirects
+   outright; the difference is that a signed media URL authorises itself and needs nothing from us.
+   Credentials never reach a log line: `Credential.__repr__` is overridden, because structlog and
+   tracebacks both render values with `repr`.
+6. **API ↔ Postgres** — only the API holds DB credentials.
+7. **API ↔ secret store** — credentials and pepper accessed only through the `SecretStore`
    interface (ADR 0007).
 
 ## Key mitigations

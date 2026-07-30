@@ -1,0 +1,466 @@
+"""The Confluence connector (#47, #48, #49 — ADR 0002, 0009).
+
+The first real source. Two phases, as the protocol requires:
+
+* :meth:`ConfluenceConnector.discover` enumerates spaces the scope allows and
+  returns one :class:`TaskSpec` per space, so a fifty-space site is fifty tasks
+  that engines pick up in parallel rather than one that runs for a day.
+* :meth:`ConfluenceConnector.fetch` walks one space, yielding a unit per page
+  body, per comment, and per text-extractable attachment.
+
+**One space per task, not one page.** Pages are discovered lazily inside the fetch,
+because discovery would otherwise have to page through every page of every space
+before a single one is scanned — turning the fastest part of a scan into a serial
+prologue, and producing a task table with a row per page.
+
+**The locator is the part that has to be right.** A finding's identity is computed
+from it (ADR 0006), so it is the page id and — for a comment or an attachment —
+that part's own id. Never the title, which people edit; never the URL, which
+carries the title; never the version. Get it wrong and every re-scan orphans the
+analyst's triage decisions while looking like it worked (see
+:mod:`iceberg_connectors.units`).
+
+**One bad page must not fail a scan of fifty thousand.** Every per-page failure
+below is counted into :class:`FetchOutcome` and stepped over. What does fail the
+task is a bad credential or a site that will not answer at all, because reporting
+an empty space for those would read as "no secrets here".
+"""
+
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
+from typing import Any
+
+import httpx2
+import structlog
+from iceberg_core.fingerprint import CoarseLocator
+
+from iceberg_connectors.confluence.client import (
+    ConfluenceClient,
+    Credential,
+    DownloadTooLarge,
+    RateLimitPolicy,
+)
+from iceberg_connectors.confluence.storage import body_text, storage_to_text
+from iceberg_connectors.extraction import ExtractionLimits, extract_text
+from iceberg_connectors.protocol import ConnectorError, CredentialError, FetchOutcome, TaskSpec
+from iceberg_connectors.sandbox import ExtractionSandbox
+from iceberg_connectors.units import ContentOrigin, ContentUnit
+
+logger = structlog.get_logger()
+
+CONFLUENCE_CONNECTOR_TYPE = "confluence"
+
+#: Comment endpoints on a v2 page. Both are scanned: an inline comment on a
+#: paragraph is where someone answers "what's the password for staging?".
+COMMENT_ENDPOINTS = ("footer-comments", "inline-comments")
+
+
+@dataclass(slots=True)
+class ConfluenceConnector:
+    """Scans a Confluence Cloud site through REST v2.
+
+    Stateless between tasks by design — the base URL, the scope, and the credential
+    all arrive per call, from the source's connection blob and the task lease. An
+    engine holds one instance and runs any number of sources through it (ADR 0009).
+
+    ``transport`` and ``sleep`` exist so tests drive the real client against the
+    fixture server in ``packages/connectors/tests/confluence_server.py`` (#71).
+    """
+
+    connector_type: str = CONFLUENCE_CONNECTOR_TYPE
+    extraction_limits: ExtractionLimits = field(default_factory=ExtractionLimits)
+    rate_limit: RateLimitPolicy = field(default_factory=RateLimitPolicy)
+    #: Makes the child process attachment parsers run in. A *factory*, not an
+    #: instance: one connector is shared by every worker thread, and an
+    #: `ExtractionSandbox` is explicitly not thread-safe — sharing one would let a
+    #: hostile file in one task kill the extraction of another (#46). Setting it to
+    #: None runs parsers in-process, which is only ever right in a test.
+    sandbox_factory: Callable[[], ExtractionSandbox] | None = ExtractionSandbox
+    transport: httpx2.BaseTransport | None = None
+    #: Injected only by tests, so a backoff assertion costs no wall-clock. None
+    #: leaves the client on `time.sleep`.
+    sleep: Callable[[float], None] | None = None
+
+    # ─── Discovery ────────────────────────────────────────────────────────────
+
+    def discover(self, connection: dict[str, Any], credential: str | None) -> Iterator[TaskSpec]:
+        """One spec per space the scope allows.
+
+        Yielding nothing is a legitimate answer — a site with no spaces, or a scope
+        that matches none. The scan completes having scanned nothing, and
+        reconciliation refuses to auto-resolve on that evidence alone (ADR 0009 §4).
+        """
+        client = self._client(connection, credential)
+        wanted = {str(key) for key in connection.get("spaces") or ()}
+        seen = 0
+
+        for space in client.paginate("/spaces", **_space_filters(connection)):
+            key = str(space.get("key") or "")
+            if wanted and key not in wanted:
+                continue
+            space_id = str(space.get("id") or "")
+            if not space_id:
+                # Nothing can be fetched without it, and guessing would produce a
+                # task that fails later with a much less obvious message.
+                logger.warning("confluence_space_without_id", space_key=key)
+                continue
+
+            seen += 1
+            yield TaskSpec(
+                label=f"space {key or space_id}",
+                params={"space_id": space_id, "space_key": key, "space_name": space.get("name")},
+            )
+
+        logger.info("confluence_discovery_complete", spaces=seen, filtered=bool(wanted))
+
+    # ─── Fetch ────────────────────────────────────────────────────────────────
+
+    def fetch(
+        self,
+        connection: dict[str, Any],
+        spec: TaskSpec,
+        credential: str | None,
+        outcome: FetchOutcome,
+    ) -> Iterator[ContentUnit]:
+        """Every scannable unit in one space: bodies, comments, attachments."""
+        client = self._client(connection, credential)
+        space_id = str(spec.params.get("space_id") or "")
+        if not space_id:
+            raise ConnectorError(f"fetch spec carries no space_id: {spec.label!r}")
+
+        context = _SpaceContext(
+            key=str(spec.params.get("space_key") or ""),
+            name=spec.params.get("space_name"),
+            site=client.base_url,
+        )
+        want_comments = connection.get("include_comments", True)
+        want_attachments = connection.get("include_attachments", True)
+        sandbox = _LazySandbox(self.sandbox_factory)
+
+        try:
+            for page in client.paginate(f"/spaces/{space_id}/pages", **_body_format()):
+                page_id = str(page.get("id") or "")
+                if not page_id:
+                    outcome.failed += 1
+                    continue
+
+                try:
+                    page, text = self._body(client, page, page_id)
+                    # Built once per page, from the page. Everything on a page —
+                    # its comments, its attachments — shares the page's path, so
+                    # one `path_glob` covers the page and its parts (#44).
+                    here = context.for_page(page, page_id)
+
+                    yield from self._page_units(text, page_id, here, outcome)
+                    if want_comments:
+                        yield from self._comment_units(client, page_id, here, outcome)
+                    if want_attachments:
+                        yield from self._attachment_units(client, page_id, here, outcome, sandbox)
+                except CredentialError:
+                    # The token is bad for the whole site, not this page. Failing the
+                    # task tells the operator to rotate it; skipping would report a
+                    # site-wide auth problem as a scan that found nothing.
+                    raise
+                except ConnectorError as exc:
+                    # This page and its parts, stepped over and counted.
+                    outcome.failed += 1
+                    logger.warning("confluence_page_failed", page_id=page_id, error=str(exc))
+        finally:
+            # Reached on a cancelled task too: closing a generator runs this, so an
+            # abandoned fetch does not leak the child process (ADR 0009 §4).
+            sandbox.close()
+
+    def _body(
+        self, client: ConfluenceClient, page: dict[str, Any], page_id: str
+    ) -> tuple[dict[str, Any], str]:
+        """The page payload and its flattened text.
+
+        The list endpoint returns bodies when asked, so this normally costs no
+        extra request. It falls back to fetching the page when a deployment answers
+        without one rather than skipping the most likely place for a secret — and
+        returns the merged payload, because that response also carries the `webui`
+        link every unit on the page needs for its display path.
+        """
+        text = body_text(page)
+        if text:
+            return page, text
+
+        detail = client.get_json(client.url(f"/pages/{page_id}"), params=_body_format())
+        return {**page, **detail}, body_text(detail)
+
+    def _page_units(
+        self, text: str, page_id: str, context: "_PageContext", outcome: FetchOutcome
+    ) -> Iterator[ContentUnit]:
+        """The page body, if it has any text."""
+        if not text:
+            outcome.skipped += 1
+            return
+
+        outcome.units += 1
+        yield ContentUnit(
+            locator=CoarseLocator(connector_type=self.connector_type, resource_id=page_id),
+            text=text,
+            origin=ContentOrigin.BODY,
+            display=context.display(),
+        )
+
+    def _comment_units(
+        self,
+        client: ConfluenceClient,
+        page_id: str,
+        context: "_PageContext",
+        outcome: FetchOutcome,
+    ) -> Iterator[ContentUnit]:
+        """Footer and inline comments, each its own unit.
+
+        Separate units rather than appended to the body, because they are separate
+        things to fix: a secret in a comment is deleted by its author, a secret in
+        the body is edited out of the page. Merging them would also make one
+        person's comment change the body's fingerprint.
+        """
+        for endpoint in COMMENT_ENDPOINTS:
+            for comment in client.paginate(f"/pages/{page_id}/{endpoint}", **_body_format()):
+                comment_id = str(comment.get("id") or "")
+                text = body_text(comment)
+                if not comment_id or not text:
+                    continue
+
+                outcome.units += 1
+                yield ContentUnit(
+                    locator=CoarseLocator(
+                        connector_type=self.connector_type,
+                        resource_id=page_id,
+                        # The comment's own id: editing the page must not change a
+                        # comment finding's identity, or vice versa.
+                        sub_resource=f"comment:{comment_id}",
+                    ),
+                    text=text,
+                    origin=ContentOrigin.COMMENT,
+                    display=context.display() | {"comment_id": comment_id},
+                )
+
+    def _attachment_units(
+        self,
+        client: ConfluenceClient,
+        page_id: str,
+        context: "_PageContext",
+        outcome: FetchOutcome,
+        sandbox: "_LazySandbox",
+    ) -> Iterator[ContentUnit]:
+        """Text-extractable attachments, downloaded and parsed in a child process.
+
+        The size check happens twice on purpose: once against the *declared*
+        ``fileSize``, so an obviously oversized file costs no bandwidth, and once
+        against the bytes actually arriving, because that declaration comes from
+        the same place the file does.
+        """
+        for attachment in client.paginate(f"/pages/{page_id}/attachments"):
+            name = str(attachment.get("title") or "")
+            link = attachment.get("downloadLink")
+            if not name or not link:
+                outcome.skipped += 1
+                continue
+
+            declared = _as_int(attachment.get("fileSize"))
+            if declared is not None and declared > self.extraction_limits.max_input_bytes:
+                outcome.skipped += 1
+                logger.debug("confluence_attachment_too_large", name=name, bytes=declared)
+                continue
+
+            try:
+                data = client.get_bytes(str(link), max_bytes=self.extraction_limits.max_input_bytes)
+            except DownloadTooLarge:
+                # It lied about its size, or did not say. Same outcome either way.
+                outcome.skipped += 1
+                continue
+            except CredentialError:
+                raise
+            except ConnectorError as exc:
+                outcome.failed += 1
+                logger.warning("confluence_attachment_failed", name=name, error=str(exc))
+                continue
+
+            extracted = extract_text(
+                data, name, limits=self.extraction_limits, sandbox=sandbox.get()
+            )
+            if not extracted.outcome.is_text:
+                # An image is an ordinary skip; a bomb or a hang is worth saying so.
+                outcome.skipped += 1
+                if extracted.outcome.is_hostile:
+                    logger.warning(
+                        "confluence_attachment_rejected",
+                        name=name,
+                        outcome=extracted.outcome.value,
+                        detail=extracted.detail,
+                    )
+                continue
+
+            outcome.units += 1
+            yield ContentUnit(
+                locator=CoarseLocator(
+                    connector_type=self.connector_type,
+                    resource_id=page_id,
+                    # The filename, not the attachment id: replacing an attachment
+                    # with a corrected version should update the finding rather
+                    # than orphan it and raise a new one.
+                    sub_resource=f"attachment:{name}",
+                ),
+                text=extracted.text,
+                origin=ContentOrigin.ATTACHMENT,
+                display=context.display()
+                | {
+                    "filename": name,
+                    "media_type": attachment.get("mediaType"),
+                    "truncated": extracted.truncated,
+                },
+            )
+
+    # ─── Wiring ───────────────────────────────────────────────────────────────
+
+    def _client(self, connection: dict[str, Any], credential: str | None) -> ConfluenceClient:
+        base_url = str(connection.get("base_url") or "").strip()
+        if not base_url:
+            raise ConnectorError("confluence source has no base_url configured")
+
+        kwargs: dict[str, Any] = {
+            "base_url": base_url,
+            # Absent is legitimate: an anonymous-readable site. A *wrong* one is
+            # the source's problem to report, which it does with a 401.
+            "credential": Credential(token=credential, email=_email(connection))
+            if credential
+            else None,
+            "rate_limit": self.rate_limit,
+            "transport": self.transport,
+        }
+        if api_prefix := connection.get("api_prefix"):
+            kwargs["api_prefix"] = str(api_prefix)
+        if self.sleep is not None:
+            kwargs["sleep"] = self.sleep
+        return ConfluenceClient(**kwargs)
+
+
+@dataclass(slots=True)
+class _LazySandbox:
+    """One extraction child per fetch, spawned only if an attachment needs it.
+
+    Per fetch rather than per connector because the connector is a shared singleton
+    and a sandbox is not thread-safe; lazily rather than eagerly because a process
+    spawn for a space with no attachments is pure cost.
+    """
+
+    factory: Callable[[], ExtractionSandbox] | None
+    _sandbox: ExtractionSandbox | None = None
+
+    def get(self) -> ExtractionSandbox | None:
+        if self.factory is None:
+            return None
+        if self._sandbox is None:
+            self._sandbox = self.factory()
+        return self._sandbox
+
+    def close(self) -> None:
+        if self._sandbox is not None:
+            self._sandbox.close()
+            self._sandbox = None
+
+
+@dataclass(frozen=True, slots=True)
+class _SpaceContext:
+    """Display context every unit in a space carries.
+
+    Display-only, all of it — the space key, the title, the URL. It is stored on
+    the finding and shown in the UI, and it may change freely between scans without
+    orphaning anything, which is exactly why none of it is in the locator.
+    """
+
+    key: str
+    name: Any
+    site: str
+
+    def for_page(self, page: dict[str, Any], page_id: str) -> "_PageContext":
+        webui = _webui(page)
+        return _PageContext(
+            space=self,
+            title=page.get("title"),
+            path=webui or f"/pages/{page_id}",
+            url=f"{self.site}/wiki{webui}" if webui else f"{self.site}/pages/{page_id}",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _PageContext:
+    """Where one page is, shared by the page and everything attached to it.
+
+    **Comments and attachments carry the page's path, not one of their own.** They
+    have no ``webui`` link of their own, and inventing a synthetic one would mean a
+    ``path_glob`` an analyst wrote against a page silently missed the comments and
+    attachments on it — suppressing one finding out of three and looking correct
+    (#44). Their own identity lives in the locator's ``sub_resource``, where it
+    belongs, and in the ``comment_id``/``filename`` display keys.
+    """
+
+    space: _SpaceContext
+    title: Any
+    path: str
+    url: str
+
+    def display(self) -> dict[str, Any]:
+        # `path` and `url` are what a `path_glob` suppression is matched against
+        # (GLOB_FRIENDLY_KEYS); a connector populating neither leaves analysts
+        # unable to write one for this source at all.
+        return {
+            "space": self.space.key,
+            "space_name": self.space.name,
+            "title": self.title,
+            "path": self.path,
+            "url": self.url,
+        }
+
+
+def _space_filters(connection: dict[str, Any]) -> dict[str, Any]:
+    """Narrow the spaces request where the API can do it for us.
+
+    Personal spaces are excluded by default: they are every user's drafts, they
+    dominate the space count on a large site, and scanning them is a decision an
+    operator should make deliberately rather than inherit.
+    """
+    filters: dict[str, Any] = {"status": "current"}
+    if not connection.get("include_personal_spaces", False):
+        filters["type"] = "global"
+    return filters
+
+
+def _body_format() -> dict[str, Any]:
+    """Ask for storage format — the markup, not the rendered view.
+
+    Rendered HTML runs macros, and a macro that pulls content from elsewhere would
+    attribute someone else's secret to this page.
+    """
+    return {"body-format": "storage"}
+
+
+def _webui(resource: dict[str, Any]) -> str:
+    links = resource.get("_links")
+    if isinstance(links, dict) and links.get("webui"):
+        return str(links["webui"])
+    return ""
+
+
+def _email(connection: dict[str, Any]) -> str | None:
+    """The account email, which is what makes a Cloud API token usable.
+
+    Its absence selects bearer auth (Server/DC PATs), so this is the one field
+    that decides the flavor — see the client's module docstring.
+    """
+    email = connection.get("email") or connection.get("username")
+    return str(email) if email else None
+
+
+def _as_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+__all__ = ["CONFLUENCE_CONNECTOR_TYPE", "ConfluenceConnector", "storage_to_text"]
