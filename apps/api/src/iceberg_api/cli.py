@@ -13,6 +13,7 @@ did.
 
 import argparse
 import sys
+import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
@@ -51,8 +52,12 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def mint_engine_token(name: str, version: str | None) -> str:
-    """Register or rotate ``name`` and return its new token."""
+def mint_engine_token(name: str, version: str | None) -> tuple[uuid.UUID, str]:
+    """Register or rotate ``name``; return its id and new token.
+
+    The id is as much a part of the credential as the token: an engine names
+    itself in its heartbeat path, and the API checks the two agree (#51).
+    """
     with session_scope() as db:
         engine = db.exec(select(Engine).where(col(Engine.name) == name)).first()
         if engine is None:
@@ -61,7 +66,8 @@ def mint_engine_token(name: str, version: str | None) -> str:
             engine.version = version
         minted = mint_token(engine)
         db.add(minted.engine)
-    return minted.token
+        engine_id = minted.engine.id
+    return engine_id, minted.token
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -71,13 +77,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     match args.command:
         case "mint-engine-token":
-            token = mint_engine_token(args.name, args.version)
+            engine_id, token = mint_engine_token(args.name, args.version)
             # Printed to stdout alone, so `... > token.txt` captures exactly the
             # token and the surrounding advice goes to the terminal.
             print(token)
             print(
-                f"Registered engine {args.name!r}. Store this token now — only its "
-                "hash is kept, so it cannot be shown again.",
+                f"Registered engine {args.name!r} as {engine_id}.\n"
+                f"Store this token now — only its hash is kept, so it cannot be shown "
+                f"again. The engine needs both:\n"
+                f"  ICEBERG_ENGINE_ID={engine_id}\n"
+                f"  ICEBERG_ENGINE_TOKEN=<the token above>",
                 file=sys.stderr,
             )
         case "reclaim":

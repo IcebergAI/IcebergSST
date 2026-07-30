@@ -89,8 +89,15 @@ a channel is audit-logged.
   `python -m iceberg_api mint-engine-token --name engine-1` (compose) or a provisioning Job (Helm) —
   never a default credential baked into an image. Only the token's SHA-256 hash is stored, so it
   cannot be shown twice; re-running the command **rotates** it, which is also how an operator
-  replaces a token they believe has leaked. Registration through the API requires an admin session,
-  because an engine that could enrol itself would let anyone reaching the API join the fleet.
+  replaces a token they believe has leaked — rotation keeps the engine's id, so only the token has
+  to be replaced. Registration through the API requires an admin session, because an engine that
+  could enrol itself would let anyone reaching the API join the fleet.
+
+  The command prints the engine's **id** as well, and the engine needs both
+  (`ICEBERG_ENGINE_ID`, `ICEBERG_ENGINE_TOKEN`). An engine names itself in its heartbeat path and
+  the API checks the two agree, so a token on its own can lease and report but never renew a lease —
+  a degraded mode the worker warns about at startup rather than refusing to run, since scans still
+  complete, just less efficiently.
 
 ## Secret store in practice (`EnvKeyBackend`)
 The default backend (ADR 0007) is AES-256-GCM with a master key injected as

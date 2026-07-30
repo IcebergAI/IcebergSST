@@ -109,6 +109,7 @@ services:
       <<: *iceberg-common-env
       ICEBERG_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       ICEBERG_API_BASE_URL: http://api:8000
+      ICEBERG_ENGINE_ID: ${ICEBERG_ENGINE_ID:-}
       ICEBERG_ENGINE_TOKEN: ${ICEBERG_ENGINE_TOKEN:-}
       ICEBERG_WORKER_THREADS: ${ICEBERG_WORKER_THREADS:-4}
     depends_on:
