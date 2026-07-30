@@ -184,7 +184,9 @@ class ConfluenceClient:
     # ─── Single resources ─────────────────────────────────────────────────────
 
     def get_json(self, url: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        response = self._request("GET", self._resolve(url), params=params)
+        resolved = self._resolve(url)
+        self._require_same_origin(resolved, _path_of(url))
+        response = self._request("GET", resolved, params=params)
         try:
             body = response.json()
         except ValueError as exc:
@@ -215,7 +217,11 @@ class ConfluenceClient:
         The signed URL carries its own authorisation and needs none from us.
         """
         target = self._resolve(url)
-        headers = self._headers()
+        # The first hop carries the credential, so it must be on the site. The
+        # download itself may then redirect to an off-origin signed media URL, which
+        # the loop below follows with auth stripped.
+        self._require_same_origin(target, _path_of(url))
+        headers = self._headers(target)
 
         for _hop in range(MAX_REDIRECTS + 1):
             with (
@@ -252,17 +258,28 @@ class ConfluenceClient:
         waited = 0.0
         last_error: Exception | None = None
 
-        for attempt in range(self.rate_limit.attempts):
+        # 429 and 5xx/transport failures have separate budgets. A throttle is a
+        # normal answer bounded by how long the scan will wait (`max_wait_seconds`);
+        # it must not spend a retry attempt, or a run of throttles would exhaust the
+        # attempts and fail with the wrong error long before the wait budget is up.
+        # `throttles` grows the fallback backoff without touching the retry budget.
+        attempt = 0
+        throttles = 0
+        while attempt < self.rate_limit.attempts:
             with self._client() as client:
                 try:
-                    response = client.request(method, url, params=params, headers=self._headers())
+                    response = client.request(
+                        method, url, params=params, headers=self._headers(url)
+                    )
                 except httpx2.HTTPError as exc:
                     last_error = ConnectorError(f"{type(exc).__name__} reaching {path}")
                     self.sleep(self.rate_limit.delay_for(attempt))
+                    attempt += 1
                     continue
 
             if response.status_code == 429:
-                pause = _retry_after(response, fallback=self.rate_limit.delay_for(attempt))
+                pause = _retry_after(response, fallback=self.rate_limit.delay_for(throttles))
+                throttles += 1
                 waited += pause
                 if waited > self.rate_limit.max_wait_seconds:
                     raise RateLimited(
@@ -278,6 +295,7 @@ class ConfluenceClient:
                     f"confluence returned {response.status_code} for {path}"
                 )
                 self.sleep(self.rate_limit.delay_for(attempt))
+                attempt += 1
                 continue
 
             self._raise_for_status(response, path)
@@ -300,11 +318,21 @@ class ConfluenceClient:
     def _client(self) -> httpx2.Client:
         return httpx2.Client(transport=self.transport, timeout=self.timeout_seconds)
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, url: str) -> dict[str, str]:
         headers = {"Accept": "application/json"}
-        if self.credential is not None:
+        # The credential authenticates us to the configured site and nowhere else.
+        # A URL named by a response — a `next` cursor, an attachment `downloadLink`,
+        # a redirect target — that points off-origin must never receive it, or a
+        # malicious or compromised source could harvest this engine's Confluence
+        # token (docs/security.md). This is the same reasoning that strips auth on
+        # redirects; the response-named absolute URLs have the same property.
+        if self.credential is not None and self._same_origin(url):
             headers["Authorization"] = self.credential.header()
         return headers
+
+    def _same_origin(self, url: str) -> bool:
+        base, other = urlsplit(self.base_url), urlsplit(url)
+        return (other.scheme, other.netloc) == (base.scheme, base.netloc)
 
     def url(self, path: str) -> str:
         """An API path (``/pages/123``) as an absolute URL."""
@@ -319,6 +347,15 @@ class ConfluenceClient:
         if url.startswith(("http://", "https://")):
             return url
         return f"{self.base_url}/{url.lstrip('/')}"
+
+    def _require_same_origin(self, url: str, path: str) -> None:
+        """Refuse an API call to a host other than the configured site.
+
+        A ``next`` cursor or single-resource URL is always on the site; an absolute
+        one that points elsewhere is a response steering the scan off-origin (an
+        SSRF attempt), which has no legitimate meaning on the JSON API path."""
+        if not self._same_origin(url):
+            raise ConnectorError(f"refusing to follow an off-site URL for {path}")
 
 
 def _next_link(payload: dict[str, Any]) -> str | None:
@@ -339,9 +376,15 @@ def _retry_after(response: httpx2.Response, *, fallback: float) -> float:
     raw = response.headers.get("retry-after")
     if raw:
         try:
-            return max(0.0, float(raw.strip()))
+            parsed = float(raw.strip())
         except ValueError:
             logger.debug("confluence_retry_after_unparsed", value=raw[:32])
+        else:
+            # A zero or negative wait is not an actionable instruction, and since a
+            # throttle no longer consumes a retry attempt, honouring it verbatim
+            # would spin. Fall back to backoff, which always advances the budget.
+            if parsed > 0:
+                return parsed
     return fallback
 
 
