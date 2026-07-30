@@ -27,6 +27,8 @@ dev = [
     "httpx2>=2.7.0",
     # croniter ships no inline types.
     "types-croniter>=6.0.0",
+    # Nor does PyYAML, which iceberg-detect uses to load rule packs.
+    "types-PyYAML>=6.0.12",
     # Reads deploy/compose/docker-compose.yml in the deployment invariant tests.
     "pyyaml>=6.0.3",
     "mypy>=2.3.0",

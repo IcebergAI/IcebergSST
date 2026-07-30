@@ -43,23 +43,27 @@ def test_the_default_rule_pack_is_extended_not_replaced(config: dict[str, Any]) 
     assert config.get("extend", {}).get("useDefault") is True
 
 
-def test_no_allowlist_exempts_a_path_on_its_own(config: dict[str, Any]) -> None:
-    """A path allowlist silences a whole directory, including real credentials.
+def test_no_allowlist_names_a_path(config: dict[str, Any]) -> None:
+    """A path allowlist silences a whole file, including real credentials in it.
 
-    Exempting `**/tests/**` is the tempting one — this repository's fixtures are
-    deliberately secret-shaped — and it would retract the reason `pyproject.toml`
-    gives for exempting the test suite from ruff's S105/S106: that real leaks are
-    caught by the gitleaks job over the whole repo. An allowlist may name paths, but
-    only alongside something that constrains *which* string is allowed there.
+    Not a style preference — gitleaks applies `paths` as a file-level pre-filter,
+    before and independently of `regexes`/`stopwords`, so pairing them with
+    `condition = "AND"` does *not* narrow the exemption. Verified against v8.30: a
+    real `ghp_…` token in a file under an allowlisted path goes unreported.
+
+    Exempting `**/tests/**` is the tempting one, since this repository's fixtures
+    are deliberately secret-shaped, and it would retract the reason
+    `pyproject.toml` gives for exempting the test suite from ruff's S105/S106 —
+    that real leaks are caught by the gitleaks job over the whole repo. Allowlist
+    the literal instead, or mark the line with an inline `gitleaks:allow`.
     """
     for entry in _allowlists(config):
-        if not entry.get("paths"):
-            continue
-        narrowing = entry.get("regexes") or entry.get("stopwords") or entry.get("commits")
-        assert narrowing, f"path allowlist with no secret constraint: {entry.get('paths')}"
-        assert entry.get("condition", "").upper() == "AND", (
-            "a path allowlist must require *both* criteria; the default OR makes the "
-            f"path alone sufficient: {entry.get('paths')}"
+        assert not entry.get("paths"), (
+            "allowlists must not name paths — a path exemption applies to the whole "
+            f"file regardless of any other criterion: {entry.get('paths')}"
+        )
+        assert entry.get("regexes") or entry.get("stopwords") or entry.get("commits"), (
+            f"allowlist constrains nothing: {entry}"
         )
 
 

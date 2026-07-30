@@ -515,10 +515,14 @@ version = "0.1.0"
 source = { editable = "packages/detect" }
 dependencies = [
     { name = "iceberg-core" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "iceberg-core", editable = "packages/core" }]
+requires-dist = [
+    { name = "iceberg-core", editable = "packages/core" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+]
 
 [[package]]
 name = "iceberg-engine"
@@ -561,6 +565,7 @@ dev = [
     { name = "pyyaml" },
     { name = "ruff" },
     { name = "types-croniter" },
+    { name = "types-pyyaml" },
 ]
 
 [package.metadata]
@@ -578,6 +583,7 @@ dev = [
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "ruff", specifier = ">=0.15.22" },
     { name = "types-croniter", specifier = ">=6.0.0" },
+    { name = "types-pyyaml", specifier = ">=6.0.12" },
 ]
 
 [[package]]
@@ -1223,6 +1229,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/c0/e1/ef8900515a103efa41b29ce81e59efb18e72bc9642139c5a3a17f6022641/types_croniter-6.2.4.20260711.tar.gz", hash = "sha256:807793e109f4e0d51ec18f6277a1a5f1d133e425ac6bee3a7c3254ab1793e0ea", size = 12164, upload-time = "2026-07-11T04:51:18.624Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c8/3f/896a98180a55f855bd068b97e8c99fd4ce1885a4b43f68fd7b29641084f6/types_croniter-6.2.4.20260711-py3-none-any.whl", hash = "sha256:601b68139a47fe1b2177f433132cc81fd91155f3059a49c5cb63404c389dff01", size = 9746, upload-time = "2026-07-11T04:51:17.662Z" },
+]
+
+[[package]]
+name = "types-pyyaml"
+version = "6.0.12.20260724"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/3f/6f/a28f44bcd56bebed42b028a2894c79853e2f5e6b5279e633cb3f287a05e7/types_pyyaml-6.0.12.20260724.tar.gz", hash = "sha256:3c1ce1bb73cd5ec02e90390c2b1f00e810d241d8825fd73ff359696839271b6b", size = 17893, upload-time = "2026-07-24T04:58:43.453Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8b/42/0337fefc615e20ee55d1c8f71b774a9b2b734a04669139c20753b27a2a3a/types_pyyaml-6.0.12.20260724-py3-none-any.whl", hash = "sha256:d57db930a4b2efbc57cf430ec8882765d246929432fa253092f383902329a453", size = 20312, upload-time = "2026-07-24T04:58:42.486Z" },
 ]
 
 [[package]]
