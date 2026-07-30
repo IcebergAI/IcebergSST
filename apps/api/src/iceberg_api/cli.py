@@ -21,9 +21,15 @@ import structlog
 from iceberg_core.config import get_api_settings
 from iceberg_core.db import session_scope
 from iceberg_core.logging import configure_logging
-from iceberg_core.models import Engine
+from iceberg_core.models import (
+    AUDIT_ENGINE_REGISTERED,
+    AUDIT_ENGINE_TOKEN_ROTATED,
+    AUDIT_TARGET_ENGINE,
+    Engine,
+)
 from sqlmodel import col, select
 
+from iceberg_api import audit
 from iceberg_api.dispatch import build_dispatcher
 from iceberg_api.engines.auth import mint_token
 from iceberg_api.scans import service
@@ -60,12 +66,25 @@ def mint_engine_token(name: str, version: str | None) -> tuple[uuid.UUID, str]:
     """
     with session_scope() as db:
         engine = db.exec(select(Engine).where(col(Engine.name) == name)).first()
+        rotating = engine is not None
         if engine is None:
             engine = Engine(name=name, token_hash="", version=version)
         elif version:
             engine.version = version
         minted = mint_token(engine)
         db.add(minted.engine)
+        # The same durable trail the admin route writes: minting a credential
+        # that will later receive decrypted source credentials belongs in
+        # audit_event whichever door it came through. No actor — this runs as
+        # whoever can already execute commands in the API container.
+        audit.record(
+            db,
+            actor_id=None,
+            action=AUDIT_ENGINE_TOKEN_ROTATED if rotating else AUDIT_ENGINE_REGISTERED,
+            target_type=AUDIT_TARGET_ENGINE,
+            target_id=minted.engine.id,
+            detail={"name": minted.engine.name, "via": "cli"},
+        )
         engine_id = minted.engine.id
     return engine_id, minted.token
 
