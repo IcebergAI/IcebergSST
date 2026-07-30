@@ -300,6 +300,95 @@ def test_a_completed_scan_auto_resolves_what_it_did_not_see(
     assert fixture.scan.counts["resolved"] == 1
 
 
+def test_reconciliation_never_resolves_a_suppressed_finding(scan_fixture: Fixture) -> None:
+    """Engines may pre-filter with the lease's suppressions (#44), so a suppressed
+    finding going unreported is not evidence it is gone (ADR 0008)."""
+    fixture = scan_fixture
+    earlier = Scan(
+        source_id=fixture.source.id, trigger=ScanTrigger.MANUAL, status=ScanStatus.COMPLETED
+    )
+    fixture.session.add(earlier)
+    fixture.session.commit()
+    suppressed = Finding(
+        source_id=fixture.source.id,
+        fingerprint=OTHER_FINGERPRINT,
+        rule_id="aws-access-key-id",
+        rulepack_version="2026.07.1",
+        resource_locator={},
+        redacted_snippet="[redacted]",
+        secret_hash="c" * 64,
+        severity="high",
+        first_seen_scan_id=earlier.id,
+        last_seen_scan_id=earlier.id,
+        suppressed_at=earlier.created_at,
+    )
+    fixture.session.add(suppressed)
+    fixture.session.commit()
+
+    task = fixture.fetch_task()
+    response = fixture.report(task, findings=[_finding_payload()])
+
+    assert response.json()["scan_status"] == ScanStatus.COMPLETED.value
+    fixture.session.refresh(suppressed)
+    assert suppressed.state is FindingState.OPEN
+    assert suppressed.suppressed_at is not None
+
+
+def test_a_scan_that_fetched_nothing_does_not_mass_resolve(scan_fixture: Fixture) -> None:
+    """A discovery that enumerates zero units — an emptied space, or a credential
+    whose scope quietly shrank — must not resolve every open finding at once."""
+    fixture = scan_fixture
+    earlier = Scan(
+        source_id=fixture.source.id, trigger=ScanTrigger.MANUAL, status=ScanStatus.COMPLETED
+    )
+    fixture.session.add(earlier)
+    fixture.session.commit()
+    open_finding = Finding(
+        source_id=fixture.source.id,
+        fingerprint=OTHER_FINGERPRINT,
+        rule_id="aws-access-key-id",
+        rulepack_version="2026.07.1",
+        resource_locator={},
+        redacted_snippet="[redacted]",
+        secret_hash="c" * 64,
+        severity="high",
+        first_seen_scan_id=earlier.id,
+        last_seen_scan_id=earlier.id,
+    )
+    fixture.session.add(open_finding)
+    fixture.session.commit()
+
+    fixture.lease(fixture.discovery)
+    fixture.session.refresh(fixture.discovery)
+    response = fixture.report(fixture.discovery, task_specs=[])
+
+    assert response.json()["scan_status"] == ScanStatus.COMPLETED.value
+    fixture.session.refresh(open_finding)
+    assert open_finding.state is FindingState.OPEN
+
+
+def test_a_replay_repairs_a_lost_finalisation(scan_fixture: Fixture) -> None:
+    """If the crash landed between accepting results and finishing the scan, the
+    engine's retry is the first chance to settle it."""
+    fixture = scan_fixture
+    task = fixture.fetch_task()
+    key = f"{task.id}:{task.attempts}"
+    fixture.report(task, idempotency_key=key)
+
+    # Simulate the lost follow-up: results accepted, but the scan still active.
+    fixture.session.refresh(fixture.scan)
+    fixture.scan.status = ScanStatus.RUNNING
+    fixture.scan.finished_at = None
+    fixture.session.commit()
+
+    replay = fixture.report(task, idempotency_key=key)
+
+    assert replay.json()["replay"] is True
+    assert replay.json()["scan_status"] == ScanStatus.COMPLETED.value
+    fixture.session.refresh(fixture.scan)
+    assert fixture.scan.status is ScanStatus.COMPLETED
+
+
 def test_a_triaged_finding_keeps_its_state_across_scans(scan_fixture: Fixture) -> None:
     """The whole point of a stable fingerprint (ADR 0006)."""
     fixture = scan_fixture

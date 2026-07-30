@@ -74,6 +74,7 @@ services:
       ICEBERG_FINGERPRINT_PEPPER_REF: ${ICEBERG_FINGERPRINT_PEPPER_REF:?generate one with `make secrets`}
       # Authentication (ADR 0005) — api role only, like everything above.
       ICEBERG_SESSION_SECRET: ${ICEBERG_SESSION_SECRET:?generate one with `make secrets`}
+      ICEBERG_SESSION_TTL_MINUTES: ${ICEBERG_SESSION_TTL_MINUTES:-480}
       ICEBERG_COOKIE_SECURE: ${ICEBERG_COOKIE_SECURE:-false}
       ICEBERG_OIDC_ISSUER: ${ICEBERG_OIDC_ISSUER:-}
       ICEBERG_OIDC_CLIENT_ID: ${ICEBERG_OIDC_CLIENT_ID:-}

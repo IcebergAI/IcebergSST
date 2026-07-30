@@ -88,8 +88,13 @@ class Finding(TimestampedModel, table=True):
         ondelete="SET NULL",
     )
 
-    first_seen_scan_id: uuid.UUID = Field(foreign_key="scan.id", ondelete="CASCADE")
-    last_seen_scan_id: uuid.UUID = Field(foreign_key="scan.id", ondelete="CASCADE")
+    #: RESTRICT, not CASCADE: these columns are the finding's history, and a
+    #: finding's lifecycle belongs to its *source*, not to any one scan. Deleting
+    #: a scan row (retention, cleanup) must never silently take open findings and
+    #: their audit trail with it — the scan rows it references cannot be deleted
+    #: while the finding exists.
+    first_seen_scan_id: uuid.UUID = Field(foreign_key="scan.id", ondelete="RESTRICT")
+    last_seen_scan_id: uuid.UUID = Field(foreign_key="scan.id", ondelete="RESTRICT")
 
 
 class FindingEvent(IcebergModel, table=True):

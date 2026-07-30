@@ -15,6 +15,7 @@ Deliberate choices:
 """
 
 import argparse
+import os
 import secrets
 import stat
 import sys
@@ -85,8 +86,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     rendered, filled = render(args.example.read_text())
-    args.output.write_text(rendered)
-    args.output.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    # Created 0600 from the first byte: write-then-chmod leaves a window where the
+    # master key sits world-readable on a shared machine.
+    descriptor = os.open(
+        args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IRUSR | stat.S_IWUSR
+    )
+    with os.fdopen(descriptor, "w") as output:
+        output.write(rendered)
 
     remaining = [
         line.split("=", 1)[0] for line in rendered.splitlines() if line.endswith(f"={PLACEHOLDER}")

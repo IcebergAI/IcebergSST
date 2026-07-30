@@ -68,7 +68,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 print(store.generate_pepper_ref())
             case "seal":
-                plaintext = sys.stdin.read().rstrip("\n")
+                # At most one trailing newline is stripped — the one `echo` or a
+                # heredoc appends. A credential that genuinely ends in newlines
+                # must seal exactly as piped, or the connector authenticates with
+                # a silently corrupted value.
+                plaintext = sys.stdin.read().removesuffix("\n")
                 if not plaintext:
                     raise SecretStoreError("nothing to seal: pipe the secret in on stdin")
                 print(build_secret_store().seal(plaintext, purpose=SecretPurpose(args.purpose)))

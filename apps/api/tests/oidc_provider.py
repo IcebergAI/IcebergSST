@@ -57,6 +57,7 @@ class FakeProvider:
         subject: str = "oidc|alice",
         nonce: str,
         email: str = "alice@example.test",
+        email_verified: bool | None = True,
         name: str | None = "Alice Analyst",
         audience: str = CLIENT_ID,
         issuer: str = ISSUER,
@@ -73,6 +74,8 @@ class FakeProvider:
             "nonce": nonce,
             "email": email,
         }
+        if email_verified is not None:
+            claims["email_verified"] = email_verified
         if name is not None:
             claims["name"] = name
         return jwt.encode(claims, self.private_key, algorithm="RS256", headers={"kid": kid})

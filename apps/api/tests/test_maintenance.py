@@ -8,7 +8,7 @@ from conftest import RecordingDispatcher
 from iceberg_api import maintenance
 from iceberg_api.scans import service
 from iceberg_core.db import set_db_engine
-from iceberg_core.enums import ScanTaskStatus, ScanTrigger, SourceType
+from iceberg_core.enums import ScanStatus, ScanTaskStatus, ScanTrigger, SourceType
 from iceberg_core.models import Engine, Scan, ScanTask, Schedule, Source
 from sqlalchemy import Engine as SAEngine
 from sqlmodel import Session, select
@@ -110,3 +110,41 @@ def test_a_disabled_source_is_not_scanned_on_its_cadence(
     maintenance.run_once(dispatcher)
 
     assert session.exec(select(Scan)).all() == []
+
+
+def test_a_round_redispatches_a_queued_task_whose_message_was_lost(
+    session: Session, dispatcher: RecordingDispatcher
+) -> None:
+    """A crash between commit and enqueue leaves a queued row with no message;
+    the sweep is the only thing that will ever deliver it."""
+    source = _source(session)
+    scan = service.launch_scan(session, source, trigger=ScanTrigger.MANUAL, dispatcher=dispatcher)
+    task = session.exec(select(ScanTask).where(ScanTask.scan_id == scan.id)).one()
+    dispatcher.enqueued.clear()  # the launch enqueue is the message that "got lost"
+
+    later = datetime.now(UTC) + timedelta(minutes=10)
+    maintenance.run_once(dispatcher, now=later)
+
+    assert dispatcher.enqueued == [task.id]
+    # Paced: the same round does not spam the queue on the next beat.
+    dispatcher.enqueued.clear()
+    maintenance.run_once(dispatcher, now=later + timedelta(seconds=30))
+    assert dispatcher.enqueued == []
+
+
+def test_a_round_finalizes_a_scan_stranded_by_a_crash(
+    session: Session, dispatcher: RecordingDispatcher
+) -> None:
+    """All tasks terminal but the scan still active: the finalize sweep settles it,
+    so the source is not blocked forever by the one-active-scan index."""
+    source = _source(session)
+    scan = service.launch_scan(session, source, trigger=ScanTrigger.MANUAL, dispatcher=dispatcher)
+    task = session.exec(select(ScanTask).where(ScanTask.scan_id == scan.id)).one()
+    service.complete_task(session, task, status=ScanTaskStatus.FAILED, error="engine died")
+    session.commit()  # ...and the follow-up finalisation never ran
+
+    maintenance.run_once(dispatcher)
+
+    session.refresh(scan)
+    assert scan.status is ScanStatus.FAILED
+    assert scan.finished_at is not None

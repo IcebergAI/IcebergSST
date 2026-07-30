@@ -1,11 +1,13 @@
 """Login, callback, logout, and `/auth/me` (#28, #30)."""
 
 import secrets
+from functools import lru_cache
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
 from iceberg_core.config import ApiSettings
+from sqlalchemy.exc import IntegrityError
 
 from iceberg_api.auth.dependencies import (
     CsrfProtected,
@@ -68,10 +70,22 @@ def oidc_config(settings: ApiSettings) -> OidcConfig:
     )
 
 
+@lru_cache(maxsize=4)
+def _client_for(config: OidcConfig) -> OidcClient:
+    """One client per provider configuration, kept for the process.
+
+    The client's discovery/JWKS caching only exists if the client itself outlives
+    the request — a fresh instance per request would refetch the discovery
+    document on every login and the JWKS on every callback, and a blip at the
+    IdP's metadata endpoint would fail an otherwise-valid login mid-flight.
+    """
+    return OidcClient(config)
+
+
 def get_oidc_client(settings: SettingsDep) -> OidcClient:
     """The provider client as a dependency, so tests can inject a fake provider."""
     try:
-        return OidcClient(oidc_config(settings))
+        return _client_for(oidc_config(settings))
     except AuthConfigError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
 
@@ -155,10 +169,18 @@ async def callback(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "login failed") from exc
 
     try:
-        user = provision_user(db, claims, settings)
+        try:
+            user = provision_user(db, claims, settings)
+            db.commit()
+        except IntegrityError:
+            # Two first logins for the same brand-new subject raced (two tabs, a
+            # double-click); the unique constraint made one insert lose. The row
+            # exists now, so provisioning again finds it instead of 500ing.
+            db.rollback()
+            user = provision_user(db, claims, settings)
+            db.commit()
     except AccountDisabled as exc:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "account is disabled") from exc
-    db.commit()
 
     logger.info("login_succeeded", user_id=str(user.id), role=user.role.value)
     response = RedirectResponse(login_state.return_path, status_code=status.HTTP_303_SEE_OTHER)

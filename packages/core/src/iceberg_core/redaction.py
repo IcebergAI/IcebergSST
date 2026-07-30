@@ -170,12 +170,24 @@ def _masked_pieces(
     policy: RedactionPolicy,
 ) -> list[str]:
     """Walk the window, emitting collapsed context and masked secrets in order."""
-    # The target's mask wins over any overlapping neighbour, so neighbours that
-    # intersect it are dropped rather than double-masked.
-    neighbours = sorted(
-        (span for span in other_spans if span.overlaps(window) and not span.overlaps(target)),
-        key=lambda span: span.start,
-    )
+    # The target's mask wins over any overlapping neighbour, but a neighbour that
+    # reaches beyond the target — a generic entropy match around a narrower
+    # vendor match, say — still owns the parts outside it. Those parts are kept
+    # as spans of their own rather than dropped, or their text would be emitted
+    # as ordinary context.
+    neighbours: list[Span] = []
+    for span in other_spans:
+        if not span.overlaps(window):
+            continue
+        if not span.overlaps(target):
+            neighbours.append(span)
+            continue
+        if span.start < target.start:
+            neighbours.append(Span(span.start, target.start))
+        if span.end > target.end:
+            neighbours.append(Span(target.end, span.end))
+    neighbours.sort(key=lambda span: span.start)
+
     # Neighbours are masked with the conservative default policy: this code has no
     # way to know which rule produced them, so it assumes nothing is revealable.
     plan: list[tuple[Span, str]] = [(target, mask_secret(text[target.start : target.end], policy))]
@@ -186,8 +198,14 @@ def _masked_pieces(
 
     # The same secret often appears more than once in a page ("same as prod: …")
     # and only one occurrence need have been matched. Scrubbing every literal
-    # occurrence out of the context keeps a stray copy from riding along.
-    replacements = tuple((text[span.start : span.end], mask) for span, mask in plan)
+    # occurrence out of the context keeps a stray copy from riding along. The
+    # original extent of every match is scrubbed too, so a repeat of a clipped
+    # neighbour is caught whole.
+    replacements = tuple((text[span.start : span.end], mask) for span, mask in plan) + tuple(
+        (text[span.start : span.end], mask_secret(text[span.start : span.end], RedactionPolicy()))
+        for span in other_spans
+        if span.overlaps(target)
+    )
 
     pieces: list[str] = []
     cursor = window.start

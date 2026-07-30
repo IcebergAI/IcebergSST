@@ -75,6 +75,10 @@ class IdentityClaims:
     subject: str
     email: str
     display_name: str
+    #: Whether the provider vouches for the email (the ``email_verified`` claim).
+    #: OIDC is explicit that ``email`` alone is not trustworthy; anything that
+    #: grants privilege by address must check this flag.
+    email_verified: bool = False
 
 
 def new_pkce_verifier() -> str:
@@ -101,6 +105,9 @@ class OidcClient:
         self._config = config
         self._metadata = metadata
         self._jwks = jwks
+        # An injected JWKS is authoritative (tests pin one); only a fetched JWKS
+        # may be refreshed when a token names a key it does not contain.
+        self._jwks_pinned = jwks is not None
         # Injected by tests so discovery and token exchange run their real code
         # against a scripted provider instead of the network.
         self._transport = transport
@@ -195,17 +202,23 @@ class OidcClient:
             display_name=str(
                 claims.get("name") or claims.get("preferred_username") or email or subject
             ),
+            email_verified=claims.get("email_verified") is True,
         )
 
     async def _signing_key(self, id_token: str) -> jwt.PyJWK:
         """Resolve the JWKS key the token's ``kid`` names."""
         header = jwt.get_unverified_header(id_token)
         kid = header.get("kid")
-        jwks = await self._jwk_set()
-        for entry in jwks.get("keys", []):
-            if kid is None or entry.get("kid") == kid:
-                return jwt.PyJWK.from_dict(entry)
-        raise OidcError(f"provider JWKS has no key for kid {kid!r}")
+        key = self._key_for(await self._jwk_set(), kid)
+        if key is None and not self._jwks_pinned:
+            # Key rotation: a cached JWKS can predate the key that signed this
+            # token. One refetch closes the gap without letting a bad token
+            # drive unbounded fetches.
+            self._jwks = None
+            key = self._key_for(await self._jwk_set(), kid)
+        if key is None:
+            raise OidcError(f"provider JWKS has no key for kid {kid!r}")
+        return key
 
     async def _jwk_set(self) -> dict[str, Any]:
         if self._jwks is None:
@@ -220,6 +233,12 @@ class OidcClient:
             raise OidcError(f"GET {url} returned HTTP {response.status_code}")
         document: dict[str, Any] = response.json()
         return document
+
+    def _key_for(self, jwks: dict[str, Any], kid: str | None) -> jwt.PyJWK | None:
+        for entry in jwks.get("keys", []):
+            if kid is None or entry.get("kid") == kid:
+                return jwt.PyJWK.from_dict(entry)
+        return None
 
     def _http(self) -> httpx2.AsyncClient:
         return httpx2.AsyncClient(
