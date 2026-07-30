@@ -262,3 +262,53 @@ def test_a_page_the_source_could_not_read_is_counted_not_fatal() -> None:
     assert api.submission["status"] == "completed"
     assert api.submission["counts"]["units_failed"] == 1
     assert len(api.submission["findings"]) == 1
+
+
+def test_a_cancelled_task_is_abandoned_without_reporting() -> None:
+    """The API already moved the task to `cancelled` and is not waiting for
+    anything; submitting would be answered with a 409 (ADR 0009 §4)."""
+    from iceberg_engine.heartbeat import TaskRegistry
+
+    tasks = TaskRegistry()
+    api = Api()
+
+    with tasks.holding(TASK_ID):
+        tasks.note_cancelled([TASK_ID])
+        report = run_task(TASK_ID, client=_client(api), pack=PACK, tasks=tasks)
+
+    assert report is None
+    assert api.submissions == []
+
+
+def test_an_uncancelled_task_reports_normally_with_a_registry() -> None:
+    """The registry must not change the happy path — it only adds a way to stop."""
+    from iceberg_engine.heartbeat import TaskRegistry
+
+    tasks = TaskRegistry()
+    api = Api()
+
+    report = run_task(TASK_ID, client=_client(api), pack=PACK, tasks=tasks)
+
+    assert report is not None and report.status == "completed"
+    assert len(api.submission["findings"]) == 1
+
+
+def test_a_running_task_is_registered_so_the_heartbeat_can_renew_it() -> None:
+    """Without this the heartbeat names no tasks and every lease lapses."""
+    from iceberg_engine.heartbeat import TaskRegistry
+
+    tasks = TaskRegistry()
+    seen: list[list[Any]] = []
+
+    class Observing(FakeConnector):
+        def fetch(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
+            seen.append(tasks.held())
+            yield from super().fetch(*args, **kwargs)
+
+    registry.clear()
+    registry.register(Observing(spaces={"DOCS": [FakePage("page-1", LEAKY)]}))
+
+    run_task(TASK_ID, client=_client(Api()), pack=PACK, tasks=tasks)
+
+    assert seen == [[TASK_ID]]
+    assert tasks.held() == []  # ...and released once done

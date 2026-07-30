@@ -11,6 +11,7 @@ would have to grow a new settings field, which is a reviewable change rather
 than an accident of deployment.
 """
 
+import uuid
 from functools import lru_cache
 from typing import Literal
 
@@ -116,6 +117,10 @@ class EngineSettings(CoreSettings):
     redis_url: str = "redis://localhost:6379/0"
     api_base_url: str = "http://localhost:8000"
     engine_token: SecretStr | None = None
+    #: This engine's own id, printed beside the token at enrolment. An engine
+    #: names itself in its heartbeat path and the API checks the two agree, so a
+    #: token without its id can lease and report but never renew a lease (#51).
+    engine_id: uuid.UUID | None = None
     metrics_port: int = Field(default=DEFAULT_METRICS_PORT, ge=1, le=65535)
 
     #: Concurrent scan tasks per engine process. Each holds a lease and an HTTP

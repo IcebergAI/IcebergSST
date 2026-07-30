@@ -36,10 +36,16 @@ from iceberg_core.tasks import SCAN_TASK_ACTOR, SCAN_TASK_OPTIONS, SCAN_TASK_QUE
 from iceberg_detect import RulePack, load_named_pack
 from prometheus_client import start_http_server
 
+from iceberg_engine import __version__
 from iceberg_engine.api_client import EngineClient
+from iceberg_engine.heartbeat import Heartbeat, TaskRegistry
 from iceberg_engine.runner import run_task
 
 logger = structlog.get_logger()
+
+#: Tasks this process holds. Shared by the actor threads doing the work and the
+#: heartbeat thread renewing their leases (#51).
+TASKS = TaskRegistry()
 
 
 @lru_cache(maxsize=1)
@@ -68,6 +74,9 @@ def build_client(settings: EngineSettings) -> EngineClient:
     return EngineClient(
         base_url=settings.api_base_url,
         token=settings.engine_token.get_secret_value(),
+        # Without it this engine can lease and report but never renew: the
+        # heartbeat route requires the path id to match the token.
+        engine_id=settings.engine_id,
     )
 
 
@@ -135,7 +144,12 @@ def run_scan_task(task_id: str) -> None:
     reports a failure to the API itself, so anything reaching this frame is a bug
     worth a stack trace in the logs.
     """
-    run_task(uuid.UUID(task_id), client=build_client(get_engine_settings()), pack=rulepack())
+    run_task(
+        uuid.UUID(task_id),
+        client=build_client(get_engine_settings()),
+        pack=rulepack(),
+        tasks=TASKS,
+    )
 
 
 def main(settings: EngineSettings | None = None) -> None:
@@ -159,6 +173,7 @@ def main(settings: EngineSettings | None = None) -> None:
     consumer.start()
     logger.info("engine_consuming", queue=SCAN_TASK_QUEUE, threads=resolved.worker_threads)
 
+    heartbeat = _start_heartbeat(resolved)
     shutdown = threading.Event()
 
     def request_shutdown(signum: int, _frame: object) -> None:
@@ -173,8 +188,44 @@ def main(settings: EngineSettings | None = None) -> None:
     # shutdown still holds a lease, and finishing it is cheaper for the scan than
     # waiting out an expiry.
     consumer.stop()
+    if heartbeat is not None:
+        heartbeat.stop()
     server.shutdown()
     logger.info("engine_stopped")
+
+
+def _start_heartbeat(settings: EngineSettings) -> Heartbeat | None:
+    """Begin renewing leases, if this engine knows which engine it is.
+
+    An engine configured with a token but no id can still lease, scan, and report
+    — it simply cannot renew, so any task outlasting the lease is reclaimed. That
+    is a degraded mode worth a warning rather than a refusal to start: the scan
+    still completes, just less efficiently.
+    """
+    if settings.engine_id is None:
+        logger.warning(
+            "heartbeat_disabled",
+            reason="no ICEBERG_ENGINE_ID configured; long tasks will lose their lease",
+        )
+        return None
+
+    pack = rulepack()
+    heartbeat = Heartbeat(
+        build_client(settings),
+        TASKS,
+        version=__version__,
+        # Reported every beat, so `GET /rules` reflects a rolling deploy as it
+        # happens rather than at the next registration (#70).
+        rulepack={
+            "version": pack.version,
+            "rules": [
+                {"id": rule.id, "description": rule.description, "severity": rule.severity.value}
+                for rule in pack.rules
+            ],
+        },
+    )
+    heartbeat.start()
+    return heartbeat
 
 
 if __name__ == "__main__":

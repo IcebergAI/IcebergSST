@@ -25,6 +25,7 @@ the whole of ADR 0004.
 import base64
 import uuid
 from collections.abc import Iterator
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -41,12 +42,22 @@ from iceberg_core.fingerprint import fingerprint, secret_hash
 from iceberg_detect import DetectionResult, RulePack, detect
 
 from iceberg_engine.api_client import EngineClient, Lease, LeaseRefused
+from iceberg_engine.heartbeat import TaskRegistry
 from iceberg_engine.suppression import prefilter, rules_from_lease
 
 logger = structlog.get_logger()
 
 DISCOVERY = "discovery"
 FETCH = "fetch"
+
+
+class TaskCancelled(Exception):
+    """The API cancelled this task while the engine was working on it.
+
+    Not a failure: the API already moved the task to `cancelled` and is not
+    waiting for anything. Reporting would be answered with a 409, so the engine
+    stops and says nothing (ADR 0009 §4).
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,12 +104,19 @@ def run_task(
     *,
     client: EngineClient,
     pack: RulePack,
+    tasks: TaskRegistry | None = None,
 ) -> TaskReport | None:
-    """Lease a task, do it, and report. Returns None if the lease was refused.
+    """Lease a task, do it, and report.
 
-    Never raises for anything the API should hear about: a connector failure
-    becomes a ``failed`` submission naming the reason, so the scan settles
-    promptly instead of waiting out a lease.
+    Returns None when there is nothing to report: the lease was refused, or the
+    task was cancelled underneath us. Otherwise never raises for anything the API
+    should hear about — a connector failure becomes a ``failed`` submission naming
+    the reason, so the scan settles promptly instead of waiting out a lease.
+
+    ``tasks`` is the registry the heartbeat thread reports from and writes
+    cancellations into. Without one the task still runs; it just cannot renew its
+    lease or notice a cancellation, which is right for a one-shot call and wrong
+    for a worker.
     """
     try:
         lease = client.lease(task_id)
@@ -109,13 +127,19 @@ def run_task(
 
     log = logger.bind(task_id=str(task_id), scan_id=str(lease.scan_id), kind=lease.kind)
     report = TaskReport()
+    held = tasks.holding(task_id) if tasks else nullcontext()
 
     try:
-        connector = registry.get(lease.source_type)
-        if lease.kind == DISCOVERY:
-            _discover(connector, lease, report)
-        else:
-            _fetch(connector, lease, report, pack=pack)
+        with held:
+            connector = registry.get(lease.source_type)
+            if lease.kind == DISCOVERY:
+                _discover(connector, lease, report)
+            else:
+                _fetch(connector, lease, report, pack=pack, tasks=tasks, task_id=task_id)
+    except TaskCancelled:
+        # The API is not waiting for this, and submitting would be a 409.
+        log.info("scan_task_abandoned_after_cancellation")
+        return None
     except ConnectorError as exc:
         # The source said no — bad credential, unreachable, unsupported type. The
         # scan should report why rather than an empty result that reads as "clean".
@@ -157,6 +181,8 @@ def _fetch(
     report: TaskReport,
     *,
     pack: RulePack,
+    tasks: TaskRegistry | None = None,
+    task_id: uuid.UUID | None = None,
 ) -> None:
     """Phase two: scan the content one spec describes.
 
@@ -172,6 +198,10 @@ def _fetch(
     tallies = {"units_truncated": 0, "dropped_below_threshold": 0}
 
     for unit in connector.fetch(lease.connection, spec, lease.credential, outcome):
+        # Between units, not mid-unit: a content unit is small and finishing one
+        # is cheaper than the bookkeeping to abandon it half-scanned.
+        if tasks is not None and task_id is not None and tasks.is_cancelled(task_id):
+            raise TaskCancelled(str(task_id))
         result = detect(unit.text, pack, threshold=lease.confidence_threshold)
         tallies["dropped_below_threshold"] += result.dropped_below_threshold
         tallies["units_truncated"] += int(result.truncated)

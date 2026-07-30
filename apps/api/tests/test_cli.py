@@ -22,21 +22,28 @@ def test_minting_a_token_registers_the_engine_and_stores_only_a_hash(
     session: Session,
 ) -> None:
     """The deploy-time bootstrap: no admin session exists yet (docs/security.md)."""
-    token = cli.mint_engine_token("engine-1", "0.1.0")
+    engine_id, token = cli.mint_engine_token("engine-1", "0.1.0")
 
     engine = session.exec(select(Engine)).one()
     assert engine.name == "engine-1"
     assert engine.version == "0.1.0"
     assert engine.token_hash == hash_token(token)
     assert token not in engine.token_hash
+    # The id is part of the credential: an engine names itself in its heartbeat
+    # path and the API checks the two agree, so a token alone cannot renew a
+    # lease (#51).
+    assert engine_id == engine.id
 
 
 def test_minting_again_rotates_rather_than_duplicating(session: Session) -> None:
-    first = cli.mint_engine_token("engine-1", None)
+    first_id, first = cli.mint_engine_token("engine-1", None)
 
-    second = cli.mint_engine_token("engine-1", None)
+    second_id, second = cli.mint_engine_token("engine-1", None)
 
     assert first != second
+    # Rotation keeps the identity: the id an operator configured stays valid, so
+    # only the token has to be replaced.
+    assert first_id == second_id
     engines = session.exec(select(Engine)).all()
     assert len(engines) == 1
     assert engines[0].token_hash == hash_token(second)
