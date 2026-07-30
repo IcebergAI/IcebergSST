@@ -231,3 +231,19 @@ def test_no_reported_finding_ever_contains_its_own_plaintext(pack: RulePack) -> 
 
     for found in detect(text, pack).secrets:
         assert found.secret not in found.redacted_snippet
+
+
+def test_the_default_threshold_matches_the_api_setting() -> None:
+    """Two defaults that drift would have the engine and the API silently
+    disagreeing about what counts as noise.
+
+    The constant cannot simply live in one place: `iceberg_core.config` cannot
+    import this package, which depends on core. So it is duplicated and kept in
+    step here, where the dependency runs the right way.
+    """
+    from iceberg_core.config import ApiSettings
+    from iceberg_detect import DEFAULT_CONFIDENCE_THRESHOLD
+
+    assert ApiSettings.model_fields["confidence_threshold"].default == (
+        DEFAULT_CONFIDENCE_THRESHOLD
+    )

@@ -8,6 +8,12 @@ finding arrives:
   the display fields
 * **known and auto-resolved** → re-open it: the secret came back
 * **suppressed** → stored and marked, never discarded (ADR 0008)
+* **below the confidence threshold** → dropped, and counted
+
+The threshold is applied here as well as in the engine (#70). Engines are handed
+the value in their lease, so the two normally agree; applying it again is what
+stops an engine running a stale image — or a rebuilt one with a lower default —
+from filling the queue with matches this deployment has decided are noise.
 
 A deliberate asymmetry: an analyst's decision (`false_positive`, `accepted_risk`) is
 never overwritten by a scan, but an *automatic* resolution is, because that was only
@@ -36,6 +42,8 @@ class IngestOutcome:
     ingested: int = 0
     suppressed: int = 0
     reopened: int = 0
+    #: Reported by the engine, dropped here for scoring too low.
+    below_threshold: int = 0
     fingerprints: list[str] = field(default_factory=list)
 
 
@@ -45,6 +53,7 @@ def ingest_findings(
     payloads: list[FindingPayload],
     *,
     now: datetime | None = None,
+    threshold: float = 0.0,
 ) -> IngestOutcome:
     """Store a task's findings. Does not commit; the route owns the transaction."""
     at = now or datetime.now(UTC)
@@ -52,6 +61,13 @@ def ingest_findings(
     outcome = IngestOutcome()
 
     for payload in payloads:
+        # An unscored finding is kept: `None` means the engine did not judge it,
+        # which is not the same as judging it noise, and dropping it would lose a
+        # finding over a missing field.
+        if payload.confidence is not None and payload.confidence < threshold:
+            outcome.below_threshold += 1
+            continue
+
         suppression = suppressions.first_match(
             rules,
             fingerprint=payload.fingerprint,
@@ -81,6 +97,7 @@ def ingest_findings(
         ingested=outcome.ingested,
         suppressed=outcome.suppressed,
         reopened=outcome.reopened,
+        below_threshold=outcome.below_threshold,
     )
     return outcome
 
@@ -180,4 +197,5 @@ def merge_scan_counts(scan: Scan, outcome: IngestOutcome, engine_counts: dict[st
     totals["findings"] = totals.get("findings", 0) + outcome.ingested
     totals["suppressed"] = totals.get("suppressed", 0) + outcome.suppressed
     totals["reopened"] = totals.get("reopened", 0) + outcome.reopened
+    totals["below_threshold"] = totals.get("below_threshold", 0) + outcome.below_threshold
     scan.counts = {**scan.counts, **totals}

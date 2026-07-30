@@ -85,6 +85,14 @@ class ApiSettings(SecretStoreSettings):
     #: replica runs them; a Postgres advisory lock decides which one acts.
     background_interval_seconds: int = Field(default=60, ge=5)
 
+    # ─── Detection (#70) ──────────────────────────────────────────────────────
+    #: Matches scoring below this are noise and are dropped. Configured here and
+    #: delivered to engines in their lease rather than set in engine config: one
+    #: value, one place to change it, and no way for a stale engine to run its own.
+    #: Kept in step with `iceberg_detect.DEFAULT_CONFIDENCE_THRESHOLD` by a test —
+    #: core cannot import detect, which depends on core.
+    confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+
     #: OIDC-only auth needs a seed administrator (docs/security.md § Bootstrap).
     #: Matched at user creation, so a later demotion is not undone by re-login.
     bootstrap_admin_subject: str | None = None

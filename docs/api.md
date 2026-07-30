@@ -102,7 +102,29 @@ of the record. There is no `PATCH`: editing a live suppression's pattern would s
 what it hides, and creating a replacement leaves both decisions in the audit trail.
 
 ## Rules
-- `GET /rules` → rule-pack listing + metadata (read-only; rules are code, per ADR 0008)
+- `GET /rules` → the detection surface currently in force (read-only; rules are code, per ADR 0008)
+
+Sourced from **what the engines report**, not from anything the API ships. Rule packs live inside
+engine images, so the API has no pack to list, and one hard-coded here would describe what the
+fleet is *supposed* to be running — which is the thing this endpoint exists to check. Engines
+report their pack at registration and on every heartbeat, so a rolling deploy is visible as it
+happens.
+
+Disagreement is a first-class answer rather than an error: mid-deploy two rule-pack versions are
+both in force, and a response that picked one would be wrong about half the fleet. The payload
+carries `fleet_consistent`, every `rulepack_version` with the engines running it, each rule with
+the versions that define it, `engines_without_a_rulepack`, and the current `confidence_threshold`.
+Only draining and active engines count — an offline engine's pack is history, not the current
+surface.
+
+Rules are metadata only — id, description, severity. **Never a regex**: patterns stay in the image,
+and serving them would invite a client to re-implement detection against them.
+
+The **confidence threshold** is configured on the API (`ICEBERG_CONFIDENCE_THRESHOLD`), delivered
+to engines in the lease response, and applied again at ingest. One value in one place, and an
+engine running a stale image still cannot fill the queue with matches this deployment has decided
+are noise. A finding reported without a confidence score is kept: `null` means the engine did not
+judge it, which is not the same as judging it noise.
 
 ## Notifications
 - `GET /notifications/channels` · `POST …` · `PATCH/DELETE /notifications/channels/{id}`

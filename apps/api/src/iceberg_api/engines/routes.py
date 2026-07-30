@@ -24,7 +24,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, select
 
 from iceberg_api import suppressions
-from iceberg_api.auth.dependencies import CsrfProtected, SecretStoreDep, SessionDep
+from iceberg_api.auth.dependencies import (
+    CsrfProtected,
+    SecretStoreDep,
+    SessionDep,
+    SettingsDep,
+)
 from iceberg_api.auth.rbac import AdminUser
 from iceberg_api.dispatch import DispatcherDep
 from iceberg_api.engines import ingest
@@ -38,6 +43,7 @@ from iceberg_api.engines.schemas import (
     LeaseResponse,
     ResultsAccepted,
     ResultsSubmission,
+    RulepackReport,
 )
 from iceberg_api.scans import service
 
@@ -47,6 +53,11 @@ logger = structlog.get_logger()
 #: The only outcomes an engine may report. Cancellation is the API's decision, and
 #: queued/leased are not outcomes.
 REPORTABLE_STATUSES = (ScanTaskStatus.COMPLETED, ScanTaskStatus.FAILED)
+
+
+def _rulepack_record(report: RulepackReport) -> dict[str, object]:
+    """The stored shape of a reported rule pack. Metadata only — never a regex."""
+    return report.model_dump(mode="json")
 
 
 @router.post(
@@ -71,6 +82,8 @@ async def register_engine(
         engine = Engine(name=body.name, token_hash="", version=body.version)
     elif body.version:
         engine.version = body.version
+    if body.rulepack is not None:
+        engine.rulepack = _rulepack_record(body.rulepack)
 
     minted = mint_token(engine)
     db.add(minted.engine)
@@ -120,7 +133,15 @@ async def heartbeat(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "token does not match this engine")
 
     now = datetime.now(UTC)
-    record_heartbeat(db, engine, version=body.version, now=now)
+    # Reported every beat, so a rolling deploy shows up in `GET /rules` as it
+    # happens rather than only when someone re-registers the engine (#70).
+    record_heartbeat(
+        db,
+        engine,
+        version=body.version,
+        rulepack=_rulepack_record(body.rulepack) if body.rulepack else None,
+        now=now,
+    )
 
     cancelled: list[uuid.UUID] = []
     for task_id in body.task_ids:
@@ -143,6 +164,7 @@ async def lease_task(
     engine: CurrentEngine,
     db: SessionDep,
     store: SecretStoreDep,
+    settings: SettingsDep,
 ) -> LeaseResponse:
     """Claim a task and receive everything needed to run it.
 
@@ -215,6 +237,7 @@ async def lease_task(
         suppressions=[
             rule.as_payload() for rule in suppressions.applicable_suppressions(db, source.id)
         ],
+        confidence_threshold=settings.confidence_threshold,
     )
 
 
@@ -225,6 +248,7 @@ async def submit_results(
     engine: CurrentEngine,
     db: SessionDep,
     dispatcher: DispatcherDep,
+    settings: SettingsDep,
 ) -> ResultsAccepted:
     """The only ingress for results (#36).
 
@@ -273,7 +297,13 @@ async def submit_results(
             # crash cannot record the discovery as done yet lose what it discovered.
             fetch_tasks = service.create_fetch_tasks(db, scan, body.task_specs)
         elif body.findings:
-            outcome = ingest.ingest_findings(db, scan, body.findings, now=now)
+            outcome = ingest.ingest_findings(
+                db,
+                scan,
+                body.findings,
+                now=now,
+                threshold=settings.confidence_threshold,
+            )
 
     ingest.merge_scan_counts(scan, outcome, body.counts)
     if body.rulepack_version:
@@ -297,6 +327,7 @@ async def submit_results(
         findings_ingested=outcome.ingested,
         findings_suppressed=outcome.suppressed,
         findings_reopened=outcome.reopened,
+        findings_below_threshold=outcome.below_threshold,
         fetch_tasks_created=len(fetch_tasks),
         scan_status=final_status.value if final_status else None,
     )

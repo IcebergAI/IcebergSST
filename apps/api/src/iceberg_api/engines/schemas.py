@@ -14,6 +14,29 @@ from pydantic import BaseModel, ConfigDict, Field
 from iceberg_api.schemas import UtcDatetime
 
 
+class RuleMetadata(BaseModel):
+    """One rule, as an engine describes the pack it is running (#70).
+
+    Metadata only — no regex. What a rule matches is code shipped in the image
+    (ADR 0008); what the API needs is enough to name it in a filter and a UI.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=128)
+    description: str = Field(min_length=1, max_length=255)
+    severity: Severity
+
+
+class RulepackReport(BaseModel):
+    """The rule pack an engine has loaded, reported at registration and heartbeat."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: str = Field(min_length=1, max_length=64)
+    rules: list[RuleMetadata] = Field(default_factory=list)
+
+
 class EngineRegister(BaseModel):
     """``POST /engines/register``."""
 
@@ -21,6 +44,9 @@ class EngineRegister(BaseModel):
 
     name: str = Field(min_length=1, max_length=255)
     version: str | None = Field(default=None, max_length=64)
+    #: Optional: an operator minting a token before the engine runs has nothing to
+    #: report yet, and the first heartbeat fills it in.
+    rulepack: RulepackReport | None = None
 
 
 class EngineCredential(BaseModel):
@@ -51,6 +77,9 @@ class HeartbeatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     version: str | None = Field(default=None, max_length=64)
+    #: Reported on every beat, so a rolling deploy is visible as it happens rather
+    #: than only after someone re-registers the engine.
+    rulepack: RulepackReport | None = None
     #: Tasks this engine believes it is working on, so the response can tell it
     #: which have been cancelled underneath it (#68).
     task_ids: list[uuid.UUID] = Field(default_factory=list)
@@ -99,6 +128,11 @@ class LeaseResponse(BaseModel):
     #: Suppressions the engine may pre-filter with. The API applies them again at
     #: ingest, so this is an optimisation, not the enforcement point (#44).
     suppressions: list[dict[str, str]] = Field(default_factory=list)
+
+    #: Drop matches scoring below this. Delivered per task rather than configured
+    #: in the engine so there is one value in one place; ingest applies it again,
+    #: so an engine running a stale one cannot flood the queue (#70).
+    confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 class FindingPayload(BaseModel):
@@ -158,6 +192,9 @@ class ResultsAccepted(BaseModel):
     findings_ingested: int = 0
     findings_suppressed: int = 0
     findings_reopened: int = 0
+    #: Reported findings the API dropped for scoring below the threshold. Non-zero
+    #: means the engine and the API disagree about it — worth a look, not an error.
+    findings_below_threshold: int = 0
     fetch_tasks_created: int = 0
     #: Set when this submission finished the scan.
     scan_status: str | None = None
