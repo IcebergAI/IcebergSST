@@ -318,6 +318,27 @@ def test_sources_paginate_with_a_stable_cursor(
     assert len(seen) == len(set(seen)) == 5
 
 
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        "not-base64!",
+        "W10",  # base64 of `[]` — decodes, then fails subscripting
+        "bnVsbA",  # base64 of `null`
+    ],
+)
+def test_a_malformed_cursor_is_a_400_not_a_500(
+    client: TestClient,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+    cursor: str,
+) -> None:
+    login_as(make_user(UserRole.VIEWER))
+
+    response = client.get(SOURCES, params={"cursor": cursor})
+
+    assert response.status_code == 400
+
+
 def test_the_connectivity_check_reports_success(
     client: TestClient,
     app: FastAPI,

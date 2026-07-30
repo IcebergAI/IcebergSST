@@ -19,7 +19,7 @@ from iceberg_core.enums import (
     UserRole,
 )
 from iceberg_core.models import Engine, Scan, ScanTask, Source, Suppression, User
-from iceberg_core.secrets import EnvKeyBackend
+from iceberg_core.secrets import EnvKeyBackend, SecretStoreError
 from sqlmodel import Session, select
 
 REGISTER = "/api/v1/engines/register"
@@ -247,6 +247,31 @@ def test_a_source_whose_credential_will_not_decrypt_fails_the_task(
     assert task.status is ScanTaskStatus.FAILED
 
 
+def test_a_missing_pepper_fails_the_task_rather_than_leasing_without_one(
+    client: TestClient,
+    session: Session,
+    secret_store: EnvKeyBackend,
+    dispatcher: RecordingDispatcher,
+    engine_credential: tuple[Engine, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unpeppered fingerprints match nothing stored: every finding would ingest as
+    new and reconciliation would resolve the real ones. Fail closed (ADR 0006)."""
+    _, headers = engine_credential
+    source = _source(session, secret_store)
+    _, task = _scan_with_task(session, source, dispatcher)
+
+    def broken_pepper() -> bytes:
+        raise SecretStoreError("pepper ref will not open")
+
+    monkeypatch.setattr(secret_store, "get_pepper", broken_pepper)
+    response = client.post(f"/api/v1/scan-tasks/{task.id}/lease", headers=headers)
+
+    assert response.status_code == 500
+    session.refresh(task)
+    assert task.status is ScanTaskStatus.FAILED
+
+
 def test_a_source_without_a_credential_still_leases(
     client: TestClient,
     session: Session,
@@ -374,6 +399,53 @@ def test_a_live_lease_is_not_reclaimed(
     service.claim_task(session, task.id, engine.id, lease_seconds=600)
 
     assert service.reclaim_expired_leases(session, dispatcher=dispatcher) == []
+
+
+def test_reclaim_does_not_resurrect_a_completed_task(
+    session: Session,
+    secret_store: EnvKeyBackend,
+    dispatcher: RecordingDispatcher,
+) -> None:
+    """An engine that finished just before the sweep keeps its completion: the
+    reclaim write is conditional, not read-then-write."""
+    source = _source(session, secret_store)
+    _, task = _scan_with_task(session, source, dispatcher)
+    engine = Engine(name="slow-engine", token_hash="unused")
+    session.add(engine)
+    session.commit()
+    service.claim_task(session, task.id, engine.id, lease_seconds=1)
+    service.complete_task(session, task, status=ScanTaskStatus.COMPLETED)
+    session.commit()
+
+    later = datetime.now(UTC) + timedelta(minutes=5)
+    assert service.reclaim_expired_leases(session, dispatcher=dispatcher, now=later) == []
+    session.refresh(task)
+    assert task.status is ScanTaskStatus.COMPLETED
+
+
+def test_a_stale_heartbeat_cannot_resurrect_a_reclaimed_task(
+    session: Session,
+    secret_store: EnvKeyBackend,
+    dispatcher: RecordingDispatcher,
+) -> None:
+    """Renewal is conditional on still holding the lease."""
+    source = _source(session, secret_store)
+    _, task = _scan_with_task(session, source, dispatcher)
+    engine = Engine(name="quiet-engine", token_hash="unused")
+    session.add(engine)
+    session.commit()
+    grant = service.claim_task(session, task.id, engine.id, lease_seconds=1)
+    assert grant is not None
+    stale = grant.task
+
+    service.reclaim_expired_leases(
+        session, dispatcher=dispatcher, now=datetime.now(UTC) + timedelta(minutes=5)
+    )
+
+    assert service.renew_lease(session, stale) is None
+    session.refresh(task)
+    assert task.status is ScanTaskStatus.QUEUED
+    assert task.engine_id is None
 
 
 def test_a_reclaimed_task_records_its_second_attempt(

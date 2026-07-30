@@ -104,6 +104,45 @@ def test_snippet_masks_a_neighbouring_secret_in_the_same_window() -> None:
     assert "backup_key=" in snippet
 
 
+def test_overlapping_wider_match_cannot_leak_past_the_target() -> None:
+    """A generic entropy match around a narrower vendor match must mask its whole
+    extent: the parts outside the target are still secret material (ADR 0004)."""
+    secret = "AKIAABCDEFGHIJKLMNOP0123456789zz"
+    text = f"k={secret};"
+    target = Span(2, 2 + 20)  # the vendor rule's narrower match
+    wider = Span(2, 2 + len(secret))  # a generic rule matched the whole token
+
+    snippet = redact_snippet(text, target, policy=KEEP_PREFIX, other_spans=(wider,))
+
+    assert "0123456789zz" not in snippet
+    assert secret not in snippet
+    assert snippet.startswith("k=AKIA")
+
+
+def test_overlapping_match_cannot_leak_before_the_target() -> None:
+    secret = "zz0123456789AKIAABCDEFGHIJKLMNOP"
+    text = f"k={secret};"
+    target = Span(2 + 12, 2 + len(secret))  # the vendor rule matched the tail
+    wider = Span(2, 2 + len(secret))
+
+    snippet = redact_snippet(text, target, policy=KEEP_PREFIX, other_spans=(wider,))
+
+    assert "zz0123456789" not in snippet
+    assert secret not in snippet
+
+
+def test_repeat_of_a_clipped_overlapping_match_is_scrubbed_whole() -> None:
+    secret = "AKIAABCDEFGHIJKLMNOP0123456789zz"
+    text = f"k={secret}; backup is {secret} too"
+    target = Span(2, 2 + 20)
+    wider = Span(2, 2 + len(secret))
+
+    snippet = redact_snippet(text, target, policy=KEEP_PREFIX, other_spans=(wider,))
+
+    assert secret not in snippet
+    assert "0123456789zz" not in snippet
+
+
 def test_snippet_scrubs_an_unmatched_repeat_of_the_secret() -> None:
     """Only one copy was matched; the other must not ride along in the context."""
     text = f"prod: {AWS_KEY} (same as staging: {AWS_KEY})"

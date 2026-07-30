@@ -71,6 +71,15 @@ def _initial_role(claims: IdentityClaims, settings: ApiSettings) -> UserRole:
     email = settings.bootstrap_admin_email
     if subject and claims.subject == subject:
         return UserRole.ADMIN
-    if email and claims.email and claims.email.casefold() == email.casefold():
+    # The email match additionally requires the provider to vouch for the address:
+    # OIDC says `email` alone is untrustworthy, and at an IdP with self-service or
+    # unverified emails, anyone could claim the bootstrap address and arrive as
+    # admin before the real owner's first login.
+    if (
+        email
+        and claims.email
+        and claims.email_verified
+        and claims.email.casefold() == email.casefold()
+    ):
         return UserRole.ADMIN
     return UserRole.VIEWER

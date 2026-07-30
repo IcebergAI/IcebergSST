@@ -29,8 +29,9 @@ from iceberg_core.enums import (
     FindingResolution,
     FindingState,
     ScanStatus,
+    ScanTaskKind,
 )
-from iceberg_core.models import Finding, FindingEvent, Scan
+from iceberg_core.models import Finding, FindingEvent, Scan, ScanTask
 from sqlmodel import Session, col, func, select
 
 logger = structlog.get_logger()
@@ -71,14 +72,34 @@ def reconcile_scan(
         return None
 
     at = now or datetime.now(UTC)
+    # Suppressed findings are excluded: the lease invites engines to pre-filter
+    # with the suppression list (#44), so "this scan did not report it" is not
+    # evidence a suppressed secret is gone. It stays open-and-suppressed until a
+    # scan sees it after the suppression lapses (ADR 0008 — recorded, never
+    # silently resolved).
     missing = list(
         db.exec(
             select(Finding)
             .where(col(Finding.source_id) == scan.source_id)
             .where(col(Finding.state) == FindingState.OPEN)
             .where(col(Finding.last_seen_scan_id) != scan.id)
+            .where(col(Finding.suppressed_at).is_(None))
         )
     )
+
+    if missing and not _saw_any_content(db, scan):
+        # A completed scan with no fetch work at all claims every open finding is
+        # gone at once. An empty space is possible — but so is a credential whose
+        # scope was quietly reduced, which enumerates nothing and errors nowhere.
+        # Mass-resolving on zero evidence is the failure ADR 0009 §4 exists to
+        # prevent, so these findings keep their state and a human gets a log line.
+        logger.warning(
+            "reconciliation_refused_empty_scan",
+            scan_id=str(scan.id),
+            open_findings=len(missing),
+            reason="scan fetched nothing; refusing to auto-resolve on absence alone",
+        )
+        missing = []
 
     for finding in missing:
         finding.state = FindingState.RESOLVED
@@ -111,6 +132,17 @@ def reconcile_scan(
 
     logger.info("reconciliation_complete", scan_id=str(scan.id), **asdict(result))
     return result
+
+
+def _saw_any_content(db: Session, scan: Scan) -> bool:
+    """Whether this scan had any fetch task — i.e. looked at anything at all."""
+    fetched = db.exec(
+        select(func.count())
+        .select_from(ScanTask)
+        .where(col(ScanTask.scan_id) == scan.id)
+        .where(col(ScanTask.kind) == ScanTaskKind.FETCH)
+    ).one()
+    return int(fetched) > 0
 
 
 def _count(

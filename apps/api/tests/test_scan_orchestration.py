@@ -135,10 +135,10 @@ def test_discovery_output_becomes_fetch_tasks(
     dispatcher.enqueued.clear()
 
     specs = [{"page_ids": ["1", "2"]}, {"page_ids": ["3"]}]
-    tasks = service.fan_out_fetch_tasks(session, scan, specs, dispatcher=dispatcher)
+    tasks = service.create_fetch_tasks(session, scan, specs)
+    session.commit()
 
     assert [task.kind for task in tasks] == [ScanTaskKind.FETCH, ScanTaskKind.FETCH]
-    assert dispatcher.enqueued == [task.id for task in tasks]
     session.refresh(scan)
     assert scan.status is ScanStatus.RUNNING
 
@@ -150,7 +150,23 @@ def test_a_discovery_that_found_nothing_is_not_an_error(
     source = _source(session)
     scan = service.launch_scan(session, source, trigger=ScanTrigger.MANUAL, dispatcher=dispatcher)
 
-    assert service.fan_out_fetch_tasks(session, scan, [], dispatcher=dispatcher) == []
+    assert service.create_fetch_tasks(session, scan, []) == []
+
+
+def test_fan_out_refuses_to_resurrect_a_cancelled_scan(
+    session: Session, dispatcher: RecordingDispatcher
+) -> None:
+    """A scan cancelled while discovery results were in flight stays cancelled."""
+    source = _source(session)
+    scan = service.launch_scan(session, source, trigger=ScanTrigger.MANUAL, dispatcher=dispatcher)
+    service.cancel_scan(session, scan)
+
+    tasks = service.create_fetch_tasks(session, scan, [{"page_ids": ["1"]}])
+    session.commit()
+
+    assert tasks == []
+    session.refresh(scan)
+    assert scan.status is ScanStatus.CANCELLED
 
 
 @pytest.mark.parametrize(

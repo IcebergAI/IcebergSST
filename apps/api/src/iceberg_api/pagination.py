@@ -55,7 +55,9 @@ class Cursor:
                 created_at=created_at if created_at.tzinfo else created_at.replace(tzinfo=UTC),
                 row_id=uuid.UUID(payload["id"]),
             )
-        except (KeyError, ValueError, binascii.Error, json.JSONDecodeError) as exc:
+        except (KeyError, TypeError, ValueError, binascii.Error, json.JSONDecodeError) as exc:
+            # TypeError included: valid base64 of `[]` or `null` decodes fine and
+            # then fails subscripting — still a malformed cursor, still a 400.
             raise CursorError("cursor is not valid") from exc
 
 

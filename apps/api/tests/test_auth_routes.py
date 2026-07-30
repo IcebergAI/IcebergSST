@@ -39,10 +39,13 @@ def _complete_login(
     *,
     subject: str,
     email: str = "alice@example.test",
+    email_verified: bool | None = True,
     next_path: str | None = None,
 ) -> httpx2.Response:
     state, nonce = _start_login(client, next_path=next_path)
-    provider.id_token = provider.mint_id_token(subject=subject, nonce=nonce, email=email)
+    provider.id_token = provider.mint_id_token(
+        subject=subject, nonce=nonce, email=email, email_verified=email_verified
+    )
     return client.get(
         CALLBACK, params={"code": "auth-code", "state": state}, follow_redirects=False
     )
@@ -94,6 +97,34 @@ def test_the_bootstrap_subject_becomes_admin_on_first_login(
 
     user = session.exec(select(User).where(User.oidc_subject == BOOTSTRAP_SUBJECT)).one()
     assert user.role is UserRole.ADMIN
+
+
+def test_the_bootstrap_email_grants_admin_only_when_the_provider_vouches_for_it(
+    app: FastAPI,
+    client: TestClient,
+    provider: FakeProvider,
+    session: Session,
+    api_settings: ApiSettings,
+) -> None:
+    """OIDC's `email` claim is untrustworthy without `email_verified`: at an IdP
+    with self-service emails, anyone could claim the bootstrap address."""
+    by_email = api_settings.model_copy(
+        update={"bootstrap_admin_subject": None, "bootstrap_admin_email": "root@example.test"}
+    )
+    app.dependency_overrides[get_settings] = lambda: by_email
+
+    _complete_login(
+        client, provider, subject="oidc|imposter", email="root@example.test", email_verified=False
+    )
+    imposter = session.exec(select(User).where(User.oidc_subject == "oidc|imposter")).one()
+    assert imposter.role is UserRole.VIEWER
+
+    client.cookies.clear()
+    _complete_login(
+        client, provider, subject="oidc|root", email="Root@example.test", email_verified=True
+    )
+    admin = session.exec(select(User).where(User.oidc_subject == "oidc|root")).one()
+    assert admin.role is UserRole.ADMIN
 
 
 def test_a_demoted_bootstrap_admin_is_not_re_promoted_by_logging_in_again(

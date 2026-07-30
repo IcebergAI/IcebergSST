@@ -167,7 +167,9 @@ def test_infrastructure_services_report_health_and_the_apps_wait_for_it(
 
 def test_no_secret_is_committed_in_the_compose_file(compose: dict[str, Any]) -> None:
     """Every credential is a ${VARIABLE} reference resolved from .env."""
-    secretish = re.compile(r"PASSWORD|MASTER_KEY|TOKEN|PEPPER", re.IGNORECASE)
+    secretish = re.compile(
+        r"PASSWORD|MASTER_KEY|TOKEN|PEPPER|SESSION_SECRET|CLIENT_SECRET", re.IGNORECASE
+    )
 
     for name in compose["services"]:
         for variable, value in _environment(_service(compose, name)).items():
@@ -191,8 +193,11 @@ def _documented_variables() -> set[str]:
     }
 
 
-def test_env_example_documents_every_variable_the_stack_interpolates() -> None:
-    """A variable compose reads but .env.example omits is a stack that will not start."""
+def test_env_example_and_the_compose_file_agree_on_the_variables() -> None:
+    """A variable compose reads but .env.example omits is a stack that will not
+    start; one .env.example documents but compose never delivers is a tunable an
+    operator sets to no effect (the session TTL once fell in that second bucket).
+    """
     directives = "\n".join(
         line for line in COMPOSE_FILE.read_text().splitlines() if not line.strip().startswith("#")
     )
@@ -200,13 +205,16 @@ def test_env_example_documents_every_variable_the_stack_interpolates() -> None:
     documented = _documented_variables()
 
     assert interpolated <= documented, sorted(interpolated - documented)
+    assert documented <= interpolated, sorted(documented - interpolated)
 
 
 def test_env_example_contains_no_real_values() -> None:
     """Placeholders only — this file is committed."""
     for line in ENV_EXAMPLE.read_text().splitlines():
         name, separator, value = line.partition("=")
-        if separator and re.search(r"PASSWORD|MASTER_KEY|TOKEN|PEPPER", name):
+        if separator and re.search(
+            r"PASSWORD|MASTER_KEY|TOKEN|PEPPER|SESSION_SECRET|CLIENT_SECRET", name
+        ):
             assert value.strip() == "CHANGE_ME", f"{name} has a committed value"
 
 

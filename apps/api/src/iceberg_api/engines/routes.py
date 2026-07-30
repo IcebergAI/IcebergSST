@@ -17,9 +17,10 @@ from datetime import UTC, datetime
 
 import structlog
 from fastapi import APIRouter, HTTPException, status
-from iceberg_core.enums import ScanStatus, ScanTaskKind, ScanTaskStatus
+from iceberg_core.enums import ScanTaskKind, ScanTaskStatus
 from iceberg_core.models import Engine, Scan, ScanTask, Source
 from iceberg_core.secrets import SecretStoreError
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, select
 
 from iceberg_api import suppressions
@@ -39,7 +40,6 @@ from iceberg_api.engines.schemas import (
     ResultsSubmission,
 )
 from iceberg_api.scans import service
-from iceberg_api.scans.reconcile import reconcile_scan
 
 router = APIRouter(tags=["engines"])
 logger = structlog.get_logger()
@@ -74,7 +74,17 @@ async def register_engine(
 
     minted = mint_token(engine)
     db.add(minted.engine)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        # Two concurrent registrations of the same new name: one row exists, one
+        # token was shown. The loser must retry so its operator gets a real token
+        # — answering with the winner's engine would hand back a credential this
+        # caller never saw.
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "engine was registered concurrently; retry to rotate"
+        ) from exc
     db.refresh(minted.engine)
 
     logger.info(
@@ -150,6 +160,25 @@ async def lease_task(
     if scan is None or source is None:  # pragma: no cover — FKs make this unreachable
         raise HTTPException(status.HTTP_409_CONFLICT, "task is not available to lease")
 
+    # Fail closed on a missing pepper rather than lease without one: fingerprints
+    # computed unpeppered (or with a different pepper) match nothing stored, so
+    # every finding would ingest as new and reconciliation would auto-resolve the
+    # real ones — a transient secret-store failure must not cost the triage state
+    # (ADR 0006/0007).
+    try:
+        pepper = base64.b64encode(store.get_pepper()).decode()
+    except SecretStoreError as exc:
+        service.complete_task(
+            db, task, status=ScanTaskStatus.FAILED, error="fingerprint pepper unavailable"
+        )
+        db.commit()
+        service.finalize_and_reconcile(db, task.scan_id)
+        logger.warning("lease_pepper_unavailable", source_id=str(source.id))
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "fingerprint pepper could not be read",
+        ) from exc
+
     credential: str | None = None
     if source.credential_ref is not None:
         try:
@@ -161,6 +190,10 @@ async def lease_task(
                 db, task, status=ScanTaskStatus.FAILED, error="source credential unreadable"
             )
             db.commit()
+            # The task just went terminal outside the results path, so the scan
+            # must be settled here — nothing else would ever finish it, and an
+            # unfinished scan blocks its source forever.
+            service.finalize_and_reconcile(db, task.scan_id)
             logger.warning("lease_credential_unreadable", source_id=str(source.id))
             raise HTTPException(
                 status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -178,7 +211,7 @@ async def lease_task(
         spec=task.spec,
         connection=source.connection,
         credential=credential,
-        fingerprint_pepper=_pepper(store),
+        fingerprint_pepper=pepper,
         suppressions=[
             rule.as_payload() for rule in suppressions.applicable_suppressions(db, source.id)
         ],
@@ -211,13 +244,18 @@ async def submit_results(
             "an engine may report completed or failed only",
         )
 
-    if task.result_key is not None:
-        if task.result_key == body.idempotency_key:
-            logger.info("results_replayed", task_id=str(task.id), key=body.idempotency_key)
-            return ResultsAccepted(task_id=task.id, replay=True)
-        raise HTTPException(status.HTTP_409_CONFLICT, "task results were already submitted")
+    now = datetime.now(UTC)
 
-    if task.status not in service.LEASED_STATUSES:
+    # Claiming result_key is a conditional UPDATE: of two concurrent submissions,
+    # exactly one records results. The loser re-reads and answers as a replay or a
+    # conflict — never a second ingest, never double-counted tallies.
+    if not service.claim_result(db, task, body.idempotency_key):
+        db.rollback()
+        db.refresh(task)
+        if task.result_key == body.idempotency_key:
+            return _replay(db, task, now=now)
+        if task.result_key is not None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "task results were already submitted")
         # Cancelled, reclaimed, or already terminal: whatever this engine computed is
         # no longer wanted, and accepting it would resurrect work the API moved on from.
         raise HTTPException(status.HTTP_409_CONFLICT, "task is not leased")
@@ -226,52 +264,56 @@ async def submit_results(
     if scan is None:  # pragma: no cover — FK guarantees it
         raise HTTPException(status.HTTP_404_NOT_FOUND, "scan not found")
 
-    now = datetime.now(UTC)
     outcome = ingest.IngestOutcome()
-    created = 0
+    fetch_tasks: list[ScanTask] = []
 
     if body.status is ScanTaskStatus.COMPLETED:
         if task.kind is ScanTaskKind.DISCOVERY:
-            created = len(body.task_specs)
+            # Created in the same transaction that completes the discovery task: a
+            # crash cannot record the discovery as done yet lose what it discovered.
+            fetch_tasks = service.create_fetch_tasks(db, scan, body.task_specs)
         elif body.findings:
             outcome = ingest.ingest_findings(db, scan, body.findings, now=now)
 
     ingest.merge_scan_counts(scan, outcome, body.counts)
     if body.rulepack_version:
         scan.rulepack_version = body.rulepack_version
-    task.result_key = body.idempotency_key
     service.complete_task(db, task, status=body.status, error=body.error, now=now)
     db.add(scan)
     db.commit()
 
-    # Fan-out and finalisation both commit; they run after the results themselves are
-    # durable so a crash between them loses nothing but a re-dispatch.
-    if created:
-        service.fan_out_fetch_tasks(db, scan, body.task_specs, dispatcher=dispatcher)
+    if fetch_tasks:
+        logger.info("scan_fanned_out", scan_id=str(scan.id), fetch_tasks=len(fetch_tasks))
+    for fetch in fetch_tasks:
+        try:
+            dispatcher.enqueue(fetch.id)
+        except Exception:  # durably queued; redispatch_stale_tasks retries
+            logger.exception("scan_task_dispatch_failed", task_id=str(fetch.id))
 
-    final_status = service.finalize_scan_if_done(db, scan.id, now=now)
-    if final_status is ScanStatus.COMPLETED:
-        db.refresh(scan)
-        reconcile_scan(db, scan, now=now)
+    final_status = service.finalize_and_reconcile(db, scan.id, now=now)
 
     return ResultsAccepted(
         task_id=task.id,
         findings_ingested=outcome.ingested,
         findings_suppressed=outcome.suppressed,
         findings_reopened=outcome.reopened,
-        fetch_tasks_created=created,
+        fetch_tasks_created=len(fetch_tasks),
         scan_status=final_status.value if final_status else None,
     )
 
 
-def _pepper(store: SecretStoreDep) -> str | None:
-    """The fingerprint pepper, base64, or None if the deployment has none yet.
+def _replay(db: SessionDep, task: ScanTask, *, now: datetime) -> ResultsAccepted:
+    """Acknowledge a duplicate submission without re-ingesting anything.
 
-    Not fatal: detection still runs, and a scan without a pepper is a
-    misconfiguration an operator should see in the logs rather than a crashed engine.
+    A replay often means the first attempt's response was lost — possibly along
+    with the follow-up finalisation, which ran in its own transaction. Re-checking
+    it here repairs that: it is conditional, so if the scan already settled this
+    is a cheap no-op.
     """
-    try:
-        return base64.b64encode(store.get_pepper()).decode()
-    except SecretStoreError as exc:
-        logger.warning("fingerprint_pepper_unavailable", error=str(exc))
-        return None
+    logger.info("results_replayed", task_id=str(task.id), key=task.result_key)
+    final_status = service.finalize_and_reconcile(db, task.scan_id, now=now)
+    return ResultsAccepted(
+        task_id=task.id,
+        replay=True,
+        scan_status=final_status.value if final_status else None,
+    )

@@ -26,11 +26,24 @@ def _shipped_sources() -> list[Path]:
 
 
 def _reads_environment(path: Path) -> bool:
-    """True if the module touches ``os.environ``/``os.getenv`` (or imports them)."""
+    """True if the module touches ``os.environ``/``os.getenv`` (or imports them).
+
+    Aliased spellings count too — ``import os as _o; _o.environ`` and
+    ``from os import environ as e`` are the same read wearing a disguise.
+    """
     tree = ast.parse(path.read_text(), filename=str(path))
+    os_aliases = {"os"} | {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name == "os"
+    }
     for node in ast.walk(tree):
         match node:
-            case ast.Attribute(value=ast.Name(id="os"), attr=attr) if attr in ENV_ACCESSORS:
+            case ast.Attribute(value=ast.Name(id=name), attr=attr) if (
+                name in os_aliases and attr in ENV_ACCESSORS
+            ):
                 return True
             case ast.ImportFrom(module="os", names=names) if any(
                 alias.name in ENV_ACCESSORS for alias in names

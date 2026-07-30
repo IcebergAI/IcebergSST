@@ -32,16 +32,40 @@ logger = structlog.get_logger()
 
 
 def run_once(dispatcher: Dispatcher, *, now: datetime | None = None) -> None:
-    """One maintenance round: schedules, then reclaim. Synchronous and testable."""
+    """One maintenance round: schedules, reclaim, then the two safety sweeps.
+
+    Leadership is held on a session of its own for the whole round. Holding it on
+    the working session would not work: ``pg_try_advisory_xact_lock`` releases at
+    transaction end, and the scan launcher commits mid-tick — so the lock would be
+    gone after the first schedule fired, and every replica would run the rest of
+    the round at once. The guard session runs no other statements, so its
+    transaction — and the lock — spans everything below.
+    """
     at = now or datetime.now(UTC)
-    with session_scope() as db:
-        result = tick(db, now=at, launcher=build_launcher(dispatcher), lock=postgres_advisory_lock)
-    if not result.was_leader:
-        # Another replica is doing this round; reclaim is its job too, so that two
-        # replicas cannot re-dispatch the same task twice in one beat.
-        return
-    with session_scope() as db:
-        service.reclaim_expired_leases(db, dispatcher=dispatcher, now=at)
+    with session_scope() as guard:
+        if not postgres_advisory_lock(guard):
+            # Another replica is doing this round — the whole round, sweeps
+            # included, so that two replicas cannot re-dispatch the same task
+            # twice in one beat.
+            logger.debug("maintenance_round_not_leader")
+            return
+        with session_scope() as db:
+            tick(db, now=at, launcher=build_launcher(dispatcher), lock=_already_leader)
+        with session_scope() as db:
+            service.reclaim_expired_leases(db, dispatcher=dispatcher, now=at)
+        # The safety nets (ADR 0009): a crash between the commit that ends a task
+        # and its follow-up work can strand a queued task with no broker message,
+        # or leave a scan active with every task terminal. Each sweep repairs one
+        # of those, so a wedged scan is a delayed scan instead of a stuck source.
+        with session_scope() as db:
+            service.redispatch_stale_tasks(db, dispatcher=dispatcher, now=at)
+        with session_scope() as db:
+            service.finalize_stalled_scans(db, now=at)
+
+
+def _already_leader(db: object) -> bool:
+    """The tick's lock hook when :func:`run_once` already holds the round lock."""
+    return True
 
 
 @asynccontextmanager
