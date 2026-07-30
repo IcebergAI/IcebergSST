@@ -1,0 +1,38 @@
+# gitleaks configuration for IcebergSST.
+#
+# This repository is a secret scanner, so its own test suite is full of
+# deliberately secret-shaped strings. The CI job scans the **whole git history**
+# (`fetch-depth: 0`), which is what makes a committed-then-deleted credential
+# still fail — and also what makes a fixture unfixable by editing the file: the
+# commit that introduced it is immutable. That is what this file is for.
+#
+# Two rules for anything added below:
+#
+# * **Never allowlist a path.** `packages/*/tests/**` would silence a real
+#   credential committed into a test, which is precisely the failure this job
+#   exists to catch. `pyproject.toml` exempts the test suite from ruff's S105/S106
+#   on the stated grounds that "real leaks are caught by the gitleaks job over the
+#   whole repo" — a path allowlist here would quietly retract that.
+# * **Allowlist the literal, not the finding.** A fingerprint entry
+#   (`<commit>:<file>:<rule>:<line>`) is per-commit, so it lapses the moment
+#   anything shifts the line, and it says nothing about *why* the string is safe.
+#
+# For new fixtures, prefer an inline `# gitleaks:allow` comment on the line
+# itself: it needs no config change, and it shows up in the diff where a reviewer
+# can judge it. This file is only for literals already in history.
+
+title = "IcebergSST"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """
+Fake AWS-shaped tokens in the redaction tests (packages/core/tests/test_redaction.py,
+introduced in 1c0deb3). The alphabet run after the AKIA prefix is the tell: these are
+hand-written to exercise the overlapping-span masking in ADR 0004, and no such key has
+ever existed. Matched by `generic-api-key` because the fixtures are named `secret`.
+"""
+condition = "AND"
+paths = ['''(^|/)tests/.*\.py$''']
+regexes = ['''AKIAABCDEFGHIJKLMNOP''']
