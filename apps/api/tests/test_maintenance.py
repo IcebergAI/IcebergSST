@@ -195,3 +195,37 @@ def test_a_round_releases_findings_whose_suppression_expired(
     assert released is not None
     assert released.suppressed_at is None
     assert released.suppressed_by_id is None
+
+
+def test_a_lapsed_suppression_hands_over_to_another_that_still_covers_the_finding(
+    session: Session,
+    dispatcher: RecordingDispatcher,
+    make_finding: Callable[..., Finding],
+) -> None:
+    """A finding covered by both an expiring rule and a permanent one must stay
+    hidden when the first lapses — handed over, not popped into the active view
+    until the next scan re-suppresses it (the courtesy the delete path extends)."""
+    finding = make_finding(rule_id="generic-high-entropy")
+    lapsed = Suppression(
+        scope=SuppressionScope.RULE,
+        pattern="generic-high-entropy",
+        reason="silenced for a sprint",
+        expires_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    permanent = Suppression(
+        scope=SuppressionScope.PATH_GLOB,
+        pattern="/space/DOCS/*",
+        reason="known-benign space",
+    )
+    session.add_all([lapsed, permanent])
+    session.commit()
+    finding.suppressed_at = datetime.now(UTC) - timedelta(days=14)
+    finding.suppressed_by_id = lapsed.id
+    session.add(finding)
+    session.commit()
+
+    maintenance.run_once(dispatcher)
+
+    session.refresh(finding)
+    assert finding.suppressed_at is not None  # still hidden
+    assert finding.suppressed_by_id == permanent.id  # by the rule that still covers it

@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import structlog
-from iceberg_core.enums import FindingEventKind, FindingResolution, FindingState
+from iceberg_core.enums import FindingEventKind, FindingState
 from iceberg_core.metrics import FINDINGS_INGESTED
 from iceberg_core.models import Finding, FindingEvent, Scan
 from sqlmodel import Session, col, select
@@ -154,9 +154,13 @@ def _refresh(
     finding.severity = payload.severity
 
     reopened = False
-    if finding.state is FindingState.RESOLVED and finding.resolution is FindingResolution.AUTO:
-        # It disappeared, we resolved it, and now it is back. An automatic
-        # resolution was an inference; a sighting is evidence.
+    if finding.state is FindingState.RESOLVED:
+        # It was resolved — the secret had been removed — and now it is back. A
+        # sighting refutes "resolved" whether the resolution was automatic (an
+        # inference from absence) or manual (an analyst believing it was fixed):
+        # ADR 0006, "a resolved secret that reappears re-opens automatically". The
+        # analyst *judgement* states — false_positive, accepted_risk — are not
+        # RESOLVED, so they are left untouched, exactly as the ADR intends.
         finding.state = FindingState.OPEN
         finding.resolution = None
         db.add(

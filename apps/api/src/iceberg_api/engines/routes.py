@@ -284,7 +284,14 @@ async def submit_results(
         # no longer wanted, and accepting it would resurrect work the API moved on from.
         raise HTTPException(status.HTTP_409_CONFLICT, "task is not leased")
 
-    scan = db.get(Scan, task.scan_id)
+    # Lock the scan row for the rest of the transaction: two tasks of one scan can
+    # be submitted concurrently, and `merge_scan_counts` is a read-modify-write of
+    # the whole counts blob. Without the lock, the second commit clobbers the
+    # first's tallies (findings, units_scanned, …). FOR UPDATE serialises the two
+    # so each merges onto the other's committed result.
+    scan = db.exec(
+        select(Scan).where(col(Scan.id) == task.scan_id).with_for_update()
+    ).one_or_none()
     if scan is None:  # pragma: no cover — FK guarantees it
         raise HTTPException(status.HTTP_404_NOT_FOUND, "scan not found")
 
