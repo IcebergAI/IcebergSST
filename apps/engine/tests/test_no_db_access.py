@@ -4,8 +4,12 @@ A static import scan would miss a transitive path — ``iceberg_engine`` importi
 some helper that itself imports the session module. So this runs a real
 interpreter, imports the engine, and inspects the resulting module graph.
 
-Issue #52 extends this to the finished worker; the guard exists from M0 so the
-boundary can never be crossed unnoticed in between.
+The probe covers the *finished* worker (#52): the actor, the task runner, the API
+client, and the suppression pre-filter — which is the whole of what an engine
+process loads. The interesting risk is transitive: `runner` imports
+`iceberg_connectors`, which imports `iceberg_core.fingerprint`, and one careless
+`from iceberg_core.models import ...` anywhere down that chain would hand a worker
+the ORM. A static grep would miss it; importing for real does not.
 """
 
 import json
@@ -23,6 +27,8 @@ import sys
 
 importlib.import_module("iceberg_engine")
 importlib.import_module("iceberg_engine.worker")
+importlib.import_module("iceberg_engine.runner")
+importlib.import_module("iceberg_engine.api_client")
 importlib.import_module("iceberg_engine.suppression")
 print(json.dumps(sorted(sys.modules)))
 """
@@ -55,3 +61,17 @@ def test_engine_settings_are_the_only_configuration_it_needs() -> None:
     from iceberg_core.config import EngineSettings
 
     assert "database_url" not in EngineSettings.model_fields
+
+
+def test_the_engine_reaches_the_control_plane_only_through_its_client() -> None:
+    """The other half of the boundary: an engine has one way to talk to the API,
+    and it is authenticated with a token that works nowhere else (ADR 0002).
+
+    Asserted against the module graph because the failure mode is a helper quietly
+    importing `iceberg_api` for "just one schema" — which would give a worker the
+    API's dependency tree, and with it the database.
+    """
+    imported = _engine_module_graph()
+
+    api_modules = sorted(module for module in imported if module.startswith("iceberg_api"))
+    assert api_modules == [], f"engine process reached the API package: {api_modules}"
