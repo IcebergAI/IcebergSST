@@ -41,7 +41,13 @@ from iceberg_connectors.protocol import Connector
 from iceberg_core.fingerprint import fingerprint, secret_hash
 from iceberg_detect import DetectionResult, RulePack, detect
 
-from iceberg_engine.api_client import EngineClient, Lease, LeaseRefused
+from iceberg_engine.api_client import (
+    AuthenticationFailed,
+    EngineApiError,
+    EngineClient,
+    Lease,
+    LeaseRefused,
+)
 from iceberg_engine.heartbeat import TaskRegistry
 from iceberg_engine.suppression import prefilter, rules_from_lease
 
@@ -134,8 +140,12 @@ def run_task(
             connector = registry.get(lease.source_type)
             if lease.kind == DISCOVERY:
                 _discover(connector, lease, report)
-            else:
+            elif lease.kind == FETCH:
                 _fetch(connector, lease, report, pack=pack, tasks=tasks, task_id=task_id)
+            else:
+                # A kind this engine does not implement (a newer API, say). Fail
+                # loudly rather than silently mis-running it as a fetch.
+                raise ConnectorError(f"unsupported task kind {lease.kind!r}")
     except TaskCancelled:
         # The API is not waiting for this, and submitting would be a 409.
         log.info("scan_task_abandoned_after_cancellation")
@@ -143,17 +153,21 @@ def run_task(
     except ConnectorError as exc:
         # The source said no — bad credential, unreachable, unsupported type. The
         # scan should report why rather than an empty result that reads as "clean".
+        # Connector messages are our own and carry paths, not content (ADR 0004).
         report.status = "failed"
         report.error = f"{type(exc).__name__}: {exc}"[:2000]
         log.warning("scan_task_connector_failed", error=report.error)
     except Exception as exc:
-        # A bug, or something nobody anticipated. Still reported: an unreported
-        # task is one the API can only resolve by waiting out the lease.
+        # A bug, or something nobody anticipated. The message may have been produced
+        # by a third-party library quoting its input, which could be page content or
+        # a secret — so only the exception *type* is reported to the API and stored
+        # (ADR 0004). The full detail stays in this engine's local log.
         report.status = "failed"
-        report.error = f"{type(exc).__name__}: {exc}"[:2000]
+        report.error = type(exc).__name__
         log.exception("scan_task_failed")
 
-    client.submit_results(lease.task_id, report.as_submission(lease.idempotency_key, pack.version))
+    if not _submit(client, lease, report, pack, log):
+        return None
     log.info(
         "scan_task_reported",
         status=report.status,
@@ -161,6 +175,38 @@ def run_task(
         task_specs=len(report.task_specs),
     )
     return report
+
+
+def _submit(
+    client: EngineClient,
+    lease: Lease,
+    report: TaskReport,
+    pack: RulePack,
+    log: Any,
+) -> bool:
+    """Send the report. Returns False when there was nothing the API would accept.
+
+    A results submission can lose a race the runner cannot see: the task may have
+    been cancelled or its lease reclaimed while the scan ran. The API answers 409
+    ("no longer leased") or 403 ("not leased by this engine") — routine outcomes,
+    not crashes (ADR 0009 §2). And if the API is simply unreachable through every
+    retry, the task will be reclaimed and redone, so that too is logged rather than
+    left to escape the actor as an unhandled exception.
+    """
+    try:
+        client.submit_results(
+            lease.task_id, report.as_submission(lease.idempotency_key, pack.version)
+        )
+        return True
+    except (LeaseRefused, AuthenticationFailed):
+        # On the results route a 403/409 means the lease is gone, not a bad token:
+        # it worked at lease time moments ago. The task is no longer ours to report.
+        log.info("scan_task_lease_lost_before_report", status=report.status)
+        return False
+    except EngineApiError as exc:
+        # Unreachable through all retries; reclaim will redeliver the task.
+        log.warning("scan_task_report_failed", error=str(exc))
+        return False
 
 
 def _discover(connector: Connector, lease: Lease, report: TaskReport) -> None:

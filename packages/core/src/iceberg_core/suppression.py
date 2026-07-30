@@ -18,7 +18,7 @@ lifting them against stored findings — lives in ``iceberg_api.suppressions``.
 
 import uuid
 from dataclasses import dataclass
-from fnmatch import fnmatch
+from fnmatch import fnmatchcase
 from typing import Any
 
 from iceberg_core.enums import SuppressionScope
@@ -55,12 +55,19 @@ class SuppressionRule:
         API, which is the one divergence this module exists to prevent.
         """
         try:
+            pattern = payload["pattern"]
+            if not isinstance(pattern, str):
+                raise SuppressionPayloadError(f"suppression pattern must be a string: {payload}")
             return cls(
                 id=uuid.UUID(payload["id"]),
                 scope=SuppressionScope(payload["scope"]),
-                pattern=payload["pattern"],
+                pattern=pattern,
             )
-        except (KeyError, ValueError) as exc:
+        except (KeyError, ValueError, TypeError, AttributeError) as exc:
+            # A JSON payload can carry wrong value *types* (a number for `id`, null
+            # for `pattern`), which raise TypeError/AttributeError rather than
+            # ValueError; all of them mean "this engine cannot use this entry", and
+            # failing here beats crashing mid-scan inside fnmatch (ADR 0009).
             raise SuppressionPayloadError(f"unusable suppression payload: {payload}") from exc
 
 
@@ -80,7 +87,11 @@ def matches(
         case SuppressionScope.RULE:
             return rule.pattern == rule_id
         case SuppressionScope.PATH_GLOB:
-            return any(fnmatch(path, rule.pattern) for path in locator_paths(resource_locator))
+            # fnmatchcase, not fnmatch: fnmatch folds case per the host OS
+            # (os.path.normcase), which would make the engine on one platform
+            # pre-filter differently from the API on another — the very
+            # engine/API divergence this shared module exists to prevent.
+            return any(fnmatchcase(path, rule.pattern) for path in locator_paths(resource_locator))
 
 
 def first_match(

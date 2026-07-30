@@ -64,6 +64,25 @@ def test_a_keyword_matches_on_word_boundaries_not_substrings() -> None:
     assert keyword_near(api_key, api_key.index("8f3K"), len(api_key), ("key",), 64) == "key"
 
 
+def test_a_word_clipped_by_the_window_edge_does_not_fabricate_a_keyword() -> None:
+    """Slicing to the window must not invent a boundary: `auth` inside a clipped
+    `oauth` is not the keyword `auth`, and matching it would wrongly clear a
+    requires_keyword gate."""
+    secret = "8f3Kd0aQ2mVx7Lp9Zr4Ts6"
+    text = "oauth " + secret
+
+    # A tight window whose left edge cuts through `oauth` between `o` and `auth`.
+    assert keyword_near(text, 6, 6 + len(secret), ("auth",), 5) is None
+
+
+def test_a_keyword_running_through_the_window_edge_is_still_found() -> None:
+    secret = "8f3Kd0aQ2mVx7Lp9Zr4Ts6"
+    text = "auth" + " " * 6 + secret
+    start = text.index(secret)
+
+    assert keyword_near(text, start, start + len(secret), ("auth",), 8) == "auth"
+
+
 def test_keyword_search_is_case_insensitive() -> None:
     text = "SECRET: 8f3Kd0aQ2mVx"  # gitleaks:allow
 

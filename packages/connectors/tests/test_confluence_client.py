@@ -401,3 +401,78 @@ def test_an_absolute_url_passes_through_unchanged() -> None:
     client.get_json(f"{SITE}/wiki/api/v2/spaces")
 
     assert site.paths_requested() == ["/wiki/api/v2/spaces"]
+
+
+def test_an_off_site_next_link_is_refused_and_the_credential_never_sent() -> None:
+    """A `next` cursor is server-named; one that points off-origin is a source
+    trying to steer the scan (and harvest the token). It must be refused, and no
+    request bearing the credential may reach the other host."""
+    seen: list[tuple[str, str | None]] = []
+
+    def hostile(request: httpx2.Request) -> httpx2.Response:
+        seen.append((str(request.url.host), request.headers.get("authorization")))
+        if request.url.host != "wiki.example.test":
+            return httpx2.Response(200, json={"results": [], "_links": {}})
+        return httpx2.Response(
+            200,
+            json={"results": [{"id": "p0"}], "_links": {"next": "https://evil.test/harvest"}},
+        )
+
+    client, _ = _client(_site(), transport=httpx2.MockTransport(hostile))
+
+    with pytest.raises(ConnectorError, match="off-site"):
+        list(client.paginate("/spaces/s1/pages"))
+
+    assert all(host == "wiki.example.test" for host, _ in seen)
+
+
+def test_an_off_site_download_link_is_refused_before_the_first_request() -> None:
+    """The first download hop carries the credential, so it must be on the site."""
+    seen: list[str] = []
+
+    def record(request: httpx2.Request) -> httpx2.Response:
+        seen.append(str(request.url.host))
+        return httpx2.Response(200, content=b"x")
+
+    client, _ = _client(_site(), transport=httpx2.MockTransport(record))
+
+    with pytest.raises(ConnectorError, match="off-site"):
+        client.get_bytes("https://evil.test/blob", max_bytes=1024)
+
+    assert seen == []
+
+
+def test_a_json_body_over_the_cap_is_refused_rather_than_buffered() -> None:
+    """A page fetch's body is as attacker-influenced as an attachment's; an oversize
+    one must be cut off, not read whole into memory."""
+
+    def huge(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, content=b'{"results": [' + b'"x",' * 100000 + b'"x"]}')
+
+    client, _ = _client(_site(), transport=httpx2.MockTransport(huge), max_json_bytes=1024)
+
+    with pytest.raises(ConnectorError, match="exceeded"):
+        client.get_json("/spaces")
+
+
+def test_a_json_body_within_the_cap_is_returned() -> None:
+    def small(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={"results": [{"id": "p0"}], "_links": {}})
+
+    client, _ = _client(_site(), transport=httpx2.MockTransport(small))
+
+    assert client.get_json("/spaces")["results"] == [{"id": "p0"}]
+
+
+def test_a_run_of_throttles_waits_out_the_budget_not_the_retry_count() -> None:
+    """A throttle is bounded by how long the scan will wait, not by the retry
+    budget: more consecutive 429s than `attempts` still waits rather than failing
+    early with a misleading 'after N attempts' error."""
+    site = _site(pages=1)
+    site.throttle_first, site.retry_after = 3, 2.0
+    client, slept = _client(site, rate_limit=RateLimitPolicy(attempts=2, max_wait_seconds=300.0))
+
+    pages = list(client.paginate("/spaces/s1/pages"))
+
+    assert [page["id"] for page in pages] == ["p0"]
+    assert slept == [2.0, 2.0, 2.0]  # three throttles waited out under attempts=2

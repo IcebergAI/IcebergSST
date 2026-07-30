@@ -174,6 +174,26 @@ def test_an_unusable_lease_entry_raises_rather_than_being_skipped() -> None:
         rules_from_lease([{"id": str(uuid.uuid4()), "scope": "telepathy", "pattern": "x"}])
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"id": 123, "scope": "rule", "pattern": "x"},  # a JSON number for id
+        {"id": "not-a-uuid", "scope": "rule", "pattern": "x"},
+        {"id": "00000000-0000-0000-0000-000000000000", "scope": "rule", "pattern": None},
+        {"scope": "rule", "pattern": "x"},  # missing id
+    ],
+)
+def test_a_malformed_lease_entry_raises_the_typed_error_not_a_raw_exception(
+    payload: dict[str, object],
+) -> None:
+    """A wrong value *type* in a JSON payload must surface as SuppressionPayloadError
+    at decode, not as a raw TypeError/AttributeError deep inside matching mid-scan."""
+    from iceberg_core.suppression import SuppressionPayloadError
+
+    with pytest.raises(SuppressionPayloadError):
+        rules_from_lease([payload])  # type: ignore[list-item]
+
+
 def test_no_rules_keeps_everything(rules: list[SuppressionRule]) -> None:
     candidates = [candidate for candidate, _ in CANDIDATES]
 

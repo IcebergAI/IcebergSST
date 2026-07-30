@@ -149,6 +149,12 @@ def redact_snippet(
         max(0, target.start - resolved.context_chars),
         min(len(text), target.end + resolved.context_chars),
     )
+    # A copy of a secret that the window edge cuts through would have its in-window
+    # half stored as plaintext — the scrub and the final assert both look for whole
+    # secrets and miss a clipped one. Pull each edge back to the copy's outer
+    # boundary so nothing partial is ever emitted (the target defines the window,
+    # so it never straddles).
+    window = _clip_to_secret_boundaries(text, window, target, other_spans)
     masked = _masked_pieces(text, target, other_spans, window, resolved)
     snippet = "".join(masked)
 
@@ -156,10 +162,51 @@ def redact_snippet(
         snippet = _ELLIPSIS + snippet
     if window.end < len(text):
         snippet += _ELLIPSIS
-    snippet = snippet[:MAX_SNIPPET_CHARS]
 
+    # Assert on the whole snippet, then truncate: truncation can only remove
+    # already-proven-safe content, never smuggle a partial secret past the check.
     _assert_no_plaintext(snippet, text, target, other_spans)
-    return snippet
+    return snippet[:MAX_SNIPPET_CHARS]
+
+
+def _clip_to_secret_boundaries(
+    text: str, window: Span, target: Span, other_spans: tuple[Span, ...]
+) -> Span:
+    """Shrink ``window`` so neither edge bisects a literal copy of a matched secret.
+
+    A copy straddling an edge sits *outside* the target (a copy overlapping the
+    target is masked as a neighbour, not emitted as context), so pulling the edge
+    inward past it never eats into the match itself.
+    """
+    secrets = {t for span in (target, *other_spans) if len(t := text[span.start : span.end]) > 1}
+    if not secrets:
+        return window
+
+    start, end = window.start, window.end
+    moved = True
+    while moved and end > target.end:
+        moved = False
+        for secret in secrets:
+            hit = _straddler(text, end, secret)
+            if hit is not None and hit[0] >= target.end:
+                end, moved = hit[0], True
+    moved = True
+    while moved and start < target.start:
+        moved = False
+        for secret in secrets:
+            hit = _straddler(text, start, secret)
+            if hit is not None and hit[1] <= target.start:
+                start, moved = hit[1], True
+    return Span(start, end)
+
+
+def _straddler(text: str, boundary: int, secret: str) -> tuple[int, int] | None:
+    """The leftmost occurrence of ``secret`` that contains ``boundary`` strictly
+    inside it, or ``None``. Every match in the searched slice necessarily straddles
+    ``boundary``, so no per-hit check is needed."""
+    length = len(secret)
+    index = text.find(secret, max(0, boundary - length + 1), boundary + length - 1)
+    return (index, index + length) if index != -1 else None
 
 
 def _masked_pieces(
@@ -198,13 +245,13 @@ def _masked_pieces(
 
     # The same secret often appears more than once in a page ("same as prod: …")
     # and only one occurrence need have been matched. Scrubbing every literal
-    # occurrence out of the context keeps a stray copy from riding along. The
-    # original extent of every match is scrubbed too, so a repeat of a clipped
-    # neighbour is caught whole.
+    # occurrence out of the context keeps a stray copy from riding along. Every
+    # match's full text is scrubbed — not only the ones overlapping the window —
+    # so a stray copy of a match found elsewhere in the unit is caught here rather
+    # than tripping the plaintext assert and dropping the finding.
     replacements = tuple((text[span.start : span.end], mask) for span, mask in plan) + tuple(
         (text[span.start : span.end], mask_secret(text[span.start : span.end], RedactionPolicy()))
         for span in other_spans
-        if span.overlaps(target)
     )
 
     pieces: list[str] = []

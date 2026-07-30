@@ -18,12 +18,20 @@ from datetime import UTC, datetime
 import structlog
 from fastapi import APIRouter, HTTPException, status
 from iceberg_core.enums import ScanTaskKind, ScanTaskStatus
-from iceberg_core.models import Engine, Scan, ScanTask, Source
+from iceberg_core.models import (
+    AUDIT_ENGINE_REGISTERED,
+    AUDIT_ENGINE_TOKEN_ROTATED,
+    AUDIT_TARGET_ENGINE,
+    Engine,
+    Scan,
+    ScanTask,
+    Source,
+)
 from iceberg_core.secrets import SecretStoreError
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, select
 
-from iceberg_api import suppressions
+from iceberg_api import audit, suppressions
 from iceberg_api.auth.dependencies import (
     CsrfProtected,
     SecretStoreDep,
@@ -87,6 +95,19 @@ async def register_engine(
 
     minted = mint_token(engine)
     db.add(minted.engine)
+    # Recorded in the same transaction as the mutation: enrolling an engine (or
+    # rotating its token) mints a credential that later receives decrypted source
+    # credentials and the fingerprint pepper at lease time — the most consequential
+    # admin action in the system, and it belongs in the durable trail, not only a
+    # log line. The token itself is never recorded (audit.py contract).
+    audit.record(
+        db,
+        actor_id=admin.id,
+        action=AUDIT_ENGINE_TOKEN_ROTATED if rotating else AUDIT_ENGINE_REGISTERED,
+        target_type=AUDIT_TARGET_ENGINE,
+        target_id=minted.engine.id,
+        detail={"name": minted.engine.name},
+    )
     try:
         db.commit()
     except IntegrityError as exc:
@@ -284,7 +305,12 @@ async def submit_results(
         # no longer wanted, and accepting it would resurrect work the API moved on from.
         raise HTTPException(status.HTTP_409_CONFLICT, "task is not leased")
 
-    scan = db.get(Scan, task.scan_id)
+    # Lock the scan row for the rest of the transaction: two tasks of one scan can
+    # be submitted concurrently, and `merge_scan_counts` is a read-modify-write of
+    # the whole counts blob. Without the lock, the second commit clobbers the
+    # first's tallies (findings, units_scanned, …). FOR UPDATE serialises the two
+    # so each merges onto the other's committed result.
+    scan = db.exec(select(Scan).where(col(Scan.id) == task.scan_id).with_for_update()).one_or_none()
     if scan is None:  # pragma: no cover — FK guarantees it
         raise HTTPException(status.HTTP_404_NOT_FOUND, "scan not found")
 

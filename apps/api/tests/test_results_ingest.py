@@ -423,14 +423,20 @@ def test_a_triaged_finding_keeps_its_state_across_scans(scan_fixture: Fixture) -
     assert finding.last_seen_scan_id == second.id
 
 
-def test_a_secret_that_comes_back_reopens(scan_fixture: Fixture) -> None:
-    """An automatic resolution was an inference; a sighting is evidence."""
+@pytest.mark.parametrize("resolution", [FindingResolution.AUTO, FindingResolution.MANUAL])
+def test_a_secret_that_comes_back_reopens(
+    scan_fixture: Fixture, resolution: FindingResolution
+) -> None:
+    """A sighting refutes "resolved" however it was resolved (ADR 0006). An auto
+    resolution was an inference from absence; a manual one was an analyst believing
+    the secret had been removed — the reappearance disproves both. Only the
+    judgement states (false_positive, accepted_risk) survive a sighting."""
     fixture = scan_fixture
     task = fixture.fetch_task()
     fixture.report(task, findings=[_finding_payload()])
     finding = fixture.session.exec(select(Finding)).one()
     finding.state = FindingState.RESOLVED
-    finding.resolution = FindingResolution.AUTO
+    finding.resolution = resolution
     fixture.session.commit()
 
     second = service.launch_scan(

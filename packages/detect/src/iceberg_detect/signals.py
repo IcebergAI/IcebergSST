@@ -81,10 +81,23 @@ def keyword_near(
     """
     if not keywords:
         return None
-    haystack = text[max(0, start - window) : min(len(text), end + window)].lower()
+    lo = max(0, start - window)
+    hi = min(len(text), end + window)
+    # Slice a little wider than the window — by the longest keyword — so the
+    # boundary lookarounds see the real neighbouring characters. Slicing exactly
+    # to the window would fabricate a word boundary at the cut, matching `auth`
+    # inside a clipped `oauth` (a false positive that can flip a requires_keyword
+    # gate) or missing a keyword the edge runs through.
+    pad = max(len(keyword) for keyword in keywords)
+    offset = max(0, lo - pad)
+    haystack = text[offset : min(len(text), hi + pad)].lower()
+    window_lo, window_hi = lo - offset, hi - offset
     for keyword in keywords:
-        if _boundary_pattern(keyword).search(haystack):
-            return keyword
+        for match in _boundary_pattern(keyword).finditer(haystack):
+            # Only count a keyword that actually falls within the window; padding
+            # exists to give the boundary real context, not to widen the reach.
+            if match.start() < window_hi and match.end() > window_lo:
+                return keyword
     return None
 
 

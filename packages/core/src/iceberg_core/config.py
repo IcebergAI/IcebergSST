@@ -35,6 +35,12 @@ class CoreSettings(BaseSettings):
         env_prefix="ICEBERG_",
         extra="ignore",
         frozen=True,
+        # Compose hands every variable to every container, often as an empty string
+        # (`${ICEBERG_ENGINE_ID:-}`). Treat empty as unset so a blank optional falls
+        # back to its default instead of failing validation — an empty
+        # ICEBERG_ENGINE_ID would otherwise crash the engine at startup rather than
+        # dropping it into the documented no-heartbeat mode.
+        env_ignore_empty=True,
     )
 
     environment: Environment = "dev"

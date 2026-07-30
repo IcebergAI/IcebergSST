@@ -32,6 +32,7 @@ blindly, and ignoring it gets an integration throttled harder.
 """
 
 import base64
+import json
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -65,6 +66,12 @@ MAX_PAGES = 10_000
 #: Cloud redirects an attachment download once, to a signed media URL. A handful of
 #: hops covers a proxy in front of that; a loop is a broken site, not a file.
 MAX_REDIRECTS = 5
+
+#: Backstop on a single JSON response, streamed and cut off like an attachment.
+#: A hostile or compromised site could answer a page fetch with a multi-gigabyte
+#: ``body.storage.value``; without a cap ``response.json()`` would buffer it whole.
+#: Generous enough for a full 250-item collection of ordinary pages.
+DEFAULT_MAX_JSON_BYTES = 64 * 1024 * 1024
 
 
 class RateLimited(ConnectorError):
@@ -148,6 +155,7 @@ class ConfluenceClient:
     transport: httpx2.BaseTransport | None = None
     sleep: Callable[[float], None] = time.sleep
     timeout_seconds: float = 60.0
+    max_json_bytes: int = DEFAULT_MAX_JSON_BYTES
 
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip("/")
@@ -184,9 +192,11 @@ class ConfluenceClient:
     # ─── Single resources ─────────────────────────────────────────────────────
 
     def get_json(self, url: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        response = self._request("GET", self._resolve(url), params=params)
+        resolved = self._resolve(url)
+        self._require_same_origin(resolved, _path_of(url))
+        raw = self._request("GET", resolved, params=params)
         try:
-            body = response.json()
+            body = json.loads(raw)
         except ValueError as exc:
             raise ConnectorError(
                 f"confluence returned a non-JSON body for {_path_of(url)}"
@@ -215,7 +225,11 @@ class ConfluenceClient:
         The signed URL carries its own authorisation and needs none from us.
         """
         target = self._resolve(url)
-        headers = self._headers()
+        # The first hop carries the credential, so it must be on the site. The
+        # download itself may then redirect to an off-origin signed media URL, which
+        # the loop below follows with auth stripped.
+        self._require_same_origin(target, _path_of(url))
+        headers = self._headers(target)
 
         for _hop in range(MAX_REDIRECTS + 1):
             with (
@@ -247,45 +261,82 @@ class ConfluenceClient:
 
     # ─── Transport ────────────────────────────────────────────────────────────
 
-    def _request(self, method: str, url: str, *, params: dict[str, Any] | None) -> httpx2.Response:
+    def _request(self, method: str, url: str, *, params: dict[str, Any] | None) -> bytes:
+        """Issue a request through the retry/throttle loop, returning the body bytes.
+
+        Streamed, so a successful response's body is read against a cap rather than
+        buffered whole — the same protection ``get_bytes`` gives attachments, since
+        a page fetch's JSON is just as attacker-influenced. Error and throttle
+        responses have their (small) bodies left unread and the connection closed.
+        """
         path = _path_of(url)
         waited = 0.0
         last_error: Exception | None = None
 
-        for attempt in range(self.rate_limit.attempts):
-            with self._client() as client:
-                try:
-                    response = client.request(method, url, params=params, headers=self._headers())
-                except httpx2.HTTPError as exc:
-                    last_error = ConnectorError(f"{type(exc).__name__} reaching {path}")
-                    self.sleep(self.rate_limit.delay_for(attempt))
-                    continue
+        # 429 and 5xx/transport failures have separate budgets. A throttle is a
+        # normal answer bounded by how long the scan will wait (`max_wait_seconds`);
+        # it must not spend a retry attempt, or a run of throttles would exhaust the
+        # attempts and fail with the wrong error long before the wait budget is up.
+        # `throttles` grows the fallback backoff without touching the retry budget.
+        attempt = 0
+        throttles = 0
+        while attempt < self.rate_limit.attempts:
+            try:
+                with (
+                    self._client() as client,
+                    client.stream(
+                        method, url, params=params, headers=self._headers(url)
+                    ) as response,
+                ):
+                    status = response.status_code
+                    if status != 429 and status not in RETRYABLE_STATUSES:
+                        # Success or a terminal 4xx: raise for the latter, else read
+                        # the body against the cap while the stream is still open.
+                        self._raise_for_status(response, path)
+                        return self._read_capped(response, path)
+                    retry_after = (
+                        _retry_after(response, fallback=self.rate_limit.delay_for(throttles))
+                        if status == 429
+                        else None
+                    )
+            except httpx2.HTTPError as exc:
+                last_error = ConnectorError(f"{type(exc).__name__} reaching {path}")
+                self.sleep(self.rate_limit.delay_for(attempt))
+                attempt += 1
+                continue
 
-            if response.status_code == 429:
-                pause = _retry_after(response, fallback=self.rate_limit.delay_for(attempt))
-                waited += pause
+            if retry_after is not None:  # 429
+                throttles += 1
+                waited += retry_after
                 if waited > self.rate_limit.max_wait_seconds:
                     raise RateLimited(
                         f"confluence rate-limited {path} for more than "
                         f"{self.rate_limit.max_wait_seconds:.0f}s; reduce engine concurrency"
                     )
-                logger.info("confluence_rate_limited", path=path, wait_seconds=pause)
-                self.sleep(pause)
+                logger.info("confluence_rate_limited", path=path, wait_seconds=retry_after)
+                self.sleep(retry_after)
                 continue
 
-            if response.status_code in RETRYABLE_STATUSES:
-                last_error = ConnectorError(
-                    f"confluence returned {response.status_code} for {path}"
-                )
-                self.sleep(self.rate_limit.delay_for(attempt))
-                continue
-
-            self._raise_for_status(response, path)
-            return response
+            last_error = ConnectorError(f"confluence returned {status} for {path}")
+            self.sleep(self.rate_limit.delay_for(attempt))
+            attempt += 1
 
         raise ConnectorError(
             f"{method} {path} failed after {self.rate_limit.attempts} attempts"
         ) from last_error
+
+    def _read_capped(self, response: httpx2.Response, path: str) -> bytes:
+        """Read a streamed body, refusing to buffer more than ``max_json_bytes``."""
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in response.iter_bytes():
+            total += len(chunk)
+            if total > self.max_json_bytes:
+                raise ConnectorError(
+                    f"confluence response for {path} exceeded the {self.max_json_bytes} byte cap"
+                )
+            chunks.append(chunk)
+        return b"".join(chunks)
 
     def _raise_for_status(self, response: httpx2.Response, path: str) -> None:
         if response.status_code in (401, 403):
@@ -300,11 +351,21 @@ class ConfluenceClient:
     def _client(self) -> httpx2.Client:
         return httpx2.Client(transport=self.transport, timeout=self.timeout_seconds)
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, url: str) -> dict[str, str]:
         headers = {"Accept": "application/json"}
-        if self.credential is not None:
+        # The credential authenticates us to the configured site and nowhere else.
+        # A URL named by a response — a `next` cursor, an attachment `downloadLink`,
+        # a redirect target — that points off-origin must never receive it, or a
+        # malicious or compromised source could harvest this engine's Confluence
+        # token (docs/security.md). This is the same reasoning that strips auth on
+        # redirects; the response-named absolute URLs have the same property.
+        if self.credential is not None and self._same_origin(url):
             headers["Authorization"] = self.credential.header()
         return headers
+
+    def _same_origin(self, url: str) -> bool:
+        base, other = urlsplit(self.base_url), urlsplit(url)
+        return (other.scheme, other.netloc) == (base.scheme, base.netloc)
 
     def url(self, path: str) -> str:
         """An API path (``/pages/123``) as an absolute URL."""
@@ -319,6 +380,15 @@ class ConfluenceClient:
         if url.startswith(("http://", "https://")):
             return url
         return f"{self.base_url}/{url.lstrip('/')}"
+
+    def _require_same_origin(self, url: str, path: str) -> None:
+        """Refuse an API call to a host other than the configured site.
+
+        A ``next`` cursor or single-resource URL is always on the site; an absolute
+        one that points elsewhere is a response steering the scan off-origin (an
+        SSRF attempt), which has no legitimate meaning on the JSON API path."""
+        if not self._same_origin(url):
+            raise ConnectorError(f"refusing to follow an off-site URL for {path}")
 
 
 def _next_link(payload: dict[str, Any]) -> str | None:
@@ -339,9 +409,15 @@ def _retry_after(response: httpx2.Response, *, fallback: float) -> float:
     raw = response.headers.get("retry-after")
     if raw:
         try:
-            return max(0.0, float(raw.strip()))
+            parsed = float(raw.strip())
         except ValueError:
             logger.debug("confluence_retry_after_unparsed", value=raw[:32])
+        else:
+            # A zero or negative wait is not an actionable instruction, and since a
+            # throttle no longer consumes a retry attempt, honouring it verbatim
+            # would spin. Fall back to backoff, which always advances the budget.
+            if parsed > 0:
+                return parsed
     return fallback
 
 

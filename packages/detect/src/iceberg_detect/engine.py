@@ -51,7 +51,9 @@ class DetectedSecret:
     rule_id: str
     severity: str
     span: Span
-    secret: str
+    #: The plaintext, kept out of every repr so a stray ``repr(result)`` in a log
+    #: line or a test diff cannot print it.
+    secret: str = field(repr=False)
     redacted_snippet: str
     entropy: float
     confidence: float
@@ -78,8 +80,8 @@ class DetectionResult:
 class _Candidate:
     rule: Rule
     span: Span
-    text: str
-    signals: Signals
+    text: str = field(repr=False)
+    signals: Signals = field(repr=False)
     score: float
 
 
@@ -117,12 +119,14 @@ def detect(
     reportable = _strongest_of_each_overlap(above)
     result.dropped_overlapping = len(above) - len(reportable)
 
-    # Neighbours are every candidate found, not just the reported ones. A match
-    # that lost its rule's gate or was collapsed as a duplicate is still secret
-    # material, and it must not survive in someone else's context window.
-    all_spans = tuple(candidate.span for candidate in found)
+    # Neighbours are every regex match in the unit — not just the reported ones,
+    # and not just the ones that survived gating or the max_matches cap. A match
+    # that lost its rule's entropy/keyword gate, was collapsed as a duplicate, or
+    # fell past the cap is still secret material, and it must not survive in
+    # someone else's context window (ADR 0004). Reporting is capped; masking is not.
+    all_spans = _match_spans(text, pack)
     for candidate in reportable:
-        neighbours = tuple(span for span in all_spans if span is not candidate.span)
+        neighbours = tuple(span for span in all_spans if span != candidate.span)
         try:
             snippet = redact_snippet(
                 text, candidate.span, policy=candidate.rule.redaction, other_spans=neighbours
@@ -176,6 +180,23 @@ def _strongest_of_each_overlap(candidates: list[_Candidate]) -> list[_Candidate]
         kept.append(candidate)
     # Back into document order, so a snippet list reads down the page.
     return sorted(kept, key=lambda c: c.span.start)
+
+
+def _match_spans(text: str, pack: RulePack) -> tuple[Span, ...]:
+    """Every rule's secret span over the unit, gated or not, deduplicated.
+
+    This is the mask set for redaction: a match dropped by a gate or by the report
+    cap is still a secret that must not appear unmasked in a neighbour's snippet.
+    It is a separate, cheaper pass than :func:`_candidates` — no entropy or keyword
+    work — so completeness here never depends on how many matches were reported.
+    """
+    spans: dict[tuple[int, int], Span] = {}
+    for rule in pack.rules:
+        for match in rule.pattern.finditer(text):
+            span, candidate_text = _secret_span(rule, match)
+            if span is not None and candidate_text:
+                spans[(span.start, span.end)] = span
+    return tuple(spans.values())
 
 
 def _candidates(text: str, pack: RulePack, result: DetectionResult) -> Iterator[_Candidate]:

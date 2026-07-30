@@ -19,7 +19,7 @@ against a key they control.
 import base64
 import hashlib
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlencode
 
@@ -41,7 +41,11 @@ class OidcConfig:
 
     issuer: str
     client_id: str
-    client_secret: str
+    # Kept out of the repr: structlog and tracebacks both render values with repr,
+    # and this object is the kind of thing that ends up logged as `config=...`. The
+    # key-name redactor masks by key, so a secret nested in an object under a benign
+    # key would otherwise pass through (the same reasoning as Credential.__repr__).
+    client_secret: str = field(repr=False)
     redirect_url: str
     scopes: str = "openid profile email"
 

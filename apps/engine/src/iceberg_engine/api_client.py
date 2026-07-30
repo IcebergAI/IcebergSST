@@ -183,7 +183,7 @@ class EngineClient:
             body["rulepack"] = rulepack
 
         payload = self._request("POST", f"/engines/{self.engine_id}/heartbeat", json=body)
-        return [uuid.UUID(str(value)) for value in payload.get("cancelled_task_ids", [])]
+        return _parse_cancelled_ids(payload.get("cancelled_task_ids"))
 
     def lease(self, task_id: uuid.UUID) -> Lease:
         """Claim a task. Raises :class:`LeaseRefused` if it is not available."""
@@ -259,3 +259,23 @@ class EngineClient:
         if not isinstance(body, dict):
             raise EngineApiError("api returned an unexpected body shape")
         return body
+
+
+def _parse_cancelled_ids(raw: object) -> list[uuid.UUID]:
+    """The cancelled ids from a heartbeat reply, tolerant of a malformed one.
+
+    This runs on the heartbeat thread, so an API that returned ``null`` or a
+    non-UUID here must not raise and kill the thread — a bad entry is skipped,
+    not fatal. A wholly wrong shape is retryable, since a healthy API never sends
+    it (a proxy or a mid-deploy regression might)."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise RetryableApiError("heartbeat returned a malformed cancelled_task_ids")
+    parsed: list[uuid.UUID] = []
+    for value in raw:
+        try:
+            parsed.append(uuid.UUID(str(value)))
+        except (ValueError, AttributeError):
+            logger.warning("heartbeat_bad_cancelled_id", value=str(value)[:64])
+    return parsed

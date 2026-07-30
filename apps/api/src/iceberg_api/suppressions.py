@@ -250,19 +250,52 @@ def release_lapsed(db: Session, *, now: datetime | None = None) -> int:
     # Suppressions are analyst-managed and few; reading them once beats a lookup
     # per hidden finding.
     by_id = {row.id: row for row in db.exec(select(Suppression))}
+    # The live suppressions per source, cached: hand-over candidates for a finding
+    # whose own suppression lapsed. `applicable_suppressions` already drops expired
+    # ones, so the lapsed suppression is never a candidate for itself.
+    live_by_source: dict[uuid.UUID, list[SuppressionRule]] = {}
 
     released = 0
     for finding in hidden:
         suppression = by_id.get(finding.suppressed_by_id) if finding.suppressed_by_id else None
-        if suppression is None:
-            # The suppression row is gone but the finding still points at nothing.
-            # Self-healing rather than an invariant: a hidden finding with no
-            # explanation must not survive a beat.
-            release(db, finding, reason="suppression no longer exists")
-        elif suppression.expires_at is not None and _as_utc(suppression.expires_at) <= at:
-            release(db, finding, reason=f"suppression {suppression.id} expired")
-        else:
+        expired = suppression is not None and (
+            suppression.expires_at is not None and _as_utc(suppression.expires_at) <= at
+        )
+        if suppression is not None and not expired:
             continue
+
+        # The recorded suppression is gone or expired. Before releasing, check
+        # whether another live suppression still covers this finding and hand it
+        # over — the same courtesy release_covered_by extends on delete. Without it,
+        # a finding covered by both an expiring rule and a permanent one would pop
+        # into the active view on expiry and stay there until the next scan.
+        if finding.source_id not in live_by_source:
+            live_by_source[finding.source_id] = applicable_suppressions(
+                db, finding.source_id, now=at
+            )
+        replacement = first_match(
+            live_by_source[finding.source_id],
+            fingerprint=finding.fingerprint,
+            rule_id=finding.rule_id,
+            resource_locator=finding.resource_locator,
+        )
+        if replacement is not None:
+            logger.info(
+                "suppression_handed_over",
+                finding_id=str(finding.id),
+                from_suppression_id=str(finding.suppressed_by_id),
+                to_suppression_id=str(replacement.id),
+            )
+            finding.suppressed_by_id = replacement.id
+            db.add(finding)
+            continue
+
+        reason = (
+            "suppression no longer exists"
+            if suppression is None
+            else f"suppression {suppression.id} expired"
+        )
+        release(db, finding, reason=reason)
         released += 1
 
     if released:

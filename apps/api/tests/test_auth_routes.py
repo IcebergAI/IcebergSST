@@ -127,6 +127,26 @@ def test_the_bootstrap_email_grants_admin_only_when_the_provider_vouches_for_it(
     assert admin.role is UserRole.ADMIN
 
 
+def test_an_unverified_email_is_not_stored_as_the_users_identity(
+    client: TestClient, provider: FakeProvider, session: Session
+) -> None:
+    """An unverified address is user-settable at many IdPs; storing it and showing
+    it in the admin list primes a social-engineered promotion. Only a verified email
+    is trusted onto the profile."""
+    _complete_login(
+        client, provider, subject="oidc|mallory", email="ciso@company.test", email_verified=False
+    )
+    user = session.exec(select(User).where(User.oidc_subject == "oidc|mallory")).one()
+    assert user.email == ""  # the unverified claim was not trusted
+
+    client.cookies.clear()
+    _complete_login(
+        client, provider, subject="oidc|mallory", email="mallory@company.test", email_verified=True
+    )
+    session.refresh(user)
+    assert user.email == "mallory@company.test"  # a verified claim does refresh it
+
+
 def test_a_demoted_bootstrap_admin_is_not_re_promoted_by_logging_in_again(
     client: TestClient, provider: FakeProvider, session: Session
 ) -> None:
@@ -283,6 +303,16 @@ def test_a_forged_csrf_token_does_not_pass(client: TestClient, provider: FakePro
     response = client.post(LOGOUT, headers={"X-CSRF-Token": "not-the-token"})
 
     assert response.status_code == 403
+
+
+def test_a_non_ascii_csrf_token_fails_closed_rather_than_raising() -> None:
+    """Starlette decodes a header's raw bytes as latin-1, so a hostile client can
+    present a non-ASCII token. compare_digest raises TypeError on a non-ASCII str;
+    verify must fail the check closed (a CsrfError → 403), not let a 500 escape."""
+    from iceberg_api.auth.csrf import CsrfError, verify
+
+    with pytest.raises(CsrfError):
+        verify("the-real-token", "café-ÿ-tokén")
 
 
 def test_a_csrf_token_from_a_form_post_is_accepted(

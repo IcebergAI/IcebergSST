@@ -85,6 +85,16 @@ rules:
     redaction: keep_prefix
     base_confidence: 0.9
 
+  - id: github-fine-grained-pat
+    description: GitHub fine-grained personal access token
+    severity: critical
+    # The `github_pat_` format GitHub has issued since 2022; underscores in the
+    # body mean the ghp_ rule above cannot match it.
+    regex: '\bgithub_pat_[A-Za-z0-9_]{80,255}\b'
+    keywords: [github, token, pat, gh]
+    redaction: keep_prefix
+    base_confidence: 0.9
+
   - id: slack-token
     description: Slack API token
     severity: high

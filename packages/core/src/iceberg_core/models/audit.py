@@ -33,12 +33,15 @@ AUDIT_SCHEDULE_UPDATED = "schedule.updated"
 AUDIT_SCHEDULE_DELETED = "schedule.deleted"
 AUDIT_SUPPRESSION_CREATED = "suppression.created"
 AUDIT_SUPPRESSION_DELETED = "suppression.deleted"
+AUDIT_ENGINE_REGISTERED = "engine.registered"
+AUDIT_ENGINE_TOKEN_ROTATED = "engine.token_rotated"  # noqa: S105  # an audit action name
 
 #: Values for ``target_type``.
 AUDIT_TARGET_USER = "user"
 AUDIT_TARGET_SOURCE = "source"
 AUDIT_TARGET_SCHEDULE = "schedule"
 AUDIT_TARGET_SUPPRESSION = "suppression"
+AUDIT_TARGET_ENGINE = "engine"
 
 
 class AuditEvent(IcebergModel, table=True):

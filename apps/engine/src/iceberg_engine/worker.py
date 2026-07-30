@@ -98,10 +98,17 @@ def register_connectors() -> tuple[str, ...]:
 
 
 class CorrelationMiddleware(dramatiq.Middleware):
-    """Bind the broker message id as ``task_id`` for the duration of a message."""
+    """Bind the scan-task id as ``task_id`` for the duration of a message.
+
+    The dispatcher puts the ScanTask id in ``args[0]`` (dispatch.py); the broker's
+    own ``message_id`` is a random per-delivery UUID that matches nothing in the
+    database. Binding the real id is what lets an operator correlate a stuck task
+    across the engine and API logs — including the frames `run_task` does not set
+    it on itself (a dramatiq-level error, a heartbeat line)."""
 
     def before_process_message(self, broker: dramatiq.Broker, message: MessageProxy) -> None:
-        structlog.contextvars.bind_contextvars(task_id=message.message_id)
+        task_id = message.args[0] if message.args else message.message_id
+        structlog.contextvars.bind_contextvars(task_id=str(task_id))
 
     def after_process_message(
         self,
@@ -123,11 +130,18 @@ def build_broker(redis_url: str | None = None) -> dramatiq.Broker:
     The stub fallback keeps tests and local smoke runs broker-free; real
     deployments always set ``ICEBERG_REDIS_URL``.
     """
-    broker: dramatiq.Broker = (
-        RedisBroker(url=redis_url)  # type: ignore[no-untyped-call]  # RedisBroker.__init__ lacks hints
-        if redis_url
-        else StubBroker()
-    )
+    broker: dramatiq.Broker
+    if redis_url:
+        broker = RedisBroker(url=redis_url)  # type: ignore[no-untyped-call]  # RedisBroker.__init__ lacks hints
+    else:
+        # A stub broker consumes nothing: the engine would boot "healthy" (metrics
+        # up, heartbeats reporting it alive) while every scan sits queued forever.
+        # Fine for tests and local smoke runs, a misconfiguration in a real deploy.
+        logger.warning(
+            "engine_broker_missing",
+            detail="no ICEBERG_REDIS_URL; using a stub broker that consumes no tasks",
+        )
+        broker = StubBroker()
     broker.add_middleware(CorrelationMiddleware())
     dramatiq.set_broker(broker)
     return broker
