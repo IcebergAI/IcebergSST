@@ -38,11 +38,13 @@ def _password() -> str:
 GENERATORS: dict[str, Callable[[], str]] = {
     "POSTGRES_PASSWORD": _password,
     "REDIS_PASSWORD": _password,
-    "ICEBERG_ENGINE_TOKEN": _password,
     "ICEBERG_MASTER_KEY": generate_master_key,
     # Signs session cookies; needs 32+ bytes for HS256 (RFC 7518 §3.2).
     "ICEBERG_SESSION_SECRET": _password,
 }
+# Deliberately not generated: an engine token is only valid once the API has
+# minted it (`mint-engine-token` stores its hash), so a random value written here
+# could only ever be rejected. It stays blank until an operator mints one.
 PEPPER_VARIABLE = "ICEBERG_FINGERPRINT_PEPPER_REF"
 
 

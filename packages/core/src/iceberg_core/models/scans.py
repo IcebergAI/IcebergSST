@@ -52,7 +52,13 @@ class Engine(TimestampedModel, table=True):
     #: packs ship inside engine images (ADR 0008), so the fleet is the only place
     #: that knows which rules are actually running — during a rolling deploy, more
     #: than one answer is correct at once, and ``GET /rules`` reports all of them.
-    rulepack: dict[str, Any] = Field(default_factory=dict, sa_type=json_type())
+    rulepack: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_type=json_type(),
+        # Matches migration 0005's server_default so autogenerate sees no drift and
+        # a row inserted outside the ORM still reads as "reported nothing", not null.
+        sa_column_kwargs={"server_default": text("'{}'")},
+    )
 
 
 class Scan(TimestampedModel, table=True):

@@ -215,7 +215,10 @@ def test_env_example_contains_no_real_values() -> None:
         if separator and re.search(
             r"PASSWORD|MASTER_KEY|TOKEN|PEPPER|SESSION_SECRET|CLIENT_SECRET", name
         ):
-            assert value.strip() == "CHANGE_ME", f"{name} has a committed value"
+            # CHANGE_ME for values init-env generates; blank for the engine token,
+            # which is minted by the API rather than generated (a placeholder there
+            # would authenticate with a value the API never issued).
+            assert value.strip() in ("CHANGE_ME", ""), f"{name} has a committed value"
 
 
 def test_init_env_fills_every_placeholder_with_a_working_value(tmp_path: Path) -> None:
@@ -238,15 +241,16 @@ def test_init_env_fills_every_placeholder_with_a_working_value(tmp_path: Path) -
     assert set(filled) == {
         "POSTGRES_PASSWORD",
         "REDIS_PASSWORD",
-        "ICEBERG_ENGINE_TOKEN",
         "ICEBERG_MASTER_KEY",
         "ICEBERG_SESSION_SECRET",
         "ICEBERG_FINGERPRINT_PEPPER_REF",
     }
-    # What is left is what only the operator can supply — the OIDC client secret
-    # is issued by their identity provider, not generated here.
+    # What is left is what only the operator can supply — the OIDC client secret is
+    # issued by their identity provider, and the engine token is minted by the API;
+    # neither can be generated here.
     outstanding = {name for name, value in values.items() if value == "CHANGE_ME"}
     assert outstanding == {"ICEBERG_OIDC_CLIENT_SECRET"}
+    assert values["ICEBERG_ENGINE_TOKEN"] == ""  # blank until an operator mints one
 
     store = EnvKeyBackend(
         decode_master_key(values["ICEBERG_MASTER_KEY"]),
