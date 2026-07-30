@@ -32,15 +32,32 @@ SUPPORTED_SOURCE_TYPES = frozenset({SourceType.CONFLUENCE})
 
 
 class ConfluenceConnection(BaseModel):
-    """Where a Confluence instance lives and how much of it is in scope."""
+    """Where a Confluence instance lives and how much of it is in scope.
+
+    Every key the Confluence connector reads must be a field here: the blob is
+    validated with ``extra="forbid"``, so a key this model omits is one no admin
+    can store and no engine will ever receive — ``tests/test_source_connection_schema.py``
+    holds the two in step.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     #: Instance base URL, e.g. ``https://example.atlassian.net/wiki``.
     base_url: str
+    #: The Cloud account email. Its presence is what selects Basic ``email:token``
+    #: auth; absent means the credential is a Server/DC PAT sent as a Bearer
+    #: (docs/connectors.md § Auth).
+    email: str | None = None
+    #: Where the v2 API is mounted. Cloud's ``/wiki/api/v2`` is the connector's
+    #: default; Server/DC deployments mount it elsewhere.
+    api_prefix: str | None = None
     #: Space keys to scan. Empty means every space the credential can read.
     spaces: list[str] = Field(default_factory=list)
+    include_comments: bool = True
     include_attachments: bool = True
+    #: Off by default: personal spaces are every user's drafts, and scanning them
+    #: should be a deliberate decision (docs/connectors.md).
+    include_personal_spaces: bool = False
 
     @field_validator("base_url")
     @classmethod
@@ -50,6 +67,29 @@ class ConfluenceConnection(BaseModel):
             raise ValueError("base_url must start with http:// or https://")
         if " " in trimmed:
             raise ValueError("base_url must not contain spaces")
+        return trimmed
+
+    @field_validator("email")
+    @classmethod
+    def _clean_email(cls, value: str | None) -> str | None:
+        # Empty selects Bearer auth exactly like an omitted field, so normalise
+        # rather than store a blank that reads as "email configured".
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @field_validator("api_prefix")
+    @classmethod
+    def _sane_api_prefix(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        trimmed = value.strip().rstrip("/")
+        if not trimmed:
+            return None
+        if not trimmed.startswith("/") or " " in trimmed:
+            # The client builds URLs as base_url + api_prefix + path; a prefix
+            # missing its leading slash fails hours later inside a scan task.
+            raise ValueError("api_prefix must be an absolute path like /wiki/api/v2")
         return trimmed
 
     @field_validator("spaces")

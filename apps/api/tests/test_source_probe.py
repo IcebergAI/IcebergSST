@@ -54,6 +54,34 @@ def test_a_colon_separated_credential_becomes_basic_auth() -> None:
     )
 
 
+def test_a_connection_email_selects_basic_auth_like_the_connector_does() -> None:
+    """The documented Cloud convention: a bare API token plus ``email`` in the
+    connection blob. The probe must authenticate exactly as a scan would
+    (``Credential.header``), or `POST /sources/{id}/test` reports a false
+    credential failure for a source whose scans work."""
+    header = authorization_header(SecretStr("api-token"), email="admin@example.test")
+
+    scheme, encoded = header.split(" ", 1)
+    assert scheme == "Basic"
+    assert base64.b64decode(encoded).decode() == "admin@example.test:api-token"
+
+
+@pytest.mark.anyio
+async def test_the_probe_reads_the_email_from_the_connection_blob() -> None:
+    sent: list[httpx2.Request] = []
+    source = Source(
+        name="probe-target",
+        type=SourceType.CONFLUENCE,
+        connection={"base_url": BASE_URL, "email": "admin@example.test"},
+    )
+
+    await probe_source(source, SecretStr("api-token"), transport=_transport(capture=sent))
+
+    scheme, encoded = sent[0].headers["authorization"].split(" ", 1)
+    assert scheme == "Basic"
+    assert base64.b64decode(encoded).decode() == "admin@example.test:api-token"
+
+
 @pytest.mark.anyio
 async def test_a_successful_probe_hits_the_expected_url_with_the_credential() -> None:
     sent: list[httpx2.Request] = []
