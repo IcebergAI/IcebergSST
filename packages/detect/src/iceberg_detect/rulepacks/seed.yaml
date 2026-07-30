@@ -1,0 +1,173 @@
+# The MVP rule pack (#43 — ADR 0003, docs/rules.md).
+#
+# Every rule here earns its place by being high-signal: a shape that is a secret
+# far more often than it is anything else. Rules that would need a corpus of
+# tuning to be usable are better as nothing than as noise — an analyst who learns
+# to skim the queue is worse off than one with a shorter queue.
+#
+# Three conventions:
+#
+# * `entropy_min` is set only where the shape alone admits ordinary text. An AWS
+#   key id cannot be prose; a 32-character hex string can be a git sha.
+# * `keywords` raise confidence. `requires_keyword` makes them mandatory, and is
+#   reserved for the generic rule, which is unusable without it.
+# * `redaction: keep_prefix` is for secrets whose first characters are a vendor
+#   tag rather than key material. When in doubt the default (`full`) is correct.
+#
+# Bump `version` whenever a rule changes: it is stamped on every finding, and a
+# result that cannot be traced to the rules that made it is not reproducible.
+
+version: "2026.07.1"
+description: IcebergSST seed rule pack — common, high-signal secret types.
+
+rules:
+  # ─── Cloud provider credentials ─────────────────────────────────────────────
+
+  - id: aws-access-key-id
+    description: AWS Access Key ID
+    severity: high
+    # AKIA is a long-lived user key; ASIA a temporary STS one. Both are worth
+    # reporting, and the prefix makes the shape unmistakable — no entropy gate.
+    regex: '\b(?:AKIA|ASIA)[0-9A-Z]{16}\b'
+    keywords: [aws, amazon, access, key, credential]
+    redaction: keep_prefix
+    base_confidence: 0.8
+
+  - id: aws-secret-access-key
+    description: AWS Secret Access Key
+    severity: critical
+    # A bare 40-char base64 run is common in the wild, so this one insists on the
+    # assignment context and reports only the value.
+    regex: '(?i)aws[_.-]?secret[_.-]?(?:access[_.-]?)?key\s*[:=]\s*["'']?(?P<secret>[A-Za-z0-9/+=]{40})'
+    entropy_min: 4.0
+    keywords: [aws, secret, key]
+    base_confidence: 0.7
+
+  - id: gcp-service-account-key
+    description: Google Cloud service-account private key block
+    severity: critical
+    regex: '"type"\s*:\s*"service_account"[\s\S]{0,400}?"private_key_id"\s*:\s*"(?P<secret>[a-f0-9]{40})"'
+    keywords: [google, gcp, service, account, credential]
+    base_confidence: 0.85
+
+  - id: gcp-api-key
+    description: Google API key
+    severity: high
+    regex: '\bAIza[0-9A-Za-z_-]{35}\b'
+    keywords: [google, gcp, api, key, maps, firebase]
+    redaction: keep_prefix
+    base_confidence: 0.8
+
+  - id: azure-storage-account-key
+    description: Azure Storage account key in a connection string
+    severity: critical
+    regex: '(?i)accountkey\s*=\s*(?P<secret>[A-Za-z0-9/+=]{64,100})'
+    entropy_min: 4.0
+    keywords: [azure, storage, account, connection]
+    base_confidence: 0.8
+
+  - id: azure-client-secret
+    description: Azure AD application client secret
+    severity: critical
+    regex: '(?i)client[_.-]?secret\s*[:=]\s*["'']?(?P<secret>[A-Za-z0-9._~-]{32,50})'
+    entropy_min: 3.5
+    keywords: [azure, tenant, client, secret, oauth]
+    base_confidence: 0.6
+
+  # ─── Vendor tokens ──────────────────────────────────────────────────────────
+
+  - id: github-token
+    description: GitHub personal access, OAuth, or app token
+    severity: critical
+    # ghp_/gho_/ghu_/ghs_/ghr_ are GitHub's own documented prefixes.
+    regex: '\bgh[pousr]_[A-Za-z0-9]{36,255}\b'
+    keywords: [github, token, pat, gh]
+    redaction: keep_prefix
+    base_confidence: 0.9
+
+  - id: slack-token
+    description: Slack API token
+    severity: high
+    regex: '\bxox[abposr]-[0-9A-Za-z-]{10,250}\b'
+    keywords: [slack, token, webhook, bot]
+    redaction: keep_prefix
+    base_confidence: 0.85
+
+  - id: slack-webhook-url
+    description: Slack incoming-webhook URL
+    severity: medium
+    regex: 'https://hooks\.slack\.com/services/T[0-9A-Za-z_]{6,12}/B[0-9A-Za-z_]{6,12}/[0-9A-Za-z]{20,30}'
+    keywords: [slack, webhook, notify]
+    base_confidence: 0.8
+
+  - id: stripe-api-key
+    description: Stripe live or test API key
+    severity: critical
+    regex: '\b(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{20,120}\b'
+    keywords: [stripe, api, key, payment]
+    redaction: keep_prefix
+    redaction_keep: 8
+    base_confidence: 0.9
+
+  # ─── Key material and tokens by shape ───────────────────────────────────────
+
+  - id: private-key-block
+    description: PEM-encoded private key block
+    severity: critical
+    # Bounded repetition, not `[\s\S]+`: an unterminated header in a 2 MB
+    # attachment should fail fast rather than scan to the end of the document.
+    regex: '-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY(?: BLOCK)?-----[\s\S]{0,8000}?-----END'
+    keywords: [private, key, ssh, rsa, pem, certificate]
+    base_confidence: 0.95
+
+  - id: json-web-token
+    description: JSON Web Token
+    severity: medium
+    # `eyJ` is base64 for `{"`, which is what makes a JWT recognisable. Medium,
+    # not high: plenty of JWTs in documentation are expired samples.
+    regex: '\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b'
+    keywords: [jwt, token, bearer, authorization, auth]
+    redaction: keep_prefix
+    base_confidence: 0.6
+
+  - id: connection-string-password
+    description: Password embedded in a database or service URI
+    severity: high
+    # postgres://user:password@host — the password is the part between the colon
+    # and the at-sign, and only that part is reported.
+    regex: '(?i)\b[a-z][a-z0-9+.-]*://[^:@/\s]{1,64}:(?P<secret>[^@/\s]{6,128})@'
+    keywords: [password, connection, database, dsn, uri, url]
+    base_confidence: 0.7
+
+  - id: basic-auth-header
+    description: HTTP Basic credentials in an Authorization header
+    severity: high
+    regex: '(?i)authorization\s*:\s*basic\s+(?P<secret>[A-Za-z0-9+/]{16,}={0,2})'
+    entropy_min: 3.0
+    keywords: [authorization, basic, auth, header, curl]
+    base_confidence: 0.75
+
+  - id: password-assignment
+    description: Password assigned to a variable or configuration key
+    severity: medium
+    regex: '(?i)\b(?:password|passwd|pwd)\s*[:=]\s*["'']?(?P<secret>[^\s"''{}<>,;]{8,128})'
+    entropy_min: 2.5
+    keywords: [password, passwd, pwd, credential, login]
+    base_confidence: 0.45
+
+  # ─── The catch-all ──────────────────────────────────────────────────────────
+
+  - id: generic-high-entropy
+    description: High-entropy string near credential wording
+    severity: medium
+    # Unqualified this matches every git sha, UUID, and checksum in the corpus,
+    # so it is gated twice: entropy, and a mandatory nearby keyword. Even then it
+    # scores low enough to sit below a default threshold unless both signals are
+    # strong — it exists to catch the secret type nobody wrote a rule for, not to
+    # be the rule that finds most findings.
+    regex: '\b(?P<secret>[A-Za-z0-9/+_=-]{24,120})\b'
+    entropy_min: 4.2
+    keywords: [secret, token, apikey, api_key, credential, password, passphrase, auth]
+    keyword_window: 48
+    requires_keyword: true
+    base_confidence: 0.35

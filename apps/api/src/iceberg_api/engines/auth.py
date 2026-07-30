@@ -96,12 +96,17 @@ def record_heartbeat(
     engine: Engine,
     *,
     version: str | None = None,
+    rulepack: dict[str, object] | None = None,
     now: datetime | None = None,
 ) -> Engine:
     """Stamp a heartbeat, and treat the engine as active again if it had gone quiet."""
     engine.last_heartbeat_at = now or datetime.now(UTC)
     if version:
         engine.version = version
+    if rulepack is not None:
+        # Replaced, not merged: an engine that restarted onto a smaller pack must
+        # not appear to still be running the rules it dropped (#70).
+        engine.rulepack = rulepack
     if engine.status is EngineStatus.OFFLINE:
         engine.status = EngineStatus.ACTIVE
     db.add(engine)

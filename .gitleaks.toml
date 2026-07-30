@@ -1,0 +1,41 @@
+# gitleaks configuration for IcebergSST.
+#
+# This repository is a secret scanner, so its own test suite is full of
+# deliberately secret-shaped strings. The CI job scans the **whole git history**
+# (`fetch-depth: 0`), which is what makes a committed-then-deleted credential
+# still fail — and also what makes a fixture unfixable by editing the file: the
+# commit that introduced it is immutable. That is what this file is for.
+#
+# Two rules for anything added below:
+#
+# * **Never set `paths` on an allowlist.** Not even alongside a `regexes` entry
+#   and `condition = "AND"`: gitleaks applies a path allowlist as a file-level
+#   pre-filter, *before* and independently of the other criteria, so naming a path
+#   exempts the whole file however the rest of the entry reads. Verified against
+#   v8.30 — a real `ghp_…` token in a file under an allowlisted path is not
+#   reported. `packages/*/tests/**` would therefore silence a genuine credential
+#   committed into a test, and would retract the grounds `pyproject.toml` gives for
+#   exempting the test suite from ruff's S105/S106: that real leaks are caught by
+#   the gitleaks job over the whole repo.
+# * **Allowlist the literal, not the finding.** A fingerprint entry
+#   (`<commit>:<file>:<rule>:<line>`) is per-commit, so it lapses the moment
+#   anything shifts the line, and it says nothing about *why* the string is safe.
+#
+# For new fixtures, prefer an inline `# gitleaks:allow` comment on the line
+# itself: it needs no config change, and it shows up in the diff where a reviewer
+# can judge it. This file is only for literals already in history.
+
+title = "IcebergSST"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """
+Fake AWS-shaped tokens in the redaction tests (packages/core/tests/test_redaction.py,
+introduced in 1c0deb3). The alphabet run after the AKIA prefix is the tell: these are
+hand-written to exercise the overlapping-span masking in ADR 0004, and no such key has
+ever existed. Matched by `generic-api-key` because the fixtures are named `secret`.
+Keyed on the literal and nothing else — the file is still scanned for everything else.
+"""
+regexes = ['''AKIAABCDEFGHIJKLMNOP''']

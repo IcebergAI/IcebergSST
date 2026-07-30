@@ -23,6 +23,7 @@ import sys
 
 importlib.import_module("iceberg_engine")
 importlib.import_module("iceberg_engine.worker")
+importlib.import_module("iceberg_engine.suppression")
 print(json.dumps(sorted(sys.modules)))
 """
 

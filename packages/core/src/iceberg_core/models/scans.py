@@ -47,6 +47,13 @@ class Engine(TimestampedModel, table=True):
     )
     last_heartbeat_at: datetime | None = Field(default=None, sa_type=utc_timestamp_type())
 
+    #: The rule pack this engine reported at registration or on its last heartbeat:
+    #: ``{"version": …, "rules": [{"id", "description", "severity"}, …]}``. Rule
+    #: packs ship inside engine images (ADR 0008), so the fleet is the only place
+    #: that knows which rules are actually running — during a rolling deploy, more
+    #: than one answer is correct at once, and ``GET /rules`` reports all of them.
+    rulepack: dict[str, Any] = Field(default_factory=dict, sa_type=json_type())
+
 
 class Scan(TimestampedModel, table=True):
     """One scan run of a source, two-phase (discovery fans out into fetch tasks).

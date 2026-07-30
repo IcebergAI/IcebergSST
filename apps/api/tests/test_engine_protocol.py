@@ -468,3 +468,87 @@ def test_a_reclaimed_task_records_its_second_attempt(
 
     assert grant is not None
     assert grant.task.attempts == 2
+
+
+def test_an_engine_reports_its_rulepack_at_registration(
+    client: TestClient,
+    session: Session,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """Rule packs ship in engine images (ADR 0008), so the fleet is the only place
+    that knows which rules are in force (#70)."""
+    headers = login_as(make_user(UserRole.ADMIN))
+
+    response = client.post(
+        REGISTER,
+        json={
+            "name": "engine-reporting",
+            "version": "0.2.0",
+            "rulepack": {
+                "version": "2026.07.1",
+                "rules": [
+                    {"id": "aws-access-key-id", "description": "AWS key", "severity": "high"}
+                ],
+            },
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 201
+    engine = session.exec(select(Engine).where(Engine.name == "engine-reporting")).one()
+    assert engine.rulepack["version"] == "2026.07.1"
+    assert [rule["id"] for rule in engine.rulepack["rules"]] == ["aws-access-key-id"]
+
+
+def test_a_heartbeat_replaces_the_reported_rulepack(
+    client: TestClient,
+    session: Session,
+    engine_credential: tuple[Engine, dict[str, str]],
+) -> None:
+    """An engine restarted onto a smaller pack must not appear to still be running
+    the rules it dropped — replaced, not merged."""
+    engine, headers = engine_credential
+    engine.rulepack = {
+        "version": "2026.07.1",
+        "rules": [
+            {"id": "aws-access-key-id", "description": "AWS key", "severity": "high"},
+            {"id": "retired-rule", "description": "Gone", "severity": "low"},
+        ],
+    }
+    session.add(engine)
+    session.commit()
+
+    client.post(
+        f"{ENGINES}/{engine.id}/heartbeat",
+        json={
+            "rulepack": {
+                "version": "2026.08.1",
+                "rules": [
+                    {"id": "aws-access-key-id", "description": "AWS key", "severity": "high"}
+                ],
+            }
+        },
+        headers=headers,
+    )
+
+    session.refresh(engine)
+    assert engine.rulepack["version"] == "2026.08.1"
+    assert [rule["id"] for rule in engine.rulepack["rules"]] == ["aws-access-key-id"]
+
+
+def test_a_heartbeat_without_a_rulepack_leaves_the_stored_one_alone(
+    client: TestClient,
+    session: Session,
+    engine_credential: tuple[Engine, dict[str, str]],
+) -> None:
+    """Omitting the field is not the same as reporting an empty pack."""
+    engine, headers = engine_credential
+    engine.rulepack = {"version": "2026.07.1", "rules": []}
+    session.add(engine)
+    session.commit()
+
+    client.post(f"{ENGINES}/{engine.id}/heartbeat", json={}, headers=headers)
+
+    session.refresh(engine)
+    assert engine.rulepack["version"] == "2026.07.1"

@@ -50,6 +50,9 @@ jobs:
           # Full history so previously committed-then-removed secrets are caught.
           fetch-depth: 0
 
+      # --config is explicit rather than left to gitleaks' lookup: the allowlist in
+      # .gitleaks.toml is what keeps this job green, and "which config did it use?"
+      # should be answerable from the workflow.
       - name: Run gitleaks over full git history
         run: |
           docker run --rm -v "$PWD:/repo" \
@@ -57,4 +60,4 @@ jobs:
             -e GIT_CONFIG_KEY_0=safe.directory \
             -e GIT_CONFIG_VALUE_0='*' \
             ghcr.io/gitleaks/gitleaks:v8.30.0 \
-            git /repo --redact --verbose
+            git /repo --redact --verbose --config /repo/.gitleaks.toml
