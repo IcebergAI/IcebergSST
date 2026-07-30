@@ -50,15 +50,21 @@ class ProbeError(Exception):
     """The source cannot be probed at all (unsupported type, no base URL)."""
 
 
-def authorization_header(credential: SecretStr) -> str:
+def authorization_header(credential: SecretStr, *, email: str | None = None) -> str:
     """Build the ``Authorization`` value for a stored credential.
 
     Confluence Cloud wants Basic ``email:api_token``; a bare token (Server PAT,
-    or any other source type) is a Bearer credential. The shape of the stored
-    string is what distinguishes them, which keeps one opaque credential field
-    working for both.
+    or any other source type) is a Bearer credential. The connection blob's
+    ``email`` is what selects between them — the same rule the engine-side
+    connector applies (``Credential.header``), so a probe and a scan of one
+    source can never disagree about how to authenticate. A credential stored as
+    ``email:token`` in one string is still recognised by its shape, for sources
+    configured before ``email`` existed as a field.
     """
     secret = credential.get_secret_value()
+    if email:
+        pair = base64.b64encode(f"{email}:{secret}".encode()).decode()
+        return f"Basic {pair}"
     if ":" in secret:
         encoded = base64.b64encode(secret.encode()).decode()
         return f"Basic {encoded}"
@@ -81,7 +87,11 @@ async def probe_source(
         raise ProbeError("source connection has no base_url")
 
     url = f"{base_url}{path}"
-    headers = {"Authorization": authorization_header(credential), "Accept": "application/json"}
+    email = str(source.connection.get("email") or "") or None
+    headers = {
+        "Authorization": authorization_header(credential, email=email),
+        "Accept": "application/json",
+    }
 
     try:
         async with httpx2.AsyncClient(

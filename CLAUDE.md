@@ -8,10 +8,12 @@ IcebergSST — a secret-scanning platform for non-git enterprise sources (Conflu
 shares). See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the design spec and [`docs/adr/`](./docs/adr/)
 for decision rationale.
 
-**Where the code is:** M0 foundations exist — the uv workspace, `packages/core` (config, DB session,
-secret store, redaction, fingerprinting, the SQLModel schema), Alembic, and the docker-compose
-stack. The API routes, detection engine, connectors, and UI are still to come (M1+), so most
-"where does X live" questions are answered by `docs/backlog.md` rather than by the tree.
+**Where the code is:** M0–M2 are built. `packages/core` (config, DB session, secret store,
+redaction, fingerprinting, the SQLModel schema), `packages/detect` (rule packs, the detection
+engine), `packages/connectors` (Confluence, extraction, the sandbox), `apps/api` (auth, sources,
+scans, findings, engine-facing routes, scheduler/maintenance), `apps/engine` (the Dramatiq
+worker), Alembic, and the docker-compose stack all exist and are tested. The HTMX/Alpine web UI
+(M3) and notifications/Helm (M4) are still to come — `docs/backlog.md` tracks those.
 
 ## Non-negotiable invariants
 

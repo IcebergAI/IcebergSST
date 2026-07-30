@@ -6,7 +6,12 @@ import pytest
 from iceberg_api import cli
 from iceberg_api.engines.auth import hash_token
 from iceberg_core.db import set_db_engine
-from iceberg_core.models import Engine
+from iceberg_core.models import (
+    AUDIT_ENGINE_REGISTERED,
+    AUDIT_ENGINE_TOKEN_ROTATED,
+    AuditEvent,
+    Engine,
+)
 from sqlalchemy import Engine as SAEngine
 from sqlmodel import Session, select
 
@@ -47,3 +52,20 @@ def test_minting_again_rotates_rather_than_duplicating(session: Session) -> None
     engines = session.exec(select(Engine)).all()
     assert len(engines) == 1
     assert engines[0].token_hash == hash_token(second)
+
+
+def test_cli_minting_lands_in_the_audit_trail_like_the_route_does(session: Session) -> None:
+    """Minting an engine credential is the same consequential action whichever
+    door it comes through; the CLI path must not be the one that leaves no row.
+    The token itself is never recorded (audit.py contract)."""
+    engine_id, token = cli.mint_engine_token("engine-1", None)
+    cli.mint_engine_token("engine-1", None)
+
+    events = session.exec(select(AuditEvent).order_by(AuditEvent.created_at)).all()  # type: ignore[arg-type]
+    assert [event.action for event in events] == [
+        AUDIT_ENGINE_REGISTERED,
+        AUDIT_ENGINE_TOKEN_ROTATED,
+    ]
+    assert all(event.target_id == engine_id for event in events)
+    assert all(event.actor_id is None for event in events)
+    assert token not in str([event.detail for event in events])

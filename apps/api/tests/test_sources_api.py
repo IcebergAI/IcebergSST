@@ -166,6 +166,57 @@ def test_a_malformed_connection_is_refused_at_save_time(
     assert response.status_code == 422
 
 
+def test_every_connection_key_the_connector_reads_is_storable(
+    client: TestClient,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """The documented Cloud configuration — bare token, ``email`` in the blob —
+    plus every scope toggle the connector honours. ``extra="forbid"`` means a key
+    missing from the schema is one no admin can store, which for ``email`` made
+    Cloud auth unconfigurable (docs/connectors.md § Auth)."""
+    headers = login_as(make_user(UserRole.ADMIN))
+
+    body = _create(
+        client,
+        headers,
+        connection={
+            "base_url": "https://example.atlassian.net/wiki",
+            "email": "admin@example.test",
+            "api_prefix": "/wiki/api/v2",
+            "spaces": ["ENG"],
+            "include_comments": False,
+            "include_attachments": False,
+            "include_personal_spaces": True,
+        },
+    )
+
+    connection = body["connection"]
+    assert isinstance(connection, dict)
+    assert connection["email"] == "admin@example.test"
+    assert connection["api_prefix"] == "/wiki/api/v2"
+    assert connection["include_comments"] is False
+    assert connection["include_personal_spaces"] is True
+
+
+def test_an_api_prefix_missing_its_leading_slash_is_refused(
+    client: TestClient,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """The client builds URLs as base_url + api_prefix + path; a relative prefix
+    would fail hours later inside a scan task instead of at save time."""
+    headers = login_as(make_user(UserRole.ADMIN))
+
+    response = client.post(
+        SOURCES,
+        json=_payload(connection={"base_url": "https://example.test", "api_prefix": "wiki/api/v2"}),
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+
+
 def test_a_trailing_slash_in_the_base_url_is_normalised(
     client: TestClient,
     make_user: Callable[..., User],

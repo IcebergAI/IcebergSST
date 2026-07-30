@@ -54,5 +54,7 @@ EXPOSE 9191
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=5 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9191/metrics').read()"]
 
-# Replaced by `dramatiq iceberg_engine.worker` when the consumer lands (#50).
+# Deliberately not the `dramatiq` CLI: the worker starts its own consumer so that
+# importing the module stays side-effect free (see iceberg_engine.worker.main),
+# and so SIGTERM is a clean shutdown that finishes leased work first.
 CMD ["python", "-m", "iceberg_engine.worker"]
