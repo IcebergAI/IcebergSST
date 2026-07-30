@@ -1,20 +1,27 @@
-"""Engine worker bootstrap.
+"""Engine worker: the process, and the actor that runs a scan task (#50).
 
-Actors arrive with M2 (#50). This module establishes what every actor will
-inherit: JSON logs carrying a per-message ``task_id`` correlation id, a
-standalone Prometheus metrics server (engines have no web framework to piggyback
-on), and the broker connection.
+Establishes what every message inherits — JSON logs carrying a ``task_id``
+correlation id, a standalone Prometheus server (engines have no web framework to
+piggyback on), the broker connection — and registers the actor the API's
+dispatcher addresses.
 
-Until the Dramatiq consumer lands, the process bootstraps and then waits for a
-signal rather than exiting — an engine container that exited immediately would
-restart-loop, and `make up` would never report a healthy stack. The
-``dramatiq iceberg_engine.worker`` consumer replaces the wait in #50.
+**A broker message carries a task id and nothing else** (ADR 0009). The actor
+leases the task to get anything else: the spec, the credential, the pepper, the
+suppressions. That is what keeps a compromised broker to re-delivery noise rather
+than a data leak, and it is why this module does so little — everything that
+matters is behind the lease, in :mod:`iceberg_engine.runner`.
+
+Broker-level retries are off (`SCAN_TASK_OPTIONS`). Lease expiry and API-side
+reclaim are the single re-delivery authority; a second, uncoordinated one would
+put two engines on one task (ADR 0009 §2).
 
 Engines talk to Redis and the API only — never the database (ADR 0002).
 """
 
 import signal
 import threading
+import uuid
+from functools import lru_cache
 from http.server import HTTPServer
 
 import dramatiq
@@ -25,9 +32,43 @@ from dramatiq.brokers.stub import StubBroker
 from iceberg_core import metrics as _metrics  # noqa: F401  # registers iceberg_* series
 from iceberg_core.config import EngineSettings, get_engine_settings
 from iceberg_core.logging import configure_logging
+from iceberg_core.tasks import SCAN_TASK_ACTOR, SCAN_TASK_OPTIONS, SCAN_TASK_QUEUE
+from iceberg_detect import RulePack, load_named_pack
 from prometheus_client import start_http_server
 
+from iceberg_engine.api_client import EngineClient
+from iceberg_engine.runner import run_task
+
 logger = structlog.get_logger()
+
+
+@lru_cache(maxsize=1)
+def rulepack() -> RulePack:
+    """The pack shipped in this image, loaded once per process.
+
+    Loading is strict and slow-ish (every regex compiled and checked), so it
+    happens at first use and is then reused — and a bad pack fails the first
+    message loudly rather than every message quietly.
+    """
+    return load_named_pack()
+
+
+def build_client(settings: EngineSettings) -> EngineClient:
+    """The API client this engine reports through.
+
+    The token is the only credential the process holds. It arrives as
+    configuration because an engine cannot mint its own — enrolment is an operator
+    action (docs/security.md § Bootstrap).
+    """
+    if settings.engine_token is None:
+        raise RuntimeError(
+            "no engine token configured; mint one with "
+            "`python -m iceberg_api mint-engine-token` and set ICEBERG_ENGINE_TOKEN"
+        )
+    return EngineClient(
+        base_url=settings.api_base_url,
+        token=settings.engine_token.get_secret_value(),
+    )
 
 
 class CorrelationMiddleware(dramatiq.Middleware):
@@ -85,14 +126,39 @@ def bootstrap(settings: EngineSettings | None = None) -> tuple[HTTPServer, drama
     return server, broker
 
 
+@dramatiq.actor(actor_name=SCAN_TASK_ACTOR, queue_name=SCAN_TASK_QUEUE, **SCAN_TASK_OPTIONS)
+def run_scan_task(task_id: str) -> None:
+    """Consume one dispatched task id.
+
+    Thin on purpose: the message is a hint that work exists, and everything real
+    happens after the lease. Exceptions are not swallowed here — `run_task`
+    reports a failure to the API itself, so anything reaching this frame is a bug
+    worth a stack trace in the logs.
+    """
+    run_task(uuid.UUID(task_id), client=build_client(get_engine_settings()), pack=rulepack())
+
+
 def main(settings: EngineSettings | None = None) -> None:
     """Process entrypoint: bootstrap, then wait for SIGTERM/SIGINT.
 
     Docker stops containers with SIGTERM, so handling it is what makes
     ``docker compose down`` a clean shutdown rather than a ten-second wait
     followed by SIGKILL.
+
+    The consumer is started here rather than by the `dramatiq` CLI so that
+    importing this module stays free of side effects. The CLI configures a broker
+    at import time, which would make the no-DB import probe — and every test that
+    imports the worker — try to reach Redis.
     """
-    server, _broker = bootstrap(settings)
+    resolved = settings or get_engine_settings()
+    server, broker = bootstrap(resolved)
+
+    consumer = dramatiq.Worker(
+        broker, queues={SCAN_TASK_QUEUE}, worker_threads=resolved.worker_threads
+    )
+    consumer.start()
+    logger.info("engine_consuming", queue=SCAN_TASK_QUEUE, threads=resolved.worker_threads)
+
     shutdown = threading.Event()
 
     def request_shutdown(signum: int, _frame: object) -> None:
@@ -103,6 +169,10 @@ def main(settings: EngineSettings | None = None) -> None:
         signal.signal(received, request_shutdown)
 
     shutdown.wait()
+    # Stop consuming before the metrics server goes: a message picked up during
+    # shutdown still holds a lease, and finishing it is cheaper for the scan than
+    # waiting out an expiry.
+    consumer.stop()
     server.shutdown()
     logger.info("engine_stopped")
 

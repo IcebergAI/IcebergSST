@@ -118,6 +118,11 @@ class EngineSettings(CoreSettings):
     engine_token: SecretStr | None = None
     metrics_port: int = Field(default=DEFAULT_METRICS_PORT, ge=1, le=65535)
 
+    #: Concurrent scan tasks per engine process. Each holds a lease and an HTTP
+    #: connection to the API, so this is the knob that trades scan throughput
+    #: against load on the control plane; scale replicas as well (`make scale`).
+    worker_threads: int = Field(default=4, ge=1, le=64)
+
 
 @lru_cache(maxsize=1)
 def get_api_settings() -> ApiSettings:

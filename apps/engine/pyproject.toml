@@ -12,6 +12,9 @@ dependencies = [
     # transitively through iceberg-core.
     "prometheus-client>=0.25.0",
     "structlog>=26.1.0",
+    # The only channel to the control plane (#51). Same client the API's source
+    # probe uses, so transports are injectable in tests the same way.
+    "httpx2>=2.7.0",
 ]
 
 [build-system]

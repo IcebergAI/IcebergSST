@@ -536,6 +536,7 @@ version = "0.1.0"
 source = { editable = "apps/engine" }
 dependencies = [
     { name = "dramatiq", extra = ["redis"] },
+    { name = "httpx2" },
     { name = "iceberg-connectors" },
     { name = "iceberg-core" },
     { name = "iceberg-detect" },
@@ -546,6 +547,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "dramatiq", extras = ["redis"], specifier = ">=2.2.0" },
+    { name = "httpx2", specifier = ">=2.7.0" },
     { name = "iceberg-connectors", editable = "packages/connectors" },
     { name = "iceberg-core", editable = "packages/core" },
     { name = "iceberg-detect", editable = "packages/detect" },
