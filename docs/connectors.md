@@ -60,20 +60,98 @@ fingerprint pepper) from the task **lease response** — never from env or the D
 
 ## Confluence connector (MVP)
 
-**Target flavor: Confluence Cloud first** (REST v2, API tokens, cursor pagination). The
-connector interface stays flavor-agnostic so a Server/Data Center variant (PATs, older REST)
-can be added later without redesign.
+**Target flavor: Confluence Cloud first** (REST v2, API tokens, cursor pagination). Lives in
+`packages/connectors/src/iceberg_connectors/confluence/`, split three ways because the three parts
+fail differently: `client.py` (cursors, credentials, throttling), `storage.py` (markup → text),
+`connector.py` (spaces, pages, comments, attachments, locators).
 
-- **Auth:** API token, delivered via the task lease (backed by the secret store). Credential
-  never logged.
-- **Discovery:** enumerate spaces (respecting the source's scope filter), page through content.
-- **Content:**
-  - page **bodies** (storage format → text)
-  - page **comments**
-  - **text-extractable attachments** — `txt`, source/config files, and PDF/office documents
-    converted to text. **No image OCR** in MVP.
-- **Pagination:** honor Confluence REST cursors; batch pages into scan tasks for parallel engines.
-- **Rate limiting:** respect server limits; backoff on 429.
+**Auth is the one flavor-shaped seam.** Cloud authenticates an API token as HTTP Basic with the
+account's email as the username — the token alone is not a bearer credential. Server/DC issues PATs
+that are. Both arrive as one opaque string from the task lease; the `email` field in the source's
+connection blob picks between them. That keeps Cloud specifics out of the `Connector` protocol,
+which only knows "a credential".
+
+The credential is never logged. `Credential.__repr__` is overridden rather than trusted, because
+structlog and tracebacks both render values with `repr` and a token printed once into a log
+aggregator has to be rotated.
+
+**One space per fetch task, not one page.** Discovery yields a `TaskSpec` per space; pages are
+enumerated lazily inside the fetch. Discovering every page of every space up front would turn the
+fastest part of a scan into a serial prologue and produce a task table with a row per page.
+
+**Cursors are opaque and followed verbatim.** v2 returns `_links.next`; rebuilding it from an offset
+would skip or repeat results whenever content changes mid-scan — on a large space, missing secrets
+with no sign it happened.
+
+**429 is a normal answer.** A scan is exactly the workload that trips a rate limit. `Retry-After` is
+honoured when the server sends a delta-seconds value (an HTTP date is not: it means trusting the
+server's clock against ours, and skew gives either a busy loop or a stall). Waiting is bounded by
+`RateLimitPolicy.max_wait_seconds` — past it the task fails and says to reduce engine concurrency,
+because an engine cannot sit on a lease indefinitely.
+
+### Content
+
+| Origin | Source | Locator `sub_resource` |
+|---|---|---|
+| `body` | page storage format → text | *(none)* |
+| `comment` | footer **and** inline comments | `comment:<id>` |
+| `attachment` | text-extractable files via `extract_text` | `attachment:<filename>` |
+
+Comments are separate units rather than appended to the body: they are separate things to fix, and
+merging them would let one person's comment change the body's fingerprint. The attachment locator is
+keyed on the **filename, not the attachment id** — replacing a file with a corrected version gives it
+a new id, and keying on that would orphan the finding instead of updating it.
+
+**Everything on a page shares the page's `path`/`url`.** Comments and attachments have no `webui`
+link of their own; giving them a synthetic one would mean a `path_glob` an analyst wrote against a
+page silently missed the comments and attachments on it — suppressing one finding out of three and
+looking correct.
+
+Personal spaces are excluded unless `include_personal_spaces` is set: they are every user's drafts,
+they dominate the space count on a large site, and scanning them should be a deliberate decision.
+
+Attachment size is checked twice — against the declared `fileSize` so an oversized file costs no
+bandwidth, and against the bytes actually arriving, because that declaration comes from the same
+place the file does. Both produce a *skip*, not a failure.
+
+### Storage format → text
+
+Storage format is XHTML plus Confluence's macro namespace, and is not what a user sees. Both
+directions of the difference matter:
+
+- **Markup must go.** `<p>password</p><code>hunter2</code>` puts thirty characters of tags between
+  two things that are adjacent on screen, and proximity is a large part of how confidence is scored
+  (ADR 0003). Table *cells* are deliberately not broken onto separate lines for the same reason — a
+  credentials table row has to stay one line.
+- **Macro bodies must stay.** A `code` block or `noformat` block is where a pasted credential lands,
+  arriving as CDATA inside `<ac:plain-text-body>`. Stripping macros wholesale would drop the most
+  productive hiding place in the product. Macro *parameters* (a language name) are dropped — nobody
+  typed those as prose.
+
+**No XML parser**, for the same reason `extract_office_text` uses none: the input is
+attacker-editable, an XML parser on untrusted input is an entity-expansion surface, and detection
+only wants the text between the tags.
+
+### Testing it offline (#71)
+
+`packages/connectors/tests/confluence_server.py` is a Confluence-shaped site served over
+`httpx2.MockTransport` — the same in-process-server pattern as `apps/api/tests/oidc_provider.py`.
+Chosen over recorded HTTP fixtures because:
+
+1. Recording needs a live Cloud site and a token to record *from*. Nobody has one in CI, so the
+   fixtures would be hand-written anyway — a mock server with worse ergonomics.
+2. **Cursors are stateful.** A cassette replays a fixed sequence; it cannot answer "the second page
+   of *this* cursor", so a pagination bug would replay green.
+3. **429 is behaviour, not a payload.** Asserting the client waits what the server asked needs a
+   server that decides to throttle.
+
+What it does not do is validate requests against Atlassian's OpenAPI schema, so a field renamed
+upstream passes here and fails in production. That risk is accepted — the alternative is no offline
+test at all.
+
+`tests/test_confluence_pipeline.py` runs the whole loop against it: lease → REST → storage→text →
+detect → fingerprint → redact → pre-filter → submission, asserting a seeded secret surfaces redacted
+and that fingerprints survive a re-scan of edited content.
 
 ## Post-MVP connectors
 - **Jira** — issues, comments, attachments (same interface, similar auth).

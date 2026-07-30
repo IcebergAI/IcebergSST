@@ -4,12 +4,14 @@ import socket
 import urllib.request
 
 import dramatiq
+import pytest
 import structlog
 from dramatiq.brokers.stub import StubBroker
 from dramatiq.worker import Worker
+from iceberg_connectors import registry
 from iceberg_core.config import EngineSettings
 from iceberg_core.logging import configure_logging
-from iceberg_engine.worker import bootstrap, build_broker
+from iceberg_engine.worker import bootstrap, build_broker, register_connectors
 
 
 def test_build_broker_defaults_to_stub() -> None:
@@ -67,6 +69,37 @@ def test_bootstrap_serves_metrics_and_connects_a_broker() -> None:
 
         assert "iceberg_scans_started_total" in body
         assert dramatiq.get_broker() is broker
+        # Without this the registry is empty and every task fails with "no
+        # connector for source type" — a whole fleet scanning nothing.
+        assert "confluence" in registry.registered_types()
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_the_shipped_connectors_are_registered() -> None:
+    """A lease names a source type and nothing else, so a type this image cannot
+    resolve fails the task. Registration is explicit rather than by import-time
+    scanning, which means it can be forgotten — hence a test (#45)."""
+    registry.clear()
+
+    types = register_connectors()
+
+    assert "confluence" in types
+    assert registry.get("confluence").connector_type == "confluence"
+
+
+def test_registering_twice_is_not_an_error() -> None:
+    """`bootstrap` may run more than once in a test process, and a duplicate
+    registration is not worth failing a boot over."""
+    register_connectors()
+    register_connectors()
+
+    assert "confluence" in registry.registered_types()
+
+
+@pytest.fixture(autouse=True)
+def _restore_registry() -> object:
+    """Leave the registry as it was: other suites register their own doubles."""
+    yield
+    registry.clear()

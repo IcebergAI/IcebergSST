@@ -29,6 +29,7 @@ import structlog
 from dramatiq.broker import MessageProxy
 from dramatiq.brokers.redis import RedisBroker
 from dramatiq.brokers.stub import StubBroker
+from iceberg_connectors import ConfluenceConnector, registry
 from iceberg_core import metrics as _metrics  # noqa: F401  # registers iceberg_* series
 from iceberg_core.config import EngineSettings, get_engine_settings
 from iceberg_core.logging import configure_logging
@@ -80,6 +81,22 @@ def build_client(settings: EngineSettings) -> EngineClient:
     )
 
 
+def register_connectors() -> tuple[str, ...]:
+    """Make this image's connectors available for lookup, and say which they are.
+
+    Explicit rather than import-time scanning: the set of source types an engine can
+    scan decides whether a task runs or fails, and "whichever modules happened to be
+    imported" is a hard thing to reason about when that is the question (#45).
+
+    Idempotent, because `bootstrap` may run more than once in a test process and a
+    second registration of the same type is not an error worth failing a boot over.
+    """
+    registry.register(ConfluenceConnector(), replace=True)
+    types = registry.registered_types()
+    logger.info("connectors_registered", source_types=list(types))
+    return types
+
+
 class CorrelationMiddleware(dramatiq.Middleware):
     """Bind the broker message id as ``task_id`` for the duration of a message."""
 
@@ -127,10 +144,12 @@ def bootstrap(settings: EngineSettings | None = None) -> tuple[HTTPServer, drama
     configure_logging(role="engine")
     server, _thread = start_http_server(resolved.metrics_port)
     broker = build_broker(resolved.redis_url)
+    source_types = register_connectors()
     logger.info(
         "engine_bootstrap_complete",
         metrics_port=server.server_port,
         broker=type(broker).__name__,
+        source_types=list(source_types),
     )
     return server, broker
 
