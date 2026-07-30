@@ -442,6 +442,28 @@ def test_an_off_site_download_link_is_refused_before_the_first_request() -> None
     assert seen == []
 
 
+def test_a_json_body_over_the_cap_is_refused_rather_than_buffered() -> None:
+    """A page fetch's body is as attacker-influenced as an attachment's; an oversize
+    one must be cut off, not read whole into memory."""
+
+    def huge(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, content=b'{"results": [' + b'"x",' * 100000 + b'"x"]}')
+
+    client, _ = _client(_site(), transport=httpx2.MockTransport(huge), max_json_bytes=1024)
+
+    with pytest.raises(ConnectorError, match="exceeded"):
+        client.get_json("/spaces")
+
+
+def test_a_json_body_within_the_cap_is_returned() -> None:
+    def small(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={"results": [{"id": "p0"}], "_links": {}})
+
+    client, _ = _client(_site(), transport=httpx2.MockTransport(small))
+
+    assert client.get_json("/spaces")["results"] == [{"id": "p0"}]
+
+
 def test_a_run_of_throttles_waits_out_the_budget_not_the_retry_count() -> None:
     """A throttle is bounded by how long the scan will wait, not by the retry
     budget: more consecutive 429s than `attempts` still waits rather than failing
