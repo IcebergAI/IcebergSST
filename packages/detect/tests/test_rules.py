@@ -93,6 +93,10 @@ def test_every_shipped_pack_loads() -> None:
         ("flags: [verbose]", "unknown flag"),
         ("entropy_min: high", "must be a number"),
         ("entropy_min: -1", "must not be negative"),
+        ("entropy_min: .nan", "must be a finite number"),
+        ("entropy_min: .inf", "must be a finite number"),
+        ("regex: [abc]", "regex must be a non-empty string"),
+        ("regex: 42", "regex must be a non-empty string"),
         ("keyword_window: 0", "must be positive"),
         ("base_confidence: 1.5", "must be between 0 and 1"),
         ("keywords: [aws, aws]", "must not repeat"),
@@ -119,6 +123,11 @@ def test_a_bad_rule_field_fails_at_load_naming_the_rule(body: str, message: str)
             "unknown key",
         ),
         ('version: "1"\nrules: \'[unbalanced', "not valid YAML"),
+        (
+            'version: "1"\nrules:\n  - id: a\n    description: d\n    severity: low\n'
+            "    regex: 'a'\n    regex: 'b'\n",
+            "duplicate key",
+        ),
     ],
 )
 def test_a_malformed_pack_fails_at_load(document: str, message: str) -> None:
@@ -193,6 +202,11 @@ def test_an_unknown_rule_id_is_a_key_error() -> None:
         r"(x*)+y",
         r"([A-Za-z0-9]+)+=",
         r"(?:[a-z]{2,})+",
+        # A variable-width bounded range is as exponential as an unbounded one when
+        # a group repeats it: the engine has many ways to divide the same input.
+        r"(?:[a-z]{2,64})+X",
+        r"(?:\w{1,8})+$",
+        r"([a-z]{3,5})*z",
     ],
 )
 def test_exponential_patterns_are_refused_at_load(pattern: str) -> None:
@@ -212,6 +226,9 @@ def test_exponential_patterns_are_refused_at_load(pattern: str) -> None:
         r"(a+)b+",  # two quantifiers, but neither repeats the other
         r"\(\w+\)+",  # escaped parens are literals, not a group
         r"[(]a+[)]+",  # a bracketed paren is a character, not a group
+        r"([]*]x)*y",  # a literal leading ] is a class member, not the close
+        r"(?:[a-z]{4})+X",  # a fixed count adds no ambiguity to divide
+        r"(?:[a-z]{3,3})+X",  # an equal-bound range is fixed too
     ],
 )
 def test_safe_patterns_are_accepted(pattern: str) -> None:

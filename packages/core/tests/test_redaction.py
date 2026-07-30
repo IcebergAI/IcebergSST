@@ -154,6 +154,52 @@ def test_snippet_scrubs_an_unmatched_repeat_of_the_secret() -> None:
     assert snippet.count("[16 chars redacted]") == 2
 
 
+def test_repeat_straddling_the_window_edge_does_not_leak_a_partial() -> None:
+    """A copy of the secret cut by the context edge must not store its in-window
+    half as plaintext — the window is pulled back past the copy instead."""
+    secret = "SECRETTOKENVALUE20AB"
+    text = "prod " + secret + " and again far away here: " + secret + " tail"
+    first = Span(text.index(secret), text.index(secret) + len(secret))
+
+    snippet = redact_snippet(text, first, policy=RedactionPolicy(context_chars=30))
+
+    assert secret not in snippet
+    # No prefix of the secret longer than one char survives (the default FULL
+    # strategy reveals nothing), even a clipped one.
+    assert not any(secret[:k] in snippet for k in range(2, len(secret) + 1))
+
+
+def test_repeat_straddling_the_left_edge_does_not_leak_a_suffix() -> None:
+    secret = "SECRETTOKENVALUE20AB"
+    text = "head " + secret + " middle text to separate them " + secret + " is the target"
+    target_start = text.rindex(secret)
+    target = Span(target_start, target_start + len(secret))
+
+    snippet = redact_snippet(text, target, policy=RedactionPolicy(context_chars=20))
+
+    assert secret not in snippet
+    assert not any(secret[len(secret) - k :] in snippet for k in range(2, len(secret) + 1))
+
+
+def test_a_match_found_elsewhere_in_the_unit_is_scrubbed_not_dropped() -> None:
+    """A stray copy of a match whose own span is far outside the window is scrubbed
+    from the context; the finding is redacted, not discarded by the assert."""
+    other = "NEIGHBOURSECRETVALUE"
+    target_secret = "AKIAsampleSAMPLEkey1"
+    # `other` matched way off to the right, and a copy of it also sits next to the
+    # target inside its window.
+    text = f"here {target_secret} near {other} then " + "z" * 200 + f" far {other}"
+    far = text.rindex(other)
+    snippet = redact_snippet(
+        text,
+        Span(text.index(target_secret), text.index(target_secret) + len(target_secret)),
+        other_spans=(Span(far, far + len(other)),),
+    )
+
+    assert other not in snippet
+    assert target_secret not in snippet
+
+
 def test_snippet_is_a_single_line() -> None:
     text = f"config:\n  password:\n\t{LONG_TOKEN}\n\nother: value"
     span = Span(text.index(LONG_TOKEN), text.index(LONG_TOKEN) + len(LONG_TOKEN))

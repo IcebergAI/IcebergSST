@@ -75,6 +75,59 @@ def test_every_match_in_a_unit_is_masked_in_every_snippet() -> None:
         assert "TKNZZZZZZZZZZZZZZZZ" not in found.redacted_snippet
 
 
+def test_a_gate_dropped_match_is_still_masked_in_a_neighbours_snippet() -> None:
+    """A candidate that lost its own rule's keyword gate is still secret material;
+    it must not survive unmasked in the context window of a reported finding
+    (ADR 0004)."""
+    pack = load_pack(
+        textwrap.dedent("""
+            version: "test.gate-leak"
+            rules:
+              - id: aws-key
+                description: AWS access key id
+                severity: high
+                regex: 'AKIA[0-9A-Z]{16}'
+                redaction: keep_prefix
+              - id: generic-entropy
+                description: Generic high-entropy, keyword-gated
+                severity: medium
+                regex: '[A-Za-z0-9+/]{24,}'
+                entropy_min: 4.2
+                keywords: [secret, token]
+                requires_keyword: true
+        """)
+    )
+    high_entropy = "8f3Kd0aQ2mVx7Lp9Zr4Ts6Yw1Bn5Cj0H"
+    text = f"noise {high_entropy} and also AKIAIOSFODNN7EXAMPLE here"
+
+    result = detect(text, pack)
+
+    assert [found.rule_id for found in result.secrets] == ["aws-key"]
+    assert result.dropped_no_keyword == 1
+    assert high_entropy not in result.secrets[0].redacted_snippet
+
+
+def test_a_match_past_the_report_cap_is_still_masked_in_a_neighbours_snippet() -> None:
+    """The max_matches cap bounds what is *reported*, never what is *masked*: a
+    secret found after the cap must not ride along as context in a reported one."""
+    text = "TKN0123456789ABCDEF and TKNFFFFFFFFFFFFFFFF"
+
+    result = detect(text, TOKEN_PACK, max_matches=1)
+
+    assert result.truncated
+    assert len(result.secrets) == 1
+    assert "TKN0123456789ABCDEF" not in result.secrets[0].redacted_snippet
+    assert "TKNFFFFFFFFFFFFFFFF" not in result.secrets[0].redacted_snippet
+
+
+def test_a_detected_secret_never_reprs_its_plaintext() -> None:
+    result = detect("here is TKN0123456789ABCDEF", TOKEN_PACK)
+
+    assert result.secrets
+    assert "TKN0123456789ABCDEF" not in repr(result.secrets[0])
+    assert "TKN0123456789ABCDEF" not in repr(result)
+
+
 def test_a_candidate_below_the_entropy_gate_is_dropped_and_counted() -> None:
     result = detect("secret aaaaaaaaaaaaaaaaaa here", GATED_PACK)
 

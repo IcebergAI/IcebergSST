@@ -53,6 +53,8 @@ POSITIVES: dict[str, str] = {
         "azure tenant login, client_secret = 8Q~aBcDeFgHiJkLmNoPqRsTuVwXyZ012345"
     ),
     "github-token": "github pat ghp_a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8",  # gitleaks:allow
+    "github-fine-grained-pat": "github token "
+    + _fake("github_pat_", "11ABCDE0000000000000000_", "a" * 59),
     "slack-token": "slack bot token " + _fake("xoxb-", "123456789012-", "abcdefghijklmnop"),
     "slack-webhook-url": (
         "notify slack via https://hooks.slack.com/services/T01234567/B01234567/"

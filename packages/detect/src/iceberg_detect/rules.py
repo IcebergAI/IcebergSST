@@ -23,6 +23,7 @@ The checks are deliberately more than schema validation:
   two rules sharing one would make findings unattributable.
 """
 
+import math
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -31,6 +32,36 @@ from pathlib import Path
 import yaml
 from iceberg_core.enums import Severity
 from iceberg_core.redaction import RedactionPolicy
+
+
+class _StrictLoader(yaml.SafeLoader):
+    """A safe loader that refuses duplicate mapping keys.
+
+    PyYAML keeps the last value for a repeated key, so a rule carrying two
+    ``regex:`` lines would load with the first silently discarded — the half-loaded
+    rule this module exists to reject (ADR 0008)."""
+
+
+def _construct_mapping_no_duplicates(
+    loader: _StrictLoader, node: yaml.MappingNode
+) -> dict[object, object]:
+    seen: set[object] = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        if key in seen:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"found duplicate key {key!r}",
+                key_node.start_mark,
+            )
+        seen.add(key)
+    return loader.construct_mapping(node, deep=True)
+
+
+_StrictLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping_no_duplicates
+)
 
 #: Where the packs that ship with this package live.
 RULEPACK_DIR = Path(__file__).parent / "rulepacks"
@@ -153,7 +184,7 @@ def load_pack(source: Path | str) -> RulePack:
         raw = source
 
     try:
-        document = yaml.safe_load(raw)
+        document = yaml.load(raw, Loader=_StrictLoader)  # noqa: S506  # _StrictLoader is a SafeLoader
     except yaml.YAMLError as exc:
         raise RulePackError(f"rule pack is not valid YAML: {exc}") from exc
 
@@ -198,16 +229,20 @@ def _build_rule(entry: object, index: int) -> Rule:
     _reject_unknown(entry.keys(), _RULE_KEYS, where)
 
     for required in ("description", "severity", "regex"):
-        if not str(entry.get(required, "")).strip():
-            raise RulePackError(f"{where}: missing {required}")
+        value = entry.get(required)
+        # A non-string scalar here is a mistake, not something to coerce: an
+        # unquoted `regex: [abc]` parses as a YAML list, and `str(...)` of it would
+        # compile a pattern nobody wrote instead of failing the load (ADR 0008).
+        if not isinstance(value, str) or not value.strip():
+            raise RulePackError(f"{where}: {required} must be a non-empty string")
 
     try:
-        severity = Severity(str(entry["severity"]))
+        severity = Severity(entry["severity"])
     except ValueError as exc:
         known = ", ".join(member.value for member in Severity)
         raise RulePackError(f"{where}: unknown severity; known: {known}") from exc
 
-    pattern = _compile(str(entry["regex"]), entry.get("flags", []), where)
+    pattern = _compile(entry["regex"], entry.get("flags", []), where)
     keywords = _keywords(entry.get("keywords", []), where)
     requires_keyword = bool(entry.get("requires_keyword", False))
     if requires_keyword and not keywords:
@@ -223,7 +258,7 @@ def _build_rule(entry: object, index: int) -> Rule:
 
     return Rule(
         id=rule_id,
-        description=str(entry["description"]).strip(),
+        description=entry["description"].strip(),
         severity=severity,
         pattern=pattern,
         entropy_min=_optional_float(entry.get("entropy_min"), where, "entropy_min"),
@@ -283,20 +318,35 @@ def assert_no_catastrophic_backtracking(pattern: str, where: str = "pattern") ->
 def _scan(pattern: str) -> list[tuple[int, str]]:
     """(index, character) for every structural character, skipping escapes and classes."""
     out: list[tuple[int, str]] = []
-    index, in_class = 0, False
-    while index < len(pattern):
+    index, length = 0, len(pattern)
+    while index < length:
         char = pattern[index]
         if char == "\\":
             index += 2
             continue
-        if in_class:
-            in_class = char != "]"
-        elif char == "[":
-            in_class = True
-        else:
-            out.append((index, char))
+        if char == "[":
+            index = _skip_character_class(pattern, index)
+            continue
+        out.append((index, char))
         index += 1
     return out
+
+
+def _skip_character_class(pattern: str, index: int) -> int:
+    """Return the index just past the ``[...]`` class beginning at ``index``.
+
+    A ``]`` immediately after ``[`` or ``[^`` is a literal member, not the close —
+    ``[]*]`` is a class of ``]`` and ``*``, a linear pattern that must not be
+    misread as ending at the first ``]`` and rejected as catastrophic."""
+    length = len(pattern)
+    index += 1  # past the opening '['
+    if index < length and pattern[index] == "^":
+        index += 1
+    if index < length and pattern[index] == "]":  # literal first member
+        index += 1
+    while index < length and pattern[index] != "]":
+        index += 2 if pattern[index] == "\\" else 1
+    return index + 1  # past the closing ']'
 
 
 def _group_spans(pattern: str) -> list[tuple[int, int]]:
@@ -312,16 +362,36 @@ def _group_spans(pattern: str) -> list[tuple[int, int]]:
 
 
 def _unbounded_quantifier_positions(pattern: str) -> list[int]:
-    """Indexes of ``*``, ``+`` and ``{n,}`` outside character classes."""
+    """Indexes of variable-length quantifiers (``*``, ``+``, ``{n,}``, ``{n,m}``
+    with ``m != n``) outside character classes.
+
+    A *fixed* repetition (``{n}`` or ``{n,n}``) adds no length ambiguity, so nesting
+    it under an outer repetition backtracks linearly. A *variable* one does not: the
+    engine has several ways to divide the same input, and ``(?:x{2,64})+`` blows up
+    exactly like ``(?:x{2,})+``. Both are refused."""
     positions: list[int] = []
     for index, char in _scan(pattern):
         if char in "*+":
             positions.append(index)
         elif char == "{":
             closing = pattern.find("}", index)
-            if closing != -1 and pattern[index + 1 : closing].endswith(","):
+            if closing != -1 and _is_variable_repetition(pattern[index + 1 : closing]):
                 positions.append(index)
     return positions
+
+
+def _is_variable_repetition(spec: str) -> bool:
+    """Whether a ``{...}`` body describes a variable count: ``n,`` (unbounded) or
+    ``n,m`` with ``m != n``. A bare ``n`` or ``n,n`` is fixed."""
+    if "," not in spec:
+        return False
+    low, _, high = spec.partition(",")
+    if high.strip() == "":
+        return True
+    try:
+        return int(low) != int(high)
+    except ValueError:
+        return False
 
 
 def _followed_by_unbounded(pattern: str, close_index: int) -> bool:
@@ -331,7 +401,7 @@ def _followed_by_unbounded(pattern: str, close_index: int) -> bool:
         return True
     if tail == "{":
         closing = pattern.find("}", close_index)
-        return closing != -1 and pattern[close_index + 2 : closing].endswith(",")
+        return closing != -1 and _is_variable_repetition(pattern[close_index + 2 : closing])
     return False
 
 
@@ -356,6 +426,10 @@ def _optional_float(value: object, where: str, name: str) -> float | None:
         parsed = float(value)
     except ValueError as exc:
         raise RulePackError(f"{where}: {name} must be a number") from exc
+    if not math.isfinite(parsed):
+        # `.nan` would disable the gate (every comparison is False) and `.inf`
+        # would make the rule dead; both are typos, not a tuning choice.
+        raise RulePackError(f"{where}: {name} must be a finite number")
     if parsed < 0:
         raise RulePackError(f"{where}: {name} must not be negative")
     return parsed
