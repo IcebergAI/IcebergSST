@@ -6,25 +6,51 @@ executed by `apps/engine`) — never in the API.
 
 ## Interface
 
-```
+```python
 class Connector(Protocol):
-    def discover(self, source_spec) -> Iterable[TaskSpec]:
+    connector_type: str          # matches SourceType; part of every fingerprint
+
+    def discover(self, connection, credential) -> Iterator[TaskSpec]:
         """Split a source into scan-task units (e.g. one per Confluence space)."""
 
-    def fetch(self, task_spec, credential) -> Iterable[ContentUnit]:
+    def fetch(self, connection, spec, credential, outcome) -> Iterator[ContentUnit]:
         """Yield content units for a task: page bodies, comments, extracted attachments."""
 ```
 
+Both are **generators** by contract: a source with fifty thousand pages must not exist in memory
+before detection sees the first one, and a task cancelled mid-fetch should stop rather than finish
+and discard. `outcome` (a `FetchOutcome`) is passed *in* rather than returned for the same reason —
+a caller that stops early still needs the tallies.
+
+`registry.get(source_type)` resolves a connector for a lease. An unregistered type raises
+`UnknownConnectorError` and fails the task: an engine that reported an empty source instead would
+be indistinguishable from one that found no secrets.
+
+**Errors split by operator response.** `CredentialError` means rotate the credential — retrying
+will not help. Other `ConnectorError`s fail the task. A single unreadable page is neither: it is
+counted in `FetchOutcome.failed` and the scan continues, because one bad page must not fail a scan
+of fifty thousand.
+
 ### ContentUnit
 Normalized input to detection:
-- `resource_locator` — stable identity (page id, URL, attachment name)
-- `text` — extracted UTF-8 text
+- `locator` — a `CoarseLocator`: connector type + resource id + optional sub-resource
+- `text` — extracted UTF-8 text (never bytes; extraction happens before this point)
 - `origin` — enum `body | comment | attachment`
-- `metadata` — free-form (author, mime type, etc.)
+- `display` — free-form context (URL, space, title, author, media type)
 
-`resource_locator` feeds directly into the finding fingerprint (ADR 0006), so it must be stable
-across scans and **coarse** — page id + attachment name, never line/offset (offsets are display
-metadata on the finding, not identity).
+**The split between `locator` and `display` is the thing to get right.** `locator` feeds the finding
+fingerprint (ADR 0006), so it must be **coarse and stable** — page id + attachment name, never
+line/offset, never a version parameter. `display` is everything else worth showing, stored on the
+finding and free to change between scans.
+
+Getting it wrong fails quietly rather than loudly: put a versioned URL in the coarse half and every
+re-scan produces "new" findings while the previous ones auto-resolve, silently discarding the
+analyst's triage history. `ContentUnit.resource_locator()` flattens both halves into the blob stored
+on the finding, with the coarse keys winning on collision so `display` cannot shadow identity.
+
+Populate at least one of `path`, `url`, `space`, or `title` in `display` — those are the keys a
+`path_glob` suppression is matched against, and a connector populating none of them leaves analysts
+unable to write one for that source.
 
 ## Two-phase execution (ADR 0009)
 `discover()` also runs **in an engine**, not the API: a scan begins with a single discovery

@@ -5,6 +5,7 @@ description = "Connector interface and source connectors (Confluence MVP; Jira/S
 requires-python = ">=3.13"
 dependencies = [
     "iceberg-core",
+    "structlog>=25.5.0",
 ]
 
 [build-system]

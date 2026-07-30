@@ -476,10 +476,14 @@ version = "0.1.0"
 source = { editable = "packages/connectors" }
 dependencies = [
     { name = "iceberg-core" },
+    { name = "structlog" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "iceberg-core", editable = "packages/core" }]
+requires-dist = [
+    { name = "iceberg-core", editable = "packages/core" },
+    { name = "structlog", specifier = ">=25.5.0" },
+]
 
 [[package]]
 name = "iceberg-core"
