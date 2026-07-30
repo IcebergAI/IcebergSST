@@ -1,5 +1,7 @@
 """The connector protocol, task specs, and the registry (#45)."""
 
+from collections.abc import Iterator
+
 import pytest
 from iceberg_connectors import (
     Connector,
@@ -31,7 +33,7 @@ def source_fixture() -> FakeConnector:
 
 
 @pytest.fixture(name="clean_registry", autouse=True)
-def clean_registry_fixture() -> object:
+def clean_registry_fixture() -> Iterator[None]:
     registry.clear()
     yield
     registry.clear()

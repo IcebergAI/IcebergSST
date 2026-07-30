@@ -80,11 +80,44 @@ can be added later without redesign.
 - **SMB/NFS file shares** — walk shares, stream files, apply the same text-extraction step.
 
 ## Text extraction
-A shared extraction step turns supported attachment/file formats into text before detection:
-plain/code/config as-is; PDF and office documents via a text extractor. Unsupported/binary
-formats are skipped and counted. OCR is explicitly out of scope for MVP.
 
-**Scanned content is untrusted input.** Attachments are attacker-editable and extraction
-parsers are an attack surface on the engine. Mandatory guards: per-file size caps,
-extraction timeouts, decompression-ratio limits (zip/office bombs), and failure isolation —
-one hostile file fails that unit, never the task or the worker. See `docs/security.md`.
+`extract_text(data, filename, limits=…, sandbox=…)` turns one file into text. It **never raises** —
+every result is an `ExtractionOutcome`, because a connector iterating attachments must be able to
+hand it anything and get an answer back:
+
+| Outcome | Meaning |
+|---|---|
+| `extracted` | Text, possibly `truncated` at the output cap |
+| `skipped_unsupported` | An image, a video, an archive — not an error, just not text |
+| `skipped_binary` | Claimed to be text (`.txt`) and is not |
+| `skipped_empty` | No text layer — a scanned PDF, since there is no OCR |
+| `rejected_too_large` | Over the input cap; not parsed at all |
+| `rejected_bomb` | An archive whose declared expansion is hostile |
+| `failed_timeout` | The parser did not finish; its child was killed |
+| `failed_parse` | The parser raised, or crashed its child |
+
+`is_hostile` separates the ones worth an operator's attention from an ordinary PNG.
+
+Formats: text/code/config by extension (an allowlist, so a new binary format nobody denylisted is
+not decoded as garbage), ZIP-backed office documents through their XML parts, and PDF through its
+text layer. **No OCR** — a scanned page is honestly empty rather than reported as clean-and-scanned.
+Archives are skipped rather than walked: recursing means recursing into archives inside archives,
+and the bomb defence would have to be right at every level rather than the top one.
+
+### The guards
+**Scanned content is untrusted input**, and extraction parsers are the engine's largest attack
+surface (`docs/security.md`, boundary 4). Four guards, each for a failure the others miss:
+
+- **Size caps**, before any parsing — the cheapest check, and it eliminates "large file exhausts
+  memory" whole.
+- **Decompression-ratio limits.** Office documents are ZIP archives and a few kilobytes of zeros
+  expands to gigabytes. The compressed size is exactly the number that tells you nothing, so the
+  archive's *declared* sizes are checked first — and the read is bounded anyway, because that
+  declaration is attacker-controlled too.
+- **Timeouts and crash isolation**, in a child process (`ExtractionSandbox`). A parser looping on a
+  crafted cross-reference table cannot be caught with `try`, and cannot be bounded by a timer in the
+  same process: `signal.alarm` only fires on the main thread, and a C extension in a tight loop
+  never returns to the interpreter to notice it. A hang is a timeout and the child is killed; a
+  segfault takes the child only. The pool is reused across files and replaced only when a child is
+  actually lost.
+- **Per-unit failure isolation** — the sum of the above. One hostile file costs one content unit.

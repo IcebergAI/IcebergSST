@@ -6,6 +6,8 @@ requires-python = ">=3.13"
 dependencies = [
     "iceberg-core",
     "structlog>=25.5.0",
+    # PDF text layer. No OCR — a scanned page yields nothing, by design (#46).
+    "pypdf>=6.4.0",
 ]
 
 [build-system]
