@@ -154,9 +154,17 @@ def safe_return_path(candidate: str | None) -> str:
     ``?next=`` is attacker-controlled: anything that could send the browser to
     another origin after login is an open redirect, so only a single-slash
     absolute path survives. ``//evil.example`` is protocol-relative and is
-    rejected along with everything else.
+    rejected, as is a backslash variant such as ``/\\evil.example`` — a browser's
+    URL parser treats the backslash as a slash, so it is protocol-relative too —
+    and anything carrying a control character.
     """
-    if not candidate or not candidate.startswith("/") or candidate.startswith("//"):
+    if (
+        not candidate
+        or not candidate.startswith("/")
+        or candidate.startswith(("//", "/\\"))
+        or "\\" in candidate
+        or any(char < " " or char == "\x7f" for char in candidate)
+    ):
         return "/"
     return candidate
 

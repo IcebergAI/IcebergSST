@@ -130,6 +130,13 @@ def test_a_short_session_secret_is_refused_rather_than_warned_about(
         ("https://evil.example", "/"),
         ("javascript:alert(1)", "/"),
         ("../../etc/passwd", "/"),
+        # A browser's URL parser folds a backslash to a slash, so these are
+        # protocol-relative too and must not survive.
+        ("/\\evil.example", "/"),
+        ("/\\/evil.example", "/"),
+        ("/path\\to\\evil", "/"),
+        # A control character has no place in a redirect target.
+        ("/findings\nSet-Cookie: x=1", "/"),
     ],
 )
 def test_return_paths_cannot_leave_this_origin(candidate: str | None, expected: str) -> None:

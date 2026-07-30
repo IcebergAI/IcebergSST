@@ -30,7 +30,7 @@ def provision_user(db: Session, claims: IdentityClaims, settings: ApiSettings) -
     if user is None:
         user = User(
             oidc_subject=claims.subject,
-            email=claims.email,
+            email=_trusted_email(claims),
             display_name=claims.display_name,
             role=_initial_role(claims, settings),
         )
@@ -46,13 +46,27 @@ def provision_user(db: Session, claims: IdentityClaims, settings: ApiSettings) -
         logger.info("disabled_user_login_rejected", user_id=str(user.id))
         raise AccountDisabled(claims.subject)
     else:
-        # The provider is authoritative for the profile, not for the role.
-        user.email = claims.email or user.email
+        # The provider is authoritative for the profile, not for the role — and
+        # only for an email it has verified: an unverified address is settable by
+        # the user at many IdPs, and a stored `ciso@company` shown in the admin list
+        # is a social-engineering primer. A verified claim refreshes it; an
+        # unverified one leaves whatever was last trusted.
+        user.email = _trusted_email(claims) or user.email
         user.display_name = claims.display_name or user.display_name
 
     user.last_login_at = utc_now()
     db.flush()
     return user
+
+
+def _trusted_email(claims: IdentityClaims) -> str:
+    """The email only if the provider vouches for it, else empty.
+
+    OIDC is explicit that ``email`` alone is untrustworthy; storing an unverified
+    one as identity is what the bootstrap-admin check already guards against, and
+    the profile must not be a way around it.
+    """
+    return claims.email if (claims.email and claims.email_verified) else ""
 
 
 def _initial_role(claims: IdentityClaims, settings: ApiSettings) -> UserRole:

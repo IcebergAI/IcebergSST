@@ -3,6 +3,7 @@
 from collections.abc import Callable
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from iceberg_api.users.routes import audit_events_for
 from iceberg_core.enums import UserRole
@@ -156,6 +157,30 @@ def test_nobody_can_change_their_own_role(
     session.refresh(admin)
     assert admin.role is UserRole.ADMIN
     assert session.exec(select(AuditEvent)).all() == []
+
+
+@pytest.mark.parametrize("field", ["disabled", "role"])
+def test_removing_the_last_enabled_admin_is_refused(
+    make_user: Callable[..., User],
+    session: Session,
+    field: str,
+) -> None:
+    """The self-check alone cannot stop two admins disabling each other at once and
+    orphaning the instance. The guard refuses to strip admin from a user when no
+    other enabled admin remains — the state a lost race would land in."""
+    from iceberg_api.schemas import UserUpdate
+    from iceberg_api.users.routes import _guard_last_admin
+
+    change = UserUpdate(disabled=True) if field == "disabled" else UserUpdate(role=UserRole.VIEWER)
+    sole_admin = make_user(UserRole.ADMIN)
+
+    with pytest.raises(HTTPException) as raised:
+        _guard_last_admin(session, sole_admin, change)
+    assert raised.value.status_code == 409
+
+    # With another enabled admin present, the same change is allowed.
+    make_user(UserRole.ADMIN)
+    _guard_last_admin(session, sole_admin, change)
 
 
 def test_an_analyst_cannot_promote_themselves(

@@ -157,7 +157,10 @@ async def callback(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "login failed") from exc
 
     # Constant-time compare: this is the check that makes a forced login fail.
-    if not secrets.compare_digest(login_state.state, state):
+    # Compared as bytes — the presented `state` is caller-controlled and a non-ASCII
+    # value would make compare_digest raise TypeError (a 500) instead of failing the
+    # check closed.
+    if not secrets.compare_digest(login_state.state.encode(), state.encode()):
         logger.warning("oidc_state_mismatch")
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "login failed")
 

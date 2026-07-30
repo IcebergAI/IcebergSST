@@ -16,6 +16,7 @@ import uuid
 
 import structlog
 from fastapi import APIRouter, HTTPException, Query, status
+from iceberg_core.enums import UserRole
 from iceberg_core.models import (
     AUDIT_TARGET_USER,
     AUDIT_USER_DISABLED,
@@ -24,7 +25,7 @@ from iceberg_core.models import (
     AuditEvent,
     User,
 )
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from iceberg_api import audit
 from iceberg_api.auth.dependencies import CsrfProtected, SessionDep
@@ -96,6 +97,8 @@ async def update_user(
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "user not found")
 
+    _guard_last_admin(db, user, changes)
+
     if changes.role is not None and changes.role is not user.role:
         audit.record(
             db,
@@ -124,6 +127,31 @@ async def update_user(
     db.commit()
     db.refresh(user)
     return UserRead.model_validate(user)
+
+
+def _guard_last_admin(db: Session, user: User, changes: UserUpdate) -> None:
+    """Refuse a change that would leave the instance with no enabled admin.
+
+    Blocking self-modification is not enough on its own: two admins can disable or
+    demote *each other* at the same time, each passing the self-check, and end with
+    zero admins and no in-app way back (the seed only applies at user creation). The
+    whole admin set is locked FOR UPDATE so the two requests serialise on a common
+    row — the second then sees the first's commit and is refused.
+    """
+    demoting = changes.role is not None and changes.role is not UserRole.ADMIN
+    disabling = changes.disabled is True
+    if user.role is not UserRole.ADMIN or not (demoting or disabling):
+        return
+
+    admins = db.exec(select(User).where(col(User.role) == UserRole.ADMIN).with_for_update()).all()
+    others_enabled = [
+        other for other in admins if other.id != user.id and not other.disabled
+    ]
+    if not others_enabled:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "this is the last enabled administrator; promote another before removing this one",
+        )
 
 
 def audit_events_for(db: Session, target_id: uuid.UUID) -> list[AuditEvent]:

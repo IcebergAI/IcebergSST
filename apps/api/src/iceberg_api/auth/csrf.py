@@ -47,6 +47,12 @@ async def presented_token(request: Request) -> str | None:
 
 
 def verify(expected: str, presented: str | None) -> None:
-    """Compare tokens in constant time, or raise :class:`CsrfError`."""
-    if not presented or not hmac.compare_digest(expected, presented):
+    """Compare tokens in constant time, or raise :class:`CsrfError`.
+
+    Compared as UTF-8 bytes: ``hmac.compare_digest`` raises ``TypeError`` on a
+    non-ASCII ``str`` (Starlette decodes a header's raw bytes as latin-1, so any
+    byte ≥ 0x80 produces one), which would turn a hostile header into a 500 inside
+    the very check meant to reject it. Bytes fail closed as a mismatch instead.
+    """
+    if not presented or not hmac.compare_digest(expected.encode(), presented.encode()):
         raise CsrfError("missing or invalid CSRF token")

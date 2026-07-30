@@ -18,7 +18,7 @@ from iceberg_core.enums import (
     SuppressionScope,
     UserRole,
 )
-from iceberg_core.models import Engine, Scan, ScanTask, Source, Suppression, User
+from iceberg_core.models import AuditEvent, Engine, Scan, ScanTask, Source, Suppression, User
 from iceberg_core.secrets import EnvKeyBackend, SecretStoreError
 from sqlmodel import Session, select
 
@@ -85,6 +85,32 @@ def test_registering_an_existing_name_rotates_its_token(
     assert len(session.exec(select(Engine)).all()) == 1
     # The old token is dead the moment the new one is issued.
     assert session.exec(select(Engine)).one().token_hash == hash_token(second)
+
+
+def test_enrolment_and_rotation_are_written_to_the_durable_audit_trail(
+    client: TestClient,
+    session: Session,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """Minting an engine credential — which later receives decrypted source
+    credentials and the pepper — is the most consequential admin action, so it must
+    be in audit_event, not only a log line. The token is never recorded."""
+    admin = make_user(UserRole.ADMIN)
+    headers = login_as(admin)
+
+    first = client.post(REGISTER, json={"name": "engine-1"}, headers=headers).json()
+    second = client.post(REGISTER, json={"name": "engine-1"}, headers=headers).json()
+
+    events = session.exec(
+        select(AuditEvent).where(AuditEvent.target_type == "engine").order_by(AuditEvent.created_at)  # type: ignore[arg-type]
+    ).all()
+    assert [event.action for event in events] == ["engine.registered", "engine.token_rotated"]
+    assert all(event.actor_id == admin.id for event in events)
+    assert all(str(event.target_id) == first["engine_id"] for event in events)
+    # The plaintext token is nowhere in the trail.
+    for token in (first["token"], second["token"]):
+        assert all(token not in (event.detail or {}).values() for event in events)
 
 
 @pytest.mark.parametrize("role", [UserRole.ANALYST, UserRole.VIEWER])
