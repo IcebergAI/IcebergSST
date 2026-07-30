@@ -1,10 +1,12 @@
-"""The in-process maintenance loop (#33, #35).
+"""The in-process maintenance loop (#33, #35, #40).
 
-Two jobs run on a timer in every API replica, and a Postgres advisory lock decides
-which replica actually does them:
+A handful of jobs run on a timer in every API replica, and a Postgres advisory lock
+decides which replica actually does them:
 
 * **the scheduler tick** — fire due schedules;
-* **lease reclaim** — return work from engines that stopped heartbeating.
+* **lease reclaim** — return work from engines that stopped heartbeating;
+* **the safety sweeps** — repair scans a crash left wedged;
+* **suppression lapse** — return findings whose suppression has expired.
 
 They live in the API rather than in a separate cron container because both need the
 database and neither needs a connector: an extra deployable would be one more thing
@@ -23,6 +25,7 @@ import structlog
 from iceberg_core.config import ApiSettings, get_api_settings
 from iceberg_core.db import session_scope
 
+from iceberg_api import suppressions
 from iceberg_api.dispatch import Dispatcher, build_dispatcher
 from iceberg_api.scans import service
 from iceberg_api.scheduler import postgres_advisory_lock, tick
@@ -32,7 +35,7 @@ logger = structlog.get_logger()
 
 
 def run_once(dispatcher: Dispatcher, *, now: datetime | None = None) -> None:
-    """One maintenance round: schedules, reclaim, then the two safety sweeps.
+    """One maintenance round: schedules, reclaim, then the safety sweeps.
 
     Leadership is held on a session of its own for the whole round. Holding it on
     the working session would not work: ``pg_try_advisory_xact_lock`` releases at
@@ -61,6 +64,11 @@ def run_once(dispatcher: Dispatcher, *, now: datetime | None = None) -> None:
             service.redispatch_stale_tasks(db, dispatcher=dispatcher, now=at)
         with session_scope() as db:
             service.finalize_stalled_scans(db, now=at)
+        # Expiry is a property of the clock, not of the scan schedule: without this
+        # a lapsed suppression would keep hiding findings until the next scan of
+        # that source, which for a weekly cadence is six days of silence (ADR 0008).
+        with session_scope() as db:
+            suppressions.release_lapsed(db, now=at)
 
 
 def _already_leader(db: object) -> bool:

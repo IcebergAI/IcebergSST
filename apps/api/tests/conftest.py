@@ -22,9 +22,9 @@ from iceberg_api.auth.session import SESSION_COOKIE, issue_session
 from iceberg_api.dispatch import get_dispatcher
 from iceberg_api.engines.auth import mint_token
 from iceberg_core.config import ApiSettings
-from iceberg_core.enums import UserRole
+from iceberg_core.enums import ScanStatus, ScanTrigger, Severity, SourceType, UserRole
 from iceberg_core.models import Engine as CoreEngine
-from iceberg_core.models import User
+from iceberg_core.models import Finding, Scan, Source, User
 from iceberg_core.secrets import EnvKeyBackend
 from oidc_provider import BOOTSTRAP_SUBJECT, CLIENT_ID, ISSUER, FakeProvider
 from pydantic import SecretStr
@@ -154,6 +154,69 @@ def make_user_fixture(session: Session) -> Callable[..., User]:
         session.add(user)
         session.commit()
         return user
+
+    return factory
+
+
+@pytest.fixture(name="make_source")
+def make_source_fixture(session: Session) -> Callable[..., Source]:
+    """A persisted Confluence source."""
+
+    def factory(name: str | None = None) -> Source:
+        source = Source(
+            name=name or f"confluence-{uuid.uuid4().hex[:6]}",
+            type=SourceType.CONFLUENCE,
+            connection={"base_url": "https://example.atlassian.net/wiki"},
+        )
+        session.add(source)
+        session.commit()
+        return source
+
+    return factory
+
+
+@pytest.fixture(name="make_finding")
+def make_finding_fixture(
+    session: Session, make_source: Callable[..., Source]
+) -> Callable[..., Finding]:
+    """A persisted finding, with the source and scan every finding needs behind it.
+
+    One scan per source is reused: ``first_seen_scan_id`` is ``ON DELETE RESTRICT``
+    and a fresh scan per finding would only add rows nothing asserts on.
+    """
+    scans: dict[uuid.UUID, Scan] = {}
+
+    def factory(source: Source | None = None, **fields: object) -> Finding:
+        target = source or make_source()
+        scan = scans.get(target.id)
+        if scan is None:
+            scan = Scan(
+                source_id=target.id,
+                trigger=ScanTrigger.MANUAL,
+                status=ScanStatus.COMPLETED,
+            )
+            session.add(scan)
+            session.commit()
+            scans[target.id] = scan
+
+        defaults: dict[str, object] = {
+            "fingerprint": uuid.uuid4().hex,
+            "rule_id": "aws-access-key",
+            "rulepack_version": "2026.07.1",
+            "resource_locator": {"path": "/space/DOCS/page-1"},
+            "redacted_snippet": "AKIA****************",
+            "secret_hash": uuid.uuid4().hex,
+            "severity": Severity.HIGH,
+        }
+        finding = Finding(
+            source_id=target.id,
+            first_seen_scan_id=scan.id,
+            last_seen_scan_id=scan.id,
+            **(defaults | fields),
+        )
+        session.add(finding)
+        session.commit()
+        return finding
 
     return factory
 

@@ -1,6 +1,6 @@
 """The in-process maintenance round (#33 → #34, #35)."""
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -8,8 +8,22 @@ from conftest import RecordingDispatcher
 from iceberg_api import maintenance
 from iceberg_api.scans import service
 from iceberg_core.db import set_db_engine
-from iceberg_core.enums import ScanStatus, ScanTaskStatus, ScanTrigger, SourceType
-from iceberg_core.models import Engine, Scan, ScanTask, Schedule, Source
+from iceberg_core.enums import (
+    ScanStatus,
+    ScanTaskStatus,
+    ScanTrigger,
+    SourceType,
+    SuppressionScope,
+)
+from iceberg_core.models import (
+    Engine,
+    Finding,
+    Scan,
+    ScanTask,
+    Schedule,
+    Source,
+    Suppression,
+)
 from sqlalchemy import Engine as SAEngine
 from sqlmodel import Session, select
 
@@ -148,3 +162,36 @@ def test_a_round_finalizes_a_scan_stranded_by_a_crash(
     session.refresh(scan)
     assert scan.status is ScanStatus.FAILED
     assert scan.finished_at is not None
+
+
+def test_a_round_releases_findings_whose_suppression_expired(
+    session: Session,
+    dispatcher: RecordingDispatcher,
+    make_finding: Callable[..., Finding],
+) -> None:
+    """Expiry is a property of the clock, so it cannot wait for the next scan.
+
+    A source on a weekly cadence would otherwise keep a lapsed suppression in
+    force for six days after the analyst said it should end (ADR 0008).
+    """
+    finding = make_finding(rule_id="generic-high-entropy")
+    lapsed = Suppression(
+        scope=SuppressionScope.RULE,
+        pattern="generic-high-entropy",
+        reason="silenced for a sprint",
+        expires_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    session.add(lapsed)
+    session.commit()
+    finding.suppressed_at = datetime.now(UTC) - timedelta(days=14)
+    finding.suppressed_by_id = lapsed.id
+    session.add(finding)
+    session.commit()
+
+    maintenance.run_once(dispatcher)
+
+    session.refresh(finding)
+    released = session.get(Finding, finding.id)
+    assert released is not None
+    assert released.suppressed_at is None
+    assert released.suppressed_by_id is None

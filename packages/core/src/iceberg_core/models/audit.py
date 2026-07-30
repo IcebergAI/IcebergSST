@@ -31,11 +31,14 @@ AUDIT_SOURCE_CREDENTIAL_ROTATED = "source.credential_rotated"
 AUDIT_SCHEDULE_CREATED = "schedule.created"
 AUDIT_SCHEDULE_UPDATED = "schedule.updated"
 AUDIT_SCHEDULE_DELETED = "schedule.deleted"
+AUDIT_SUPPRESSION_CREATED = "suppression.created"
+AUDIT_SUPPRESSION_DELETED = "suppression.deleted"
 
 #: Values for ``target_type``.
 AUDIT_TARGET_USER = "user"
 AUDIT_TARGET_SOURCE = "source"
 AUDIT_TARGET_SCHEDULE = "schedule"
+AUDIT_TARGET_SUPPRESSION = "suppression"
 
 
 class AuditEvent(IcebergModel, table=True):
