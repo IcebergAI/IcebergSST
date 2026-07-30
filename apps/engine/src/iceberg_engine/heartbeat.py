@@ -19,6 +19,7 @@ runner checks.
 
 import threading
 import uuid
+from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -44,7 +45,11 @@ class TaskRegistry:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._held: set[uuid.UUID] = set()
+        # Reference-counted, not a set: a reclaimed task can be redelivered to this
+        # same process and run in a second thread while the first is still going.
+        # A set would let the first thread's cleanup de-register the live attempt,
+        # stranding its lease. The id stays held until the last holder releases it.
+        self._held: Counter[uuid.UUID] = Counter()
         self._cancelled: set[uuid.UUID] = set()
 
     @contextmanager
@@ -56,13 +61,15 @@ class TaskRegistry:
         lease on work nobody is doing and delaying the API's reclaim of it.
         """
         with self._lock:
-            self._held.add(task_id)
+            self._held[task_id] += 1
         try:
             yield
         finally:
             with self._lock:
-                self._held.discard(task_id)
-                self._cancelled.discard(task_id)
+                self._held[task_id] -= 1
+                if self._held[task_id] <= 0:
+                    del self._held[task_id]
+                    self._cancelled.discard(task_id)
 
     def held(self) -> list[uuid.UUID]:
         with self._lock:
@@ -73,7 +80,7 @@ class TaskRegistry:
             # Only tasks we actually hold: a cancellation for something this
             # process finished is stale news, and remembering it would make a
             # later task with a recycled id look cancelled.
-            self._cancelled |= set(task_ids) & self._held
+            self._cancelled |= set(task_ids) & set(self._held)
 
     def is_cancelled(self, task_id: uuid.UUID) -> bool:
         with self._lock:
@@ -140,4 +147,10 @@ class Heartbeat:
         # `Event.wait` rather than `sleep`, so shutdown is prompt instead of
         # taking up to a full interval.
         while not self._stop.wait(self._interval):
-            self.beat_once()
+            try:
+                self.beat_once()
+            except Exception:  # a single bad beat must never end the thread
+                # If the thread died, leases would silently stop renewing and every
+                # long task would be reclaimed and rescanned forever, with only a
+                # threadexcepthook trace to show for it. Log and beat again.
+                logger.exception("heartbeat_beat_crashed")

@@ -53,9 +53,16 @@ def _lease(**overrides: Any) -> dict[str, Any]:
 class Api:
     """A scripted API that records what the engine submitted."""
 
-    def __init__(self, lease: dict[str, Any] | None = None, *, lease_status: int = 200) -> None:
+    def __init__(
+        self,
+        lease: dict[str, Any] | None = None,
+        *,
+        lease_status: int = 200,
+        results_status: int = 200,
+    ) -> None:
         self.lease_body = lease if lease is not None else _lease()
         self.lease_status = lease_status
+        self.results_status = results_status
         self.submissions: list[dict[str, Any]] = []
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
@@ -64,6 +71,8 @@ class Api:
                 return httpx2.Response(self.lease_status)
             return httpx2.Response(200, json=self.lease_body)
         self.submissions.append(json.loads(request.content))
+        if self.results_status != 200:
+            return httpx2.Response(self.results_status)
         return httpx2.Response(200, json={"task_id": str(TASK_ID)})
 
     @property
@@ -175,8 +184,45 @@ def test_a_refused_lease_reports_nothing_and_drops_the_message() -> None:
     assert api.submissions == []
 
 
+@pytest.mark.parametrize("results_status", [409, 403])
+def test_a_results_submission_the_api_refuses_does_not_crash_the_actor(
+    results_status: int,
+) -> None:
+    """The lease can be reclaimed or the task cancelled while the scan runs. The
+    API answers 409 ("no longer leased") or 403 ("not leased by this engine"); both
+    are routine (ADR 0009 §2) and must not escape run_task as an exception."""
+    api = Api(results_status=results_status)
+
+    report = run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    assert report is None  # nothing the API would accept
+    assert len(api.submissions) == 1  # it was attempted, once
+
+
+def test_an_unreachable_api_at_report_time_does_not_crash_the_actor() -> None:
+    """Every retry exhausted: the task will be reclaimed and redone, so this is
+    logged rather than left to escape the actor frame."""
+    api = Api(results_status=503)
+
+    report = run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    assert report is None
+
+
+def test_an_unsupported_task_kind_fails_the_task_rather_than_mis_running_it() -> None:
+    """A kind a newer API introduced must fail cleanly, not be executed as a fetch."""
+    api = Api(_lease(kind="reindex"))
+
+    run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    assert api.submission["status"] == "failed"
+    assert "unsupported task kind" in api.submission["error"]
+
+
 def test_an_unreachable_source_is_reported_as_failed_with_a_reason() -> None:
-    """An empty result would read as "no secrets here"."""
+    """An empty result would read as "no secrets here". The reason reported to the
+    API is the exception type, never its message — a library's message may quote
+    the content it choked on, which could be a secret (ADR 0004)."""
     registry.clear()
     registry.register(FakeConnector(discovery_fails=True))
     api = Api(_lease(kind="discovery", spec={}))
@@ -185,7 +231,10 @@ def test_an_unreachable_source_is_reported_as_failed_with_a_reason() -> None:
 
     assert report is not None and report.status == "failed"
     assert api.submission["status"] == "failed"
-    assert "unreachable" in api.submission["error"]
+    # A builtin ConnectionError is unanticipated (not a ConnectorError), so only its
+    # type is transmitted — enough to diagnose, nothing that could carry content.
+    assert api.submission["error"] == "ConnectionError"
+    assert "unreachable" not in api.submission["error"]
 
 
 def test_a_rejected_credential_is_reported_as_failed() -> None:
@@ -244,7 +293,10 @@ def test_an_unexpected_bug_is_still_reported() -> None:
     report = run_task(TASK_ID, client=_client(api), pack=PACK)
 
     assert report is not None and report.status == "failed"
-    assert "something nobody anticipated" in api.submission["error"]
+    # Only the exception type crosses the wire: the message could quote whatever the
+    # buggy code was handling, up to and including a secret (ADR 0004).
+    assert api.submission["error"] == "RuntimeError"
+    assert "something nobody anticipated" not in api.submission["error"]
 
 
 def test_a_page_the_source_could_not_read_is_counted_not_fatal() -> None:
