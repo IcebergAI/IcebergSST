@@ -60,7 +60,7 @@ class ProviderMetadata:
     jwks_uri: str
 
     @classmethod
-    def from_document(cls, document: dict[str, Any]) -> "ProviderMetadata":
+    def from_document(cls, document: dict[str, Any]) -> ProviderMetadata:
         try:
             return cls(
                 issuer=document["issuer"],

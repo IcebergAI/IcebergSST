@@ -79,7 +79,7 @@ class EnvKeyBackend(SecretStore):
         self._pepper_ref = pepper_ref
 
     @classmethod
-    def from_settings(cls, settings: SecretStoreSettings) -> "EnvKeyBackend":
+    def from_settings(cls, settings: SecretStoreSettings) -> EnvKeyBackend:
         if settings.master_key is None:
             raise SecretStoreConfigError(f"ICEBERG_MASTER_KEY is not set; {_GENERATE_HINT}")
         return cls(

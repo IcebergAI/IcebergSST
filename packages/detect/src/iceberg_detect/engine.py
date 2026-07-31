@@ -131,7 +131,7 @@ def detect(
             snippet = redact_snippet(
                 text, candidate.span, policy=candidate.rule.redaction, other_spans=neighbours
             )
-        except (RedactionError, ValueError):
+        except RedactionError, ValueError:
             # Redaction failing is a bug in the masking logic, and the only safe
             # response is to drop the finding: a raw snippet must never be the
             # fallback (ADR 0004).

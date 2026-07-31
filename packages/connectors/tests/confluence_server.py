@@ -192,7 +192,7 @@ class FakeConfluence:
             return False
         try:
             decoded = base64.b64decode(header.removeprefix("Basic ")).decode()
-        except (ValueError, UnicodeDecodeError):
+        except ValueError, UnicodeDecodeError:
             return False
         return decoded == f"{EMAIL}:{API_TOKEN}"
 

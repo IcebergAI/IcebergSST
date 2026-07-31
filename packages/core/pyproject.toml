@@ -2,7 +2,7 @@
 name = "iceberg-core"
 version = "0.1.0"
 description = "Shared models, config, secret-store, fingerprinting, and redaction utilities."
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = [
     "cryptography>=49.0.0",
     "prometheus-client>=0.25.0",

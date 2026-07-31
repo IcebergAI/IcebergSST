@@ -189,7 +189,7 @@ class ConfluenceConnector:
         return {**page, **detail}, body_text(detail)
 
     def _page_units(
-        self, text: str, page_id: str, context: "_PageContext", outcome: FetchOutcome
+        self, text: str, page_id: str, context: _PageContext, outcome: FetchOutcome
     ) -> Iterator[ContentUnit]:
         """The page body, if it has any text."""
         if not text:
@@ -208,7 +208,7 @@ class ConfluenceConnector:
         self,
         client: ConfluenceClient,
         page_id: str,
-        context: "_PageContext",
+        context: _PageContext,
         outcome: FetchOutcome,
     ) -> Iterator[ContentUnit]:
         """Footer and inline comments, each its own unit.
@@ -243,9 +243,9 @@ class ConfluenceConnector:
         self,
         client: ConfluenceClient,
         page_id: str,
-        context: "_PageContext",
+        context: _PageContext,
         outcome: FetchOutcome,
-        sandbox: "_LazySandbox",
+        sandbox: _LazySandbox,
     ) -> Iterator[ContentUnit]:
         """Text-extractable attachments, downloaded and parsed in a child process.
 
@@ -377,7 +377,7 @@ class _SpaceContext:
     name: Any
     site: str
 
-    def for_page(self, page: dict[str, Any], page_id: str) -> "_PageContext":
+    def for_page(self, page: dict[str, Any], page_id: str) -> _PageContext:
         webui = _webui(page)
         return _PageContext(
             space=self,
@@ -459,7 +459,7 @@ def _email(connection: dict[str, Any]) -> str | None:
 def _as_int(value: Any) -> int | None:
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 

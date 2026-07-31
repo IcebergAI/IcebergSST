@@ -44,7 +44,7 @@ class Cursor:
         return base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
 
     @classmethod
-    def decode(cls, raw: str) -> "Cursor":
+    def decode(cls, raw: str) -> Cursor:
         try:
             padded = raw + "=" * (-len(raw) % 4)
             payload: dict[str, Any] = json.loads(base64.urlsafe_b64decode(padded))

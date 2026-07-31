@@ -2,7 +2,7 @@
 name = "iceberg-connectors"
 version = "0.1.0"
 description = "Connector interface and source connectors (Confluence MVP; Jira/SMB later)."
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = [
     "iceberg-core",
     "structlog>=25.5.0",
