@@ -188,6 +188,33 @@ never user-configurable), Archivo for UI, JetBrains Mono for data and labels,
 Spectral for prose. The token block at the top of `iceberg.css` is byte-identical
 to its siblings, and `test_web_invariants.py` fails if one drifts.
 
+### Provenance
+
+This console did not invent its look, and none of it should be re-derived by
+hand. Where each shared artifact came from, so a future change can go back to the
+same source instead of guessing:
+
+| Here | Canonical source |
+|---|---|
+| `static/css/iceberg.css` token block | `IcebergCM/src/icebergcm/web/static/app.css` — identical values, including the dark variant |
+| `.rail`/`.workspace`/`.canvas` shell, `.btn`/`.tag`/`.field`/`.card` vocabulary | `iceberg/src/iceberg/static/css/iceberg.css` and IcebergCM's `app.css` |
+| `static/js/vendor/alpine.min.js` | the `@alpinejs/csp` build **iceberg** pins — byte-identical to `iceberg/src/iceberg/static/js/vendor/alpine.min.js` and to the npm tarball for that version |
+| `static/css/vendor/fonts.css` + `static/fonts/*.woff2` (26 files) | byte-identical to `iceberg/src/iceberg/static/` |
+| `static/img/icebergai-mark*.svg` | `~/Projects/.github/profile/assets/` — the real brand marks, never a text or emoji placeholder |
+| CSP-safe Alpine pattern (`tags.js` registry, load order, JSON islands) | `iceberg/src/iceberg/templates/base.html` + `auth/security_headers.py` |
+| The vendoring script's shape | `iceberg/scripts/vendor_assets.py`, retargeted at npm tarballs |
+
+The rules those artifacts have to satisfy — fixed accent, tokens over hex, no
+accent picker, self-hosted fonts, the CSP-safe Alpine contract — are written down
+in the `iceberg-frontend` skill (`~/.claude/skills/iceberg-frontend/`, with
+`references/tokens.css`, `components.md`, and `csp-alpine.md`). Read it before
+touching anything in this section; several of the constraints here exist because
+one of the sibling apps already got them wrong once.
+
+Two deliberate divergences from `iceberg` specifically, both explained above:
+this console has **no Tailwind** (it follows IcebergCM), and it has an
+**automatic dark variant** (iceberg is light-only).
+
 Colours come from tokens (`var(--ink)`, `var(--line)`, `var(--accent)`), never
 from hex literals — `#fff` on the dark rail is the single deliberate exception,
 because that chrome is dark in both themes. Dark mode is the automatic

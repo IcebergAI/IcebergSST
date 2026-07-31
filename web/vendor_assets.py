@@ -49,6 +49,11 @@ import httpx
 #: The CSP build of Alpine (``@alpinejs/csp``), which evaluates directive
 #: expressions without ``eval()``. The cost is that every ``x-data`` must name a
 #: component registered through ``Alpine.data()`` — see ``static/js/tags.js``.
+#:
+#: Deliberately the same pin the sibling `iceberg` app carries: the vendored file
+#: is byte-identical to its `static/js/vendor/alpine.min.js`, so the two products
+#: share one reviewed artifact and one integrity hash rather than drifting apart
+#: on separate upgrade schedules (docs/web.md § Provenance).
 ALPINE_VERSION = "3.15.12"
 HTMX_VERSION = "2.0.10"
 

@@ -3,7 +3,9 @@
  *  Shared with the Iceberg app family: cool blue-grey neutrals, a fixed
  *  glacial-cyan accent, Archivo (UI) · JetBrains Mono (data/labels) · Spectral
  *  (prose). The token block below is byte-identical to iceberg/IcebergCM, which
- *  is what makes the three products look like one product.
+ *  is what makes the three products look like one product — do not tune a value
+ *  here in isolation; the canonical copy is IcebergCM's app.css, the rules are in
+ *  the `iceberg-frontend` skill, and docs/web.md § Provenance maps the rest.
  *
  *  Plain hand-authored CSS, served same-origin under a strict CSP. There is no
  *  build step and no utility framework: every component here is authored once,

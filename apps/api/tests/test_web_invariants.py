@@ -35,8 +35,11 @@ WEB_MODULES = sorted(WEB_PACKAGE.rglob("*.py"))
 FORBIDDEN_CALLS = frozenset({"select", "exec", "commit", "refresh", "flush"})
 FORBIDDEN_IMPORTS = ("sqlmodel", "sqlalchemy", "iceberg_core.db")
 
-#: The shared Iceberg palette. These are the tokens the design system is defined
-#: by, and drifting one silently un-matches this product from its siblings.
+#: The shared Iceberg palette, copied from the canonical source —
+#: ``IcebergCM/src/icebergcm/web/static/app.css``, which carries the same values
+#: as ``iceberg``'s ``iceberg.css`` (docs/web.md § Provenance). Pinned here rather
+#: than read from a sibling checkout because CI has no sibling checkout: the point
+#: is to fail when *this* repo drifts, and the fix is to go back to that file.
 CANONICAL_TOKENS = {
     "--accent": "oklch(0.66 0.118 226)",
     "--ink": "oklch(0.26 0.026 262)",
