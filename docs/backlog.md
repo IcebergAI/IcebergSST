@@ -51,7 +51,9 @@ Confluence-scan-to-triaged-finding flow). M3–M4 complete the product.
 
 ## M4 — Notifications & prod deploy
 - **Epic: Notifications** — email/SMTP + webhook **dispatch**, new-finding events. The channel model
-  and its CRUD API shipped with M3.
+  and its CRUD API shipped with M3. Dispatch is a transactional outbox
+  (`notification_delivery`): reconciliation queues, the maintenance loop delivers and retries.
+  See [`notifications.md`](./notifications.md).
 - **Epic: Helm chart** — api Deploy, engine Deploy + HPA, pg/redis, secrets, ingress, values.
 - **Epic: Hardening** — security review, rate limiting, audit logging, data-retention policy,
   key + pepper rotation runbook, docs polish.

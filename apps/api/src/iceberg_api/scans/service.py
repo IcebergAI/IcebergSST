@@ -35,6 +35,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select, update
 
 from iceberg_api.dispatch import Dispatcher
+from iceberg_api.notifications import dispatch as notification_dispatch
 from iceberg_api.scans.reconcile import reconcile_scan
 
 #: How long a lease is good for without a heartbeat. Long enough for a slow
@@ -355,6 +356,13 @@ def finalize_and_reconcile(
         if scan is not None:  # pragma: no branch — the UPDATE just matched it
             db.refresh(scan)
             reconcile_scan(db, scan, now=now)
+            # Queue announcements for what this scan opened (#60). Writing the
+            # outbox rows here — after reconciliation, so a finding auto-resolved
+            # in the same pass is not announced — keeps "the scan finished" and
+            # "somebody will be told" in one transaction. Sending happens in the
+            # maintenance loop; nothing here talks to SMTP or a webhook.
+            if notification_dispatch.enqueue_for_scan(db, scan, now=now):
+                db.commit()
     return final
 
 

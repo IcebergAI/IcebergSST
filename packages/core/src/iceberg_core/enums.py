@@ -102,3 +102,15 @@ class EngineStatus(StrEnum):
 class NotificationChannelType(StrEnum):
     EMAIL = "email"
     WEBHOOK = "webhook"
+
+
+class NotificationDeliveryStatus(StrEnum):
+    """Where one announcement to one channel has got to (#60).
+
+    ``failed`` is terminal and means *give up*, not *lost*: the row stays, with
+    the error that ended it, so an operator can see what was never delivered.
+    """
+
+    PENDING = "pending"
+    DELIVERED = "delivered"
+    FAILED = "failed"

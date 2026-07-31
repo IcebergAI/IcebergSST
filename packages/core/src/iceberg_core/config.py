@@ -105,6 +105,36 @@ class ApiSettings(SecretStoreSettings):
     bootstrap_admin_subject: str | None = None
     bootstrap_admin_email: str | None = None
 
+    # ─── Notification dispatch (#60) ──────────────────────────────────────────
+    # Channel *configuration* lives in the database, because an analyst edits it.
+    # These are deployment facts — which relay to use, how hard to try — so they
+    # are configuration, and they are api-role only: engines never dispatch.
+    #: Unset disables email delivery. Email channels then fail their deliveries
+    #: with a clear error rather than appearing to work.
+    smtp_host: str | None = None
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
+    #: STARTTLS on a submission port. Turn off only for a relay on localhost.
+    smtp_starttls: bool = True
+    smtp_from: str = "icebergsst@localhost"
+    #: A dispatch must never be the reason an API worker is tied up.
+    smtp_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+
+    #: Per-attempt ceiling for a webhook POST. Deliberately short: the receiver is
+    #: operator-supplied and may be a black hole.
+    webhook_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+
+    #: Attempts before a delivery is marked `failed`. The row is kept either way —
+    #: giving up is recorded, not silent.
+    notification_max_attempts: int = Field(default=5, ge=1, le=20)
+    #: First retry delay; doubles each attempt, so the default 60s reaches roughly
+    #: 16 minutes by the fifth. Long enough to ride out a receiver's restart.
+    notification_retry_backoff_seconds: int = Field(default=60, ge=1)
+    #: Deliveries attempted per maintenance round. Bounds how long one round can
+    #: take when a channel is timing out.
+    notification_batch_size: int = Field(default=50, ge=1, le=1000)
+
     @field_validator("database_url", "redis_url")
     @classmethod
     def _require_url_scheme(cls, value: str) -> str:
