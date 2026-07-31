@@ -92,6 +92,33 @@ boundary applies to what goes over the wire:
   data.
 - Email is sent as **plain text**. Resource locators come from scanned systems, so an HTML message
   would carry attacker-influenced content into whatever client opens it.
+## Rate limiting
+Ceilings on the endpoints an unauthenticated caller can reach (#63). These are not the last line
+of defence — authentication is — so they are sized to stop floods rather than to meter usage.
+
+| Bucket | Keyed on | Default | Why |
+|---|---|---|---|
+| `/auth/login`, `/auth/callback` | client address | 20 / min | Unlimited, these are a way to make the API hammer the identity provider, and the callback is the cheapest way to make it verify a JWT against a JWKS. |
+| Rejected engine tokens | client address | 30 / min | Bounds credential stuffing and puts it in the metrics. Only **failures** are charged, so a healthy fleet never touches this bucket. |
+| Accepted engine requests | **engine id** | 600 / min | Per engine, not per address: a fleet behind one NAT must not share a budget, or `--scale engine=N` throttles itself. |
+
+Three decisions are worth stating explicitly, because the alternatives all look reasonable:
+
+- **It fails open.** If the counter store is unreachable, requests are allowed and a warning is
+  logged. A limiter that locks every operator out of the console when Redis hiccups has done more
+  damage than the traffic it was defending against.
+- **`X-Forwarded-For` is ignored by default.** The header is caller-controlled, so trusting it
+  would let an attacker take a fresh identity per request — the same as having no limit. Set
+  `ICEBERG_TRUSTED_PROXY_HOPS` to the number of reverse proxies in front, and the client address is
+  taken from the entry the outermost trusted proxy added. **Behind a load balancer, this must be
+  set, or every request is charged to the balancer.**
+- **Counters live in Redis** when it is configured, so a limit means the same thing across
+  replicas. The in-memory fallback is exact for one replica and per-replica for several — a real
+  limit, just a looser one.
+
+Refusals answer `429` with `Retry-After`; allowed requests carry advisory `RateLimit-Limit`,
+`RateLimit-Remaining` and `RateLimit-Reset` headers so a well-behaved client can back off before
+it is refused.
 
 ## The browser surface (M3)
 The console renders attacker-influenced strings — Confluence page titles, resource paths, redacted

@@ -95,6 +95,15 @@ services:
       ICEBERG_SMTP_FROM: ${ICEBERG_SMTP_FROM:-icebergsst@localhost}
       ICEBERG_NOTIFICATION_MAX_ATTEMPTS: ${ICEBERG_NOTIFICATION_MAX_ATTEMPTS:-5}
       ICEBERG_NOTIFICATION_RETRY_BACKOFF_SECONDS: ${ICEBERG_NOTIFICATION_RETRY_BACKOFF_SECONDS:-60}
+      # Rate limiting (#63). Counters live in Redis so a limit means the same
+      # thing across api replicas (docs/security.md § Rate limiting).
+      ICEBERG_RATE_LIMIT_ENABLED: ${ICEBERG_RATE_LIMIT_ENABLED:-true}
+      ICEBERG_AUTH_RATE_LIMIT: ${ICEBERG_AUTH_RATE_LIMIT:-20}
+      ICEBERG_ENGINE_RATE_LIMIT: ${ICEBERG_ENGINE_RATE_LIMIT:-600}
+      ICEBERG_ENGINE_AUTH_RATE_LIMIT: ${ICEBERG_ENGINE_AUTH_RATE_LIMIT:-30}
+      # 0 for the compose stack: nothing proxies the api here, so the peer
+      # address is the client. Behind an ingress this must match the hop count.
+      ICEBERG_TRUSTED_PROXY_HOPS: ${ICEBERG_TRUSTED_PROXY_HOPS:-0}
     ports:
       - "${ICEBERG_API_PORT:-8000}:8000"
     depends_on:

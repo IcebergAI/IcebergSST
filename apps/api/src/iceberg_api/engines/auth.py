@@ -21,11 +21,14 @@ from typing import Annotated
 
 import structlog
 from fastapi import Depends, HTTPException, Request, status
+from iceberg_core.config import ApiSettings
 from iceberg_core.enums import EngineStatus
 from iceberg_core.models import Engine
 from sqlmodel import Session, col, select
 
-from iceberg_api.auth.dependencies import SessionDep
+from iceberg_api import ratelimit
+from iceberg_api.auth.dependencies import SessionDep, SettingsDep
+from iceberg_api.ratelimit import RateLimitStoreDep
 
 TOKEN_BYTES = 32
 BEARER_PREFIX = "Bearer "
@@ -60,15 +63,27 @@ def presented_token(request: Request) -> str | None:
     return None
 
 
-def current_engine(request: Request, db: SessionDep) -> Engine:
+def current_engine(
+    request: Request,
+    db: SessionDep,
+    settings: SettingsDep,
+    store: RateLimitStoreDep,
+) -> Engine:
     """Authenticate the calling engine, or reject with 401.
 
     An ``offline`` or ``draining`` engine is still allowed to authenticate: it may
     need to finish reporting work it already leased. Refusing here would strand
     results the API asked for.
+
+    Two rate limits apply, and which one applies is the interesting part (#63).
+    **Rejections** are charged to the client address: that is the bucket that
+    bounds credential stuffing and makes it visible. **Accepted** requests are
+    charged to the engine, not the address, because a fleet behind one NAT must
+    not share a budget — `--scale engine=N` has to keep working.
     """
     token = presented_token(request)
     if not token:
+        _charge_rejection(request, store, settings)
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,
             "engine token required",
@@ -80,12 +95,45 @@ def current_engine(request: Request, db: SessionDep) -> Engine:
         # Same message as a missing token: which of the two failed is not the
         # caller's business.
         logger.info("engine_token_rejected")
+        _charge_rejection(request, store, settings)
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,
             "engine token required",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    ratelimit.enforce(
+        request,
+        store,
+        settings,
+        bucket="engine",
+        identity=str(engine.id),
+        limit=settings.engine_rate_limit,
+        window_seconds=settings.engine_rate_limit_window_seconds,
+    )
     return engine
+
+
+def _charge_rejection(
+    request: Request,
+    store: ratelimit.RateLimitStore,
+    settings: ApiSettings,
+) -> None:
+    """Count a failed authentication against the caller's address.
+
+    Charging only failures is deliberate: a healthy fleet never touches this
+    bucket, so the limit can be small enough to matter without any risk of
+    throttling legitimate engines.
+    """
+    ratelimit.enforce(
+        request,
+        store,
+        settings,
+        bucket="engine-auth",
+        identity=ratelimit.client_address(request, trusted_proxy_hops=settings.trusted_proxy_hops),
+        limit=settings.engine_auth_rate_limit,
+        window_seconds=settings.engine_rate_limit_window_seconds,
+    )
 
 
 CurrentEngine = Annotated[Engine, Depends(current_engine)]

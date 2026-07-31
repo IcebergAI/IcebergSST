@@ -134,6 +134,36 @@ class ApiSettings(SecretStoreSettings):
     #: Deliveries attempted per maintenance round. Bounds how long one round can
     #: take when a channel is timing out.
     notification_batch_size: int = Field(default=50, ge=1, le=1000)
+    # ─── Rate limiting (#63) ──────────────────────────────────────────────────
+    # Ceilings on the endpoints an unauthenticated caller can reach. Not the last
+    # line of defence — authentication is — so these are set to stop floods, not
+    # to meter usage (docs/security.md § Rate limiting).
+    rate_limit_enabled: bool = True
+    #: Shared counters across replicas. Off falls back to per-process counters,
+    #: which are exact for a single replica and per-replica for several.
+    rate_limit_use_redis: bool = True
+
+    #: `/auth/login` and `/auth/callback`, per client address. Generous enough for
+    #: a person retrying a failed login, small enough that nobody drives the
+    #: identity provider through us.
+    auth_rate_limit: int = Field(default=20, ge=1)
+    auth_rate_limit_window_seconds: int = Field(default=60, ge=1)
+
+    #: Per authenticated engine, not per address: a fleet behind one NAT must not
+    #: share a budget. Sized for `worker_threads` engines heartbeating and leasing
+    #: without ever approaching it.
+    engine_rate_limit: int = Field(default=600, ge=1)
+    engine_rate_limit_window_seconds: int = Field(default=60, ge=1)
+
+    #: Rejected engine-token presentations, per client address — the bucket that
+    #: makes credential stuffing visible and bounded.
+    engine_auth_rate_limit: int = Field(default=30, ge=1)
+
+    #: How many reverse proxies sit in front. Zero means the peer address is the
+    #: truth and `X-Forwarded-For` is ignored, which is the safe default: a caller
+    #: can put anything in that header, and trusting it would let an attacker take
+    #: a fresh identity per request.
+    trusted_proxy_hops: int = Field(default=0, ge=0, le=10)
 
     @field_validator("database_url", "redis_url")
     @classmethod
