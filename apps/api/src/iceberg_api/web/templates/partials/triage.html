@@ -106,9 +106,16 @@
             </span>
             <span class="timeline-ts">{{ event.created_at | dt }}</span>
           </div>
-          {% if event.from_value or event.to_value %}
+          {% if event.kind.value == 'assign' %}
+          {#- An assign event records the assignee's *id*, which is what stays
+              correct when somebody is renamed. Show the name to the reader. -#}
+          <div class="timeline-body">
+            {{ event.from_value | person(user_names) }} → <strong>{{ event.to_value | person(user_names) }}</strong>
+          </div>
+          {% elif event.from_value or event.to_value %}
           <div class="timeline-body mono" style="font-size:12.5px">
-            {{ event.from_value or '—' }} → {{ event.to_value or '—' }}
+            {{ event.from_value | humanize if event.from_value else '—' }}
+            → {{ event.to_value | humanize if event.to_value else '—' }}
           </div>
           {% endif %}
           {% if event.comment %}

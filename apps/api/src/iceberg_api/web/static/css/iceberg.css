@@ -438,7 +438,16 @@ select.field {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
   background-repeat: no-repeat; background-position: right 10px center; padding-right: 30px;
 }
-.field-hint { display: block; margin-top: 5px; font-size: 12px; color: var(--muted); line-height: 1.4; }
+/* Hints live *inside* `.stack > label`, which is mono/uppercase/tracked because it
+   is a field label. A hint is prose, so it resets all three rather than inheriting
+   them — otherwise a sentence of guidance renders as shouted monospace. */
+.field-hint {
+  display: block; margin-top: 5px;
+  font-family: var(--fs-sans); font-size: 12px; font-weight: 400;
+  letter-spacing: normal; text-transform: none;
+  color: var(--muted); line-height: 1.45;
+}
+.field-hint code { font-size: 0.95em; }
 
 /* Stacked labelled form */
 .stack { display: flex; flex-direction: column; gap: 0.95rem; }
