@@ -76,3 +76,14 @@ class SecretStore(ABC):
         the lifetime of a task in the lease response (ADR 0009), never from
         their own configuration.
         """
+
+    def get_previous_pepper(self) -> bytes | None:
+        """The pepper being rotated out, if a rotation window is open (#64).
+
+        ``None`` outside a window, which is the normal state. During one, engines
+        report each finding under both peppers so ingest can re-key a match found
+        under the old one and carry its triage state across — the plaintext that
+        produced the identity was never stored, so recomputation is not an option
+        (docs/runbooks/key-rotation.md).
+        """
+        return None

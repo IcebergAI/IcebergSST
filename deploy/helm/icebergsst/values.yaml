@@ -121,6 +121,11 @@ secrets:
     # stored credential ref undecryptable; back it up before you need it.
     masterKey: ""
     fingerprintPepperRef: ""
+    # Set only while rotating the pepper, and unset again once every source has
+    # been scanned. This opens a window in which engines report each finding
+    # under both peppers so ingest can re-key what it already has; it does not
+    # migrate anything on its own (docs/runbooks/key-rotation.md).
+    previousFingerprintPepperRef: ""
     # Rotating this logs everyone out, which is the intended blast radius.
     sessionSecret: ""
     oidcClientSecret: ""

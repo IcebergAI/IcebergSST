@@ -125,6 +125,13 @@ class LeaseResponse(BaseModel):
     #: (ADR 0007).
     fingerprint_pepper: str | None = None
 
+    #: The pepper being rotated out, base64, present only during a rotation
+    #: window (#64). When it is here the engine reports a second identity for
+    #: every finding, computed under this pepper, so ingest can recognise a
+    #: finding it already has and carry its triage state onto the new identity.
+    #: Null in normal operation, which is almost always.
+    previous_fingerprint_pepper: str | None = None
+
     #: Suppressions the engine may pre-filter with. The API applies them again at
     #: ingest, so this is an optimisation, not the enforcement point (#44).
     suppressions: list[dict[str, str]] = Field(default_factory=list)
@@ -154,6 +161,14 @@ class FindingPayload(BaseModel):
     entropy: float | None = None
     confidence: float | None = None
     severity: Severity
+
+    #: The same finding's identity under the outgoing pepper, sent only during a
+    #: rotation window (#64). Ingest looks this up when the primary fingerprint
+    #: is unknown; a match is the *same* finding under a new key, so it is
+    #: re-keyed in place rather than created afresh — which is what carries the
+    #: analyst's decision across a rotation.
+    previous_fingerprint: str | None = Field(default=None, min_length=16, max_length=64)
+    previous_secret_hash: str | None = Field(default=None, min_length=16, max_length=64)
 
 
 class ResultsSubmission(BaseModel):

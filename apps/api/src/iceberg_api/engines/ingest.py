@@ -44,6 +44,10 @@ class IngestOutcome:
     reopened: int = 0
     #: Reported by the engine, dropped here for scoring too low.
     below_threshold: int = 0
+    #: Matched under the outgoing pepper and re-keyed to the new identity during
+    #: a rotation window (#64). Zero outside one. Watching this fall to zero
+    #: across a full scan cycle is how an operator knows the rotation is done.
+    rekeyed: int = 0
     fingerprints: list[str] = field(default_factory=list)
 
 
@@ -80,10 +84,34 @@ def ingest_findings(
             .where(col(Finding.fingerprint) == payload.fingerprint)
         ).first()
 
+        rekeyed = False
+        if existing is None and payload.previous_fingerprint:
+            # A pepper rotation is in progress (#64). The engine reported this
+            # finding's identity under both peppers; a hit on the old one is the
+            # *same* finding, so it is re-keyed in place — which is what carries
+            # the analyst's state, notes, assignee and event trail across a
+            # rotation that no recomputation could perform.
+            existing = db.exec(
+                select(Finding)
+                .where(col(Finding.source_id) == scan.source_id)
+                .where(col(Finding.fingerprint) == payload.previous_fingerprint)
+            ).first()
+            if existing is not None:
+                existing.fingerprint = payload.fingerprint
+                existing.secret_hash = payload.secret_hash
+                rekeyed = True
+                outcome.rekeyed += 1
+
         if existing is None:
             _create(db, scan, payload, suppression=suppression, at=at)
         elif _refresh(db, existing, scan, payload, suppression=suppression, at=at):
             outcome.reopened += 1
+        if rekeyed:
+            logger.info(
+                "finding_rekeyed",
+                finding_id=str(existing.id) if existing else None,
+                scan_id=str(scan.id),
+            )
 
         outcome.ingested += 1
         outcome.fingerprints.append(payload.fingerprint)
@@ -98,6 +126,7 @@ def ingest_findings(
         suppressed=outcome.suppressed,
         reopened=outcome.reopened,
         below_threshold=outcome.below_threshold,
+        rekeyed=outcome.rekeyed,
     )
     return outcome
 
@@ -202,4 +231,5 @@ def merge_scan_counts(scan: Scan, outcome: IngestOutcome, engine_counts: dict[st
     totals["suppressed"] = totals.get("suppressed", 0) + outcome.suppressed
     totals["reopened"] = totals.get("reopened", 0) + outcome.reopened
     totals["below_threshold"] = totals.get("below_threshold", 0) + outcome.below_threshold
+    totals["rekeyed"] = totals.get("rekeyed", 0) + outcome.rekeyed
     scan.counts = {**scan.counts, **totals}

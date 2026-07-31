@@ -72,6 +72,8 @@ services:
       ICEBERG_SECRET_STORE_BACKEND: ${ICEBERG_SECRET_STORE_BACKEND:-env_key}
       ICEBERG_MASTER_KEY: ${ICEBERG_MASTER_KEY:?generate one with `make secrets`}
       ICEBERG_FINGERPRINT_PEPPER_REF: ${ICEBERG_FINGERPRINT_PEPPER_REF:?generate one with `make secrets`}
+      # Empty except during a pepper rotation (#64, docs/runbooks/key-rotation.md).
+      ICEBERG_PREVIOUS_FINGERPRINT_PEPPER_REF: ${ICEBERG_PREVIOUS_FINGERPRINT_PEPPER_REF:-}
       # Authentication (ADR 0005) — api role only, like everything above.
       ICEBERG_SESSION_SECRET: ${ICEBERG_SESSION_SECRET:?generate one with `make secrets`}
       ICEBERG_SESSION_TTL_MINUTES: ${ICEBERG_SESSION_TTL_MINUTES:-480}

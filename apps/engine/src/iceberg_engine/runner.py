@@ -237,6 +237,7 @@ def _fetch(
     parser ran in — is the connector's business (#46). The runner sees text.
     """
     pepper = _pepper(lease)
+    previous_pepper = _previous_pepper(lease)
     outcome = FetchOutcome()
     spec = TaskSpec.from_payload(lease.spec)
 
@@ -251,7 +252,9 @@ def _fetch(
         result = detect(unit.text, pack, threshold=lease.confidence_threshold)
         tallies["dropped_below_threshold"] += result.dropped_below_threshold
         tallies["units_truncated"] += int(result.truncated)
-        candidates.extend(_candidates(unit, result, pepper=pepper, pack=pack))
+        candidates.extend(
+            _candidates(unit, result, pepper=pepper, previous_pepper=previous_pepper, pack=pack)
+        )
 
     # Pre-filter locally to save bandwidth. The API applies the same suppressions
     # again at ingest, authoritatively, so this can only ever be the more
@@ -271,12 +274,20 @@ def _candidates(
     result: DetectionResult,
     *,
     pepper: bytes,
+    previous_pepper: bytes | None,
     pack: RulePack,
 ) -> Iterator[Candidate]:
     """Turn detected secrets into reportable findings.
 
-    The only place the plaintext is touched: hashed once for identity, then left
-    behind. What continues is a masked snippet and two hex digests.
+    The only place the plaintext is touched: hashed once for identity — twice
+    during a pepper rotation — and then left behind. What continues is a masked
+    snippet and hex digests.
+
+    The second identity is the whole mechanism behind pepper rotation (#64).
+    Identity is an HMAC keyed by the pepper and the plaintext is never stored, so
+    the API cannot recompute a finding's identity under a new key; only an engine
+    holding the secret can, and only while it holds it. Computing both here is
+    what lets ingest recognise a finding it already has.
     """
     for found in result.secrets:
         hashed = secret_hash(found.secret, pepper=pepper)
@@ -284,21 +295,31 @@ def _candidates(
             locator=unit.locator, rule_id=found.rule_id, secret_hash=hashed, pepper=pepper
         )
         locator = unit.resource_locator() | {"offset": found.span.start}
+        payload: dict[str, object] = {
+            "fingerprint": identity,
+            "rule_id": found.rule_id,
+            "rulepack_version": pack.version,
+            "resource_locator": locator,
+            "redacted_snippet": found.redacted_snippet,
+            "secret_hash": hashed,
+            "entropy": found.entropy,
+            "confidence": found.confidence,
+            "severity": found.severity,
+        }
+        if previous_pepper is not None:
+            previous_hashed = secret_hash(found.secret, pepper=previous_pepper)
+            payload["previous_secret_hash"] = previous_hashed
+            payload["previous_fingerprint"] = fingerprint(
+                locator=unit.locator,
+                rule_id=found.rule_id,
+                secret_hash=previous_hashed,
+                pepper=previous_pepper,
+            )
         yield Candidate(
             fingerprint=identity,
             rule_id=found.rule_id,
             resource_locator=locator,
-            payload={
-                "fingerprint": identity,
-                "rule_id": found.rule_id,
-                "rulepack_version": pack.version,
-                "resource_locator": locator,
-                "redacted_snippet": found.redacted_snippet,
-                "secret_hash": hashed,
-                "entropy": found.entropy,
-                "confidence": found.confidence,
-                "severity": found.severity,
-            },
+            payload=payload,
         )
 
 
@@ -316,3 +337,20 @@ def _pepper(lease: Lease) -> bytes:
         return base64.b64decode(lease.fingerprint_pepper, validate=True)
     except (ValueError, TypeError) as exc:
         raise ConnectorError("lease carried an unreadable fingerprint pepper") from exc
+
+
+def _previous_pepper(lease: Lease) -> bytes | None:
+    """The outgoing pepper during a rotation window, or None (#64).
+
+    Unlike the pepper itself, an unreadable one here is not fatal. Without it the
+    scan still produces correct findings under the current pepper — they simply
+    ingest as new rather than re-keying what is already stored, which the next
+    scan of the window can still fix. Refusing to scan would be the worse trade.
+    """
+    if not lease.previous_fingerprint_pepper:
+        return None
+    try:
+        return base64.b64decode(lease.previous_fingerprint_pepper, validate=True)
+    except ValueError, TypeError:
+        logger.warning("lease_previous_pepper_unreadable")
+        return None
