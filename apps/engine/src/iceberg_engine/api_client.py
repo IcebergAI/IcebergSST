@@ -131,6 +131,12 @@ class Lease:
         return str(pepper) if pepper else None
 
     @property
+    def previous_fingerprint_pepper(self) -> str | None:
+        """The outgoing pepper, present only during a rotation window (#64)."""
+        pepper = self.payload.get("previous_fingerprint_pepper")
+        return str(pepper) if pepper else None
+
+    @property
     def suppressions(self) -> list[dict[str, str]]:
         rules = self.payload.get("suppressions")
         return list(rules) if isinstance(rules, list) else []

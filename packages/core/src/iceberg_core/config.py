@@ -60,6 +60,18 @@ class SecretStoreSettings(CoreSettings):
     master_key: SecretStr | None = None
     fingerprint_pepper_ref: str | None = None
 
+    #: The pepper being rotated *out*. Set only during a rotation window (#64).
+    #:
+    #: Every finding identity is an HMAC keyed by the pepper, and the plaintext
+    #: secret that produced it was never stored — so a new pepper cannot be
+    #: applied to existing rows by recomputation. Instead, while both are set,
+    #: engines report each finding under both peppers and ingest re-keys a match
+    #: found under the old one, carrying its triage state across. Unset it once a
+    #: full scan cycle has completed.
+    #:
+    #: docs/runbooks/key-rotation.md is the procedure; do not set this casually.
+    previous_fingerprint_pepper_ref: str | None = None
+
 
 class ApiSettings(SecretStoreSettings):
     """API-role settings: the only role that holds database credentials."""

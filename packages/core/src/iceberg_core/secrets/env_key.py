@@ -70,13 +70,20 @@ def decode_master_key(encoded: str) -> bytes:
 class EnvKeyBackend(SecretStore):
     """AES-256-GCM secret store keyed by a master key from the environment."""
 
-    def __init__(self, master_key: bytes, *, pepper_ref: str | None = None) -> None:
+    def __init__(
+        self,
+        master_key: bytes,
+        *,
+        pepper_ref: str | None = None,
+        previous_pepper_ref: str | None = None,
+    ) -> None:
         if len(master_key) != MASTER_KEY_BYTES:
             raise SecretStoreConfigError(
                 f"master key must be {MASTER_KEY_BYTES} bytes, got {len(master_key)}"
             )
         self._aead = AESGCM(master_key)
         self._pepper_ref = pepper_ref
+        self._previous_pepper_ref = previous_pepper_ref
 
     @classmethod
     def from_settings(cls, settings: SecretStoreSettings) -> EnvKeyBackend:
@@ -85,6 +92,7 @@ class EnvKeyBackend(SecretStore):
         return cls(
             decode_master_key(settings.master_key.get_secret_value()),
             pepper_ref=settings.fingerprint_pepper_ref,
+            previous_pepper_ref=settings.previous_fingerprint_pepper_ref,
         )
 
     def __repr__(self) -> str:
@@ -131,6 +139,17 @@ class EnvKeyBackend(SecretStore):
                 "generate one with: python -m iceberg_core.secrets generate-pepper"
             )
         return self.open_bytes(self._pepper_ref, purpose=SecretPurpose.PEPPER)
+
+    def get_previous_pepper(self) -> bytes | None:
+        """The outgoing pepper during a rotation window (#64).
+
+        Sealed with the same master key, so rotating the pepper and rotating the
+        master key are independent operations — which they need to be, because
+        one is a re-scan and the other is a re-seal.
+        """
+        if self._previous_pepper_ref is None:
+            return None
+        return self.open_bytes(self._previous_pepper_ref, purpose=SecretPurpose.PEPPER)
 
 
 def _associated_data(purpose: SecretPurpose) -> bytes:

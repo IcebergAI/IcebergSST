@@ -222,6 +222,17 @@ async def lease_task(
             "fingerprint pepper could not be read",
         ) from exc
 
+    # The outgoing pepper, during a rotation window only (#64). Unlike the pepper
+    # above this does *not* fail closed: a deployment that is not rotating has no
+    # previous pepper, and one that is would rather scan without re-keying this
+    # round — findings ingest as new, which is recoverable — than not scan at all.
+    previous_pepper: str | None = None
+    try:
+        previous = store.get_previous_pepper()
+        previous_pepper = base64.b64encode(previous).decode() if previous else None
+    except SecretStoreError:
+        logger.warning("lease_previous_pepper_unavailable", source_id=str(source.id))
+
     credential: str | None = None
     if source.credential_ref is not None:
         try:
@@ -255,6 +266,7 @@ async def lease_task(
         connection=source.connection,
         credential=credential,
         fingerprint_pepper=pepper,
+        previous_fingerprint_pepper=previous_pepper,
         suppressions=[
             rule.as_payload() for rule in suppressions.applicable_suppressions(db, source.id)
         ],
