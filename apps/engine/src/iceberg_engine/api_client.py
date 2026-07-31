@@ -26,6 +26,7 @@ from typing import Any
 
 import httpx2
 import structlog
+from iceberg_core.metrics import ENGINE_API_RETRIES
 
 logger = structlog.get_logger()
 
@@ -54,8 +55,18 @@ class LeaseRefused(EngineApiError):
     """
 
 
+class LeaseNotHeld(EngineApiError):
+    """403: the API does not believe this engine holds the task.
+
+    Kept apart from a rejected token, which is the other way to get a 4xx here and
+    means something entirely different: the lease was reclaimed or the task
+    cancelled while the engine worked, which is routine, where a rejected token
+    means this engine can no longer talk to the API at all (#131).
+    """
+
+
 class AuthenticationFailed(EngineApiError):
-    """This engine's token was rejected. Rotated, revoked, or never valid."""
+    """401: this engine's token was rejected. Rotated, revoked, or never valid."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +177,18 @@ class EngineClient:
     transport: httpx2.BaseTransport | None = None
     sleep: Callable[[float], None] = time.sleep
     timeout_seconds: float = 30.0
+    #: One connection pool, held for as long as the client is. A client per
+    #: request paid a TCP and TLS handshake on every lease, submission, beat and
+    #: retry — with `worker_threads` up to 64 and a beat a minute, that is
+    #: sustained load on the control plane for nothing (#130).
+    _http: httpx2.Client = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self._http = httpx2.Client(transport=self.transport, timeout=self.timeout_seconds)
+
+    def close(self) -> None:
+        """Release the pool. A process holds one client, so this is shutdown."""
+        self._http.close()
 
     def heartbeat(
         self,
@@ -216,10 +239,11 @@ class EngineClient:
             if attempt:
                 delay = self.retry.delay_for(attempt - 1)
                 logger.info("engine_api_retry", path=path, attempt=attempt, delay_seconds=delay)
+                ENGINE_API_RETRIES.inc()
                 self.sleep(delay)
             try:
                 return self._send(method, url, json)
-            except LeaseRefused, AuthenticationFailed:
+            except LeaseRefused, LeaseNotHeld, AuthenticationFailed:
                 # The API's considered answer. Asking again changes nothing.
                 raise
             except RetryableApiError as exc:
@@ -235,18 +259,19 @@ class EngineClient:
         ) from last_error
 
     def _send(self, method: str, url: str, json: dict[str, Any] | None) -> dict[str, Any]:
-        with httpx2.Client(transport=self.transport, timeout=self.timeout_seconds) as client:
-            response = client.request(
-                method,
-                url,
-                json=json,
-                # The engine token is the only credential this process holds, and
-                # it works nowhere else in the API (ADR 0002).
-                headers={"Authorization": f"Bearer {self.token}"},
-            )
+        response = self._http.request(
+            method,
+            url,
+            json=json,
+            # The engine token is the only credential this process holds, and it
+            # works nowhere else in the API (ADR 0002).
+            headers={"Authorization": f"Bearer {self.token}"},
+        )
 
-        if response.status_code in (401, 403):
-            raise AuthenticationFailed(f"engine token rejected ({response.status_code})")
+        if response.status_code == 401:
+            raise AuthenticationFailed("engine token rejected (401)")
+        if response.status_code == 403:
+            raise LeaseNotHeld("engine does not hold this task (403)")
         if response.status_code == 409:
             raise LeaseRefused("task is not available to lease")
         if response.status_code in RETRYABLE_STATUSES:

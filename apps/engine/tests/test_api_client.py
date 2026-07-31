@@ -20,6 +20,7 @@ from iceberg_engine.api_client import (
     EngineApiError,
     EngineClient,
     Lease,
+    LeaseNotHeld,
     LeaseRefused,
     RetryPolicy,
 )
@@ -229,13 +230,26 @@ def test_a_refused_lease_is_not_retried() -> None:
     assert slept == []
 
 
-@pytest.mark.parametrize("status", [401, 403])
-def test_a_rejected_token_is_not_retried(status: int) -> None:
+def test_a_rejected_token_is_not_retried() -> None:
     """Rotated or revoked. Retrying makes the same rejected request more often."""
-    script = Script(httpx2.Response(status))
+    script = Script(httpx2.Response(401))
     client, _ = _client(script)
 
     with pytest.raises(AuthenticationFailed):
+        client.lease(TASK_ID)
+
+    assert len(script.requests) == 1
+
+
+def test_a_lease_this_engine_does_not_hold_is_told_apart_from_a_rejected_token() -> None:
+    """Both are 4xx and neither is retried, but they mean opposite things: a 403 is
+    a lease that moved on while the engine worked, where a 401 is an engine that
+    can no longer talk to the API at all. Collapsing them hides a token rotation
+    behind a routine log line (#131)."""
+    script = Script(httpx2.Response(403))
+    client, _ = _client(script)
+
+    with pytest.raises(LeaseNotHeld):
         client.lease(TASK_ID)
 
     assert len(script.requests) == 1
@@ -248,6 +262,53 @@ def test_a_bad_request_is_not_retried() -> None:
 
     with pytest.raises(EngineApiError, match="rejected the request"):
         client.submit_results(TASK_ID, {"idempotency_key": "k", "status": "completed"})
+
+    assert len(script.requests) == 1
+
+
+# ─── The connection pool ──────────────────────────────────────────────────────
+
+
+def test_one_http_client_serves_every_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A client is a connection pool. One per request — which is one per lease,
+    submission, beat *and* retry — is a TCP and TLS handshake each time, sustained
+    for as long as the engine runs (#130). A MockTransport cannot feel the cost, so
+    the assertion is on how many clients get built."""
+    built: list[httpx2.Client] = []
+    real_client = httpx2.Client
+
+    def counting(**kwargs: Any) -> httpx2.Client:
+        built.append(real_client(**kwargs))
+        return built[-1]
+
+    monkeypatch.setattr(httpx2, "Client", counting)
+    script = Script(httpx2.Response(503), httpx2.Response(200, json=LEASE_BODY))
+    client, _ = _client(script)
+
+    client.lease(TASK_ID)
+    client.lease(TASK_ID)
+
+    assert len(built) == 1
+    assert not built[0].is_closed
+
+
+def test_closing_the_client_releases_the_pool() -> None:
+    """Shutdown, not per-request cleanup: the process holds one of these."""
+    client, _ = _client(Script(httpx2.Response(200, json=LEASE_BODY)))
+    client.lease(TASK_ID)
+
+    client.close()
+
+    assert client._http.is_closed
+
+
+def test_an_injected_transport_still_reaches_the_pooled_client() -> None:
+    """Every test in this file rests on it, and a pool built before the transport
+    was read would answer from the network instead."""
+    script = Script(httpx2.Response(200, json=LEASE_BODY))
+    client, _ = _client(script)
+
+    client.lease(TASK_ID)
 
     assert len(script.requests) == 1
 

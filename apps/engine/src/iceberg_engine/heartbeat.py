@@ -25,6 +25,7 @@ from contextlib import contextmanager
 from typing import Any
 
 import structlog
+from iceberg_core.metrics import ENGINE_HEARTBEAT_FAILURES
 
 from iceberg_engine.api_client import EngineApiError, EngineClient
 
@@ -122,6 +123,7 @@ class Heartbeat:
             )
         except EngineApiError as exc:
             logger.warning("heartbeat_failed", error=str(exc))
+            ENGINE_HEARTBEAT_FAILURES.inc()
             return []
 
         if cancelled:
