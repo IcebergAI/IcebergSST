@@ -1,11 +1,14 @@
 """FastAPI application factory.
 
 Establishes what every route inherits — JSON logs with a per-request correlation
-id (#67) and the Prometheus exposition endpoint — and mounts the routers.
+id (#67), the browser security headers (#53), and the Prometheus exposition
+endpoint — and mounts the routers.
 
 Human-facing routes live under ``/api/v1`` from day one (docs/api.md
 § Conventions); ``/healthz`` and ``/metrics`` stay unversioned because operators
-and scrapers are not API clients.
+and scrapers are not API clients. The M3 web UI mounts at the root and is
+excluded from the OpenAPI schema: the schema is the API's contract, and HTML
+endpoints in it would describe a second one (docs/web.md).
 """
 
 import re
@@ -15,6 +18,7 @@ from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI, Request, Response
+from fastapi.staticfiles import StaticFiles
 from iceberg_core import metrics as _metrics  # noqa: F401  # registers iceberg_* series
 from iceberg_core.config import ApiSettings
 from iceberg_core.logging import configure_logging
@@ -25,11 +29,16 @@ from iceberg_api.engines.routes import router as engines_router
 from iceberg_api.findings.routes import router as findings_router
 from iceberg_api.findings.suppression_routes import router as suppressions_router
 from iceberg_api.maintenance import background_maintenance
+from iceberg_api.notifications.routes import router as notifications_router
 from iceberg_api.rules import router as rules_router
 from iceberg_api.scans.routes import router as scans_router
 from iceberg_api.sources.routes import router as sources_router
 from iceberg_api.sources.schedule_routes import router as schedules_router
 from iceberg_api.users.routes import router as users_router
+from iceberg_api.web import errors as web_errors
+from iceberg_api.web.assets import STATIC_DIR
+from iceberg_api.web.routes import router as web_router
+from iceberg_api.web.security import security_headers_middleware
 
 API_PREFIX = "/api/v1"
 
@@ -70,6 +79,10 @@ def create_app(settings: ApiSettings | None = None, *, background: bool = True) 
 
     app = FastAPI(title="IcebergSST API", lifespan=lifespan)
 
+    # Registered before the request-context middleware, so it runs outermost and
+    # stamps the headers on error responses the inner layers produce too.
+    app.middleware("http")(security_headers_middleware(settings))
+
     @app.middleware("http")
     async def request_context(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
@@ -94,11 +107,18 @@ def create_app(settings: ApiSettings | None = None, *, background: bool = True) 
     app.include_router(auth_router, prefix=API_PREFIX)
     app.include_router(engines_router, prefix=API_PREFIX)
     app.include_router(findings_router, prefix=API_PREFIX)
+    app.include_router(notifications_router, prefix=API_PREFIX)
     app.include_router(rules_router, prefix=API_PREFIX)
     app.include_router(scans_router, prefix=API_PREFIX)
     app.include_router(schedules_router, prefix=API_PREFIX)
     app.include_router(sources_router, prefix=API_PREFIX)
     app.include_router(suppressions_router, prefix=API_PREFIX)
     app.include_router(users_router, prefix=API_PREFIX)
+
+    # The browser surface, last: its routes live at the root, and mounting them
+    # after the API guarantees no web path can shadow an /api/v1 one.
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    app.include_router(web_router)
+    web_errors.register(app)
 
     return app

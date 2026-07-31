@@ -12,6 +12,10 @@ autogenerate will not see it. The conventions each table follows live in
 """
 
 from iceberg_core.models.audit import (
+    AUDIT_CHANNEL_CREATED,
+    AUDIT_CHANNEL_DELETED,
+    AUDIT_CHANNEL_SECRET_SET,
+    AUDIT_CHANNEL_UPDATED,
     AUDIT_ENGINE_REGISTERED,
     AUDIT_ENGINE_TOKEN_ROTATED,
     AUDIT_SCHEDULE_CREATED,
@@ -24,6 +28,7 @@ from iceberg_core.models.audit import (
     AUDIT_SOURCE_UPDATED,
     AUDIT_SUPPRESSION_CREATED,
     AUDIT_SUPPRESSION_DELETED,
+    AUDIT_TARGET_CHANNEL,
     AUDIT_TARGET_ENGINE,
     AUDIT_TARGET_SCHEDULE,
     AUDIT_TARGET_SOURCE,
@@ -51,6 +56,10 @@ from iceberg_core.models.scans import Engine, Scan, ScanTask
 from iceberg_core.models.sources import Schedule, Source
 
 __all__ = [
+    "AUDIT_CHANNEL_CREATED",
+    "AUDIT_CHANNEL_DELETED",
+    "AUDIT_CHANNEL_SECRET_SET",
+    "AUDIT_CHANNEL_UPDATED",
     "AUDIT_ENGINE_REGISTERED",
     "AUDIT_ENGINE_TOKEN_ROTATED",
     "AUDIT_SCHEDULE_CREATED",
@@ -63,6 +72,7 @@ __all__ = [
     "AUDIT_SOURCE_UPDATED",
     "AUDIT_SUPPRESSION_CREATED",
     "AUDIT_SUPPRESSION_DELETED",
+    "AUDIT_TARGET_CHANNEL",
     "AUDIT_TARGET_ENGINE",
     "AUDIT_TARGET_SCHEDULE",
     "AUDIT_TARGET_SOURCE",

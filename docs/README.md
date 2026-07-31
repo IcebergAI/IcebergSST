@@ -5,6 +5,7 @@ Design specification and reference docs. Start with [`../ARCHITECTURE.md`](../AR
 ## Reference
 - [`data-model.md`](./data-model.md) — SQLModel entities and relationships
 - [`api.md`](./api.md) — REST surface (human + engine-facing)
+- [`web.md`](./web.md) — the console: HTMX/Alpine conventions, CSP, assets, design system
 - [`connectors.md`](./connectors.md) — connector interface + Confluence (MVP)
 - [`rules.md`](./rules.md) — detection engine, rule packs, suppressions
 - [`security.md`](./security.md) — threat model and mitigations

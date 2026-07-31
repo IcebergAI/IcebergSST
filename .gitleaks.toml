@@ -39,3 +39,18 @@ ever existed. Matched by `generic-api-key` because the fixtures are named `secre
 Keyed on the literal and nothing else — the file is still scanned for everything else.
 """
 regexes = ['''AKIAABCDEFGHIJKLMNOP''']
+
+[[allowlists]]
+description = """
+A high-entropy nonsense string in the keyword-proximity tests
+(packages/detect/tests/test_signals.py, introduced in e6b1317). It is the *subject*
+of those tests rather than a credential: they assert that `oauth` clipped by a window
+edge does not count as the keyword `auth`, which needs a token entropic enough for
+`generic-api-key` to match — so the fixture and the finding have the same cause.
+
+Allowlisted here rather than with an inline `# gitleaks:allow` because e6b1317 is
+already in history and the CI job scans all of it; editing the file today would not
+change what that commit contains. Keyed on the literal, so the file is still scanned
+for everything else.
+"""
+regexes = ['''8f3Kd0aQ2mVx7Lp9Zr4Ts6''']

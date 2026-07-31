@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}Rules · {{ app_name }}{% endblock %}
+{% block crumb %}Rules{% endblock %}
+
+{% block content %}
+<div class="head-row">
+  <div>
+    <div class="eyebrow">Configuration</div>
+    <h1 class="page-title">Detection surface</h1>
+    <div class="title-rule"></div>
+  </div>
+</div>
+
+<p class="lede section-gap">
+  What the live fleet is actually detecting, reported by the engines themselves rather than declared
+  by the API. Rule packs ship inside engine images, so a list published here would describe what the
+  fleet is <em>supposed</em> to be running — which is the thing this page exists to check.
+  Rules are metadata only: never a pattern.
+</p>
+
+{% if not rules.fleet_consistent %}
+<div class="notice notice--warn section-gap" role="status">
+  <div>
+    <strong>The fleet disagrees.</strong> More than one rule-pack version is in force — normal
+    mid-deploy. Every finding records the version that produced it, so results stay reproducible
+    either way.
+  </div>
+</div>
+{% endif %}
+
+<div class="stat-grid section-gap">
+  <div class="stat">
+    <div class="stat-label">Rules in force</div>
+    <div class="stat-num">{{ rules.rules | length }}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Pack versions</div>
+    <div class="stat-num">{{ rules.rulepack_versions | length }}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Confidence threshold</div>
+    <div class="stat-num">{{ rules.confidence_threshold }}</div>
+    <div class="stat-foot">matches below this are dropped</div>
+  </div>
+  <div class="stat {{ 'stat--warn' if rules.engines_without_a_rulepack }}">
+    <div class="stat-label">Silent engines</div>
+    <div class="stat-num">{{ rules.engines_without_a_rulepack | length }}</div>
+    <div class="stat-foot">registered, no pack reported</div>
+  </div>
+</div>
+
+{% if rules.rulepack_versions %}
+<section class="card section-gap">
+  <div class="card-head"><h2 class="section-title">Packs</h2></div>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Version</th><th>Engines</th><th>Rules</th><th>Running it</th></tr></thead>
+      <tbody>
+        {% for version in rules.rulepack_versions %}
+        <tr>
+          <td class="mono"><strong>{{ version.version }}</strong></td>
+          <td class="mono">{{ version.engine_count }}</td>
+          <td class="mono">{{ version.rule_count }}</td>
+          <td class="truncate">{{ version.engines | join(', ') }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+<section class="card section-gap">
+  <div class="card-head"><h2 class="section-title">Rules</h2></div>
+  {% if rules.rules %}
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Rule</th><th>Severity</th><th>Description</th><th>Defined in</th><th class="col-actions">Findings</th></tr></thead>
+      <tbody>
+        {% for rule in rules.rules %}
+        <tr>
+          <td class="mono"><strong>{{ rule.id }}</strong></td>
+          <td><span class="tag tag--c sev-{{ rule.severity.value }}"><span class="dot"></span>{{ rule.severity.value }}</span></td>
+          <td>{{ rule.description }}</td>
+          <td class="mono" style="font-size:12px">{{ rule.rulepack_versions | join(', ') }}</td>
+          <td class="col-actions">
+            <a class="btn-link" href="/findings?rule_id={{ rule.id | urlencode }}&amp;state=open&amp;suppressed=false">Open</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <div class="empty-title">No engine has reported a rule pack</div>
+    <p>Enrol an engine and let it heartbeat once; the pack it loaded shows up here.</p>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

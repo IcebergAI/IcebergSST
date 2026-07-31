@@ -1,3 +1,11 @@
+# Vendored frontend assets and the brand marks are byte-pinned: static/assets.lock.json
+# records a sha384 of each, base.html emits it as an `integrity=` attribute, and
+# apps/api/tests/test_web_invariants.py checks the two agree. A whitespace hook that
+# "fixes" a minified bundle changes those bytes, so the browser blocks the script and
+# the page silently loses its behaviour — with a diff that looks like nothing happened.
+# Leave them exactly as web/vendor_assets.py wrote them.
+exclude: ^apps/api/src/iceberg_api/web/static/(js/vendor|css/vendor|fonts|img)/
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

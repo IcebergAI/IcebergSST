@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block title %}Overview · {{ app_name }}{% endblock %}
+{% block crumb %}Overview{% endblock %}
+
+{% block content %}
+<div class="head-row">
+  <div>
+    <div class="eyebrow eyebrow-accent">Secret scanning</div>
+    <h1 class="page-title">Overview</h1>
+    <div class="title-rule"></div>
+  </div>
+  {% if role in ('analyst', 'admin') %}
+  <div class="actions">
+    <a class="btn btn--ghost" href="/sources">Run a scan</a>
+  </div>
+  {% endif %}
+</div>
+
+<div class="stat-grid section-gap">
+  <a class="stat {{ 'stat--crit' if critical_count }}" href="/findings?state=open&amp;severity=critical&amp;suppressed=false">
+    <div class="stat-label">Critical, open</div>
+    <div class="stat-num">{{ critical_count }}{{ '+' if critical_capped }}</div>
+    <div class="stat-foot">Highest severity, not suppressed</div>
+  </a>
+  <a class="stat" href="/findings?state=open&amp;suppressed=false">
+    <div class="stat-label">Open findings</div>
+    <div class="stat-num">{{ open_count }}{{ '+' if open_capped }}</div>
+    <div class="stat-foot">{{ unassigned_count }} unassigned{{ ' (of the first page)' if open_capped }}</div>
+  </a>
+  <a class="stat" href="/findings?state=open&amp;suppressed=false&amp;assignee=me">
+    <div class="stat-label">Assigned to you</div>
+    <div class="stat-num">{{ mine_count }}</div>
+    <div class="stat-foot">Waiting on your decision</div>
+  </a>
+  <a class="stat" href="/sources">
+    <div class="stat-label">Sources</div>
+    <div class="stat-num">{{ source_count }}{{ '+' if source_capped }}</div>
+    <div class="stat-foot">Configured for scanning</div>
+  </a>
+</div>
+
+{% if open_capped %}
+<div class="notice section-gap">
+  <div>
+    <strong>Counts are capped.</strong> The API returns at most {{ open_count }} rows per page, so
+    these tiles say “{{ open_count }}+” rather than guess at the total. The tables behind them page
+    through everything.
+  </div>
+</div>
+{% endif %}
+
+{% if stale_engines %}
+<div class="notice notice--warn section-gap" role="status">
+  <div>
+    <strong>{{ stale_engines | length }} engine(s) are not active.</strong>
+    Queued scan tasks will wait until one comes back — <a href="/engines">check the fleet</a>.
+  </div>
+</div>
+{% endif %}
+
+<div class="grid-2 section-gap">
+  <section class="card">
+    <div class="card-head">
+      <h2 class="section-title">Newest open findings</h2>
+      <a class="btn-link" href="/findings?state=open&amp;suppressed=false">All findings</a>
+    </div>
+    {% if recent_findings %}
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Severity</th><th>Rule</th><th>Source</th><th>Where</th><th>Seen</th></tr>
+        </thead>
+        <tbody>
+          {% for finding in recent_findings %}
+          <tr>
+            <td><span class="tag tag--c sev-{{ finding.severity.value }}"><span class="dot"></span>{{ finding.severity.value }}</span></td>
+            <td><a href="/findings/{{ finding.id }}" class="mono">{{ finding.rule_id }}</a></td>
+            <td class="truncate">{{ sources[finding.source_id].name if finding.source_id in sources else finding.source_id | short }}</td>
+            <td class="truncate mono" style="font-size:12px">{{ finding.resource_locator.get('path') or finding.resource_locator.get('url') or '—' }}</td>
+            <td class="mono nowrap" style="font-size:12px">{{ finding.created_at | ago }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty-state">
+      <div class="empty-title">Nothing open</div>
+      <p>Either no scan has run yet, or every finding has been triaged. Both are good places to be.</p>
+    </div>
+    {% endif %}
+  </section>
+
+  <div class="stack-gap">
+    <section class="card">
+      <div class="card-head">
+        <h2 class="section-title">Running now</h2>
+        <a class="btn-link" href="/scans">All scans</a>
+      </div>
+      {% if active_scans %}
+      <div class="rows" style="border:0;box-shadow:none;border-radius:0">
+        {% for scan in active_scans %}
+        <a class="row row-hover" href="/scans/{{ scan.id }}">
+          <span class="live-dot" aria-hidden="true"></span>
+          <span class="row-main">
+            <span class="row-title truncate">{{ sources[scan.source_id].name if scan.source_id in sources else scan.source_id | short }}</span>
+            <span class="row-sub">{{ scan.status.value }} · started {{ scan.started_at | ago }}</span>
+          </span>
+        </a>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="card-pad empty">No scan is running.</div>
+      {% endif %}
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2 class="section-title">Latest scans</h2></div>
+      {% if recent_scans %}
+      <div class="rows" style="border:0;box-shadow:none;border-radius:0">
+        {% for scan in recent_scans %}
+        <a class="row row-hover" href="/scans/{{ scan.id }}">
+          <span class="tag tag--c status-{{ scan.status.value }}"><span class="dot"></span>{{ scan.status.value }}</span>
+          <span class="row-main">
+            <span class="row-title truncate">{{ sources[scan.source_id].name if scan.source_id in sources else scan.source_id | short }}</span>
+            <span class="row-sub">{{ scan.trigger.value }} · {{ scan.created_at | ago }}</span>
+          </span>
+        </a>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="card-pad empty">No scans yet.</div>
+      {% endif %}
+    </section>
+  </div>
+</div>
+{% endblock %}

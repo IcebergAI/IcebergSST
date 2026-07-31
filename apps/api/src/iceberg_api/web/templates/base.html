@@ -1,0 +1,117 @@
+{#- The authenticated shell: dark rail | (breadcrumb topbar / light canvas).
+
+    Every asset below is first-party and version-pinned, with an `integrity`
+    hash from static/assets.lock.json. There is no inline <script> and no inline
+    <style> anywhere in this tree, which is what lets the CSP stay at
+    `script-src 'self'` (see web/security.py).
+
+    Load order matters: tags.js registers every Alpine component on the
+    `alpine:init` event, so it has to run BEFORE the Alpine bundle dispatches
+    that event on its own deferred startup. A later-deferred script loses the
+    race and every x-data on the page fails to resolve.
+-#}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ app_name }}{% endblock %}</title>
+  <link rel="icon" href="/static/img/icebergai-mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/{{ assets.fonts.path }}" integrity="{{ assets.fonts.integrity }}">
+  <link rel="stylesheet" href="/static/css/iceberg.css">
+  {#- htmx reads its configuration from this meta tag at startup. allowEval off
+      turns off the features that would need `unsafe-eval` (`js:` in hx-vals,
+      event filters) — none of which this UI uses, and leaving them on would
+      make htmx probe for eval and log a CSP violation on every page load. -#}
+  <meta name="htmx-config" content='{"allowEval": false, "selfRequestsOnly": true, "includeIndicatorStyles": false}'>
+  <script defer src="/static/js/tags.js"></script>
+  <script defer src="/static/{{ assets.alpine.path }}" integrity="{{ assets.alpine.integrity }}" crossorigin="anonymous"></script>
+  <script defer src="/static/{{ assets.htmx.path }}" integrity="{{ assets.htmx.integrity }}" crossorigin="anonymous"></script>
+</head>
+<body>
+  <div class="brandbar"></div>
+  {% include "_icons.html" %}
+
+  {#- Every hx- request carries the session's CSRF token. Set once here rather
+      than on each element: the API rejects a mutation without it (by design),
+      and a token added per-form is one somebody eventually forgets. -#}
+  <div class="app" hx-headers='{"X-CSRF-Token": {{ csrf_token | tojson }}}'>
+  {% if user %}
+    {%- macro nav_link(href, icon, label, active) -%}
+      <a href="{{ href }}" class="rail-link {{ 'is-active' if active }}"{{ ' aria-current="page"' | safe if active }}>
+        <svg class="rail-ic" aria-hidden="true"><use href="#{{ icon }}"/></svg>
+        <span class="rail-link-label">{{ label }}</span>
+      </a>
+    {%- endmacro -%}
+
+    <aside class="rail">
+      <a href="/" class="rail-brand" aria-label="{{ app_name }} overview">
+        <img class="brand-mark" src="/static/img/icebergai-mark.svg" alt="" width="26" height="26">
+        <span class="rail-wordmark">Iceberg<b>SST</b></span>
+      </a>
+      <nav class="rail-nav" aria-label="Primary">
+        <div class="rail-group">
+          <div class="rail-group-label">Workspace</div>
+          {{ nav_link('/', 'ic-home', 'Overview', path == '/') }}
+          {{ nav_link('/findings', 'ic-finding', 'Findings', path.startswith('/findings')) }}
+          {{ nav_link('/scans', 'ic-scan', 'Scans', path.startswith('/scans')) }}
+        </div>
+        <div class="rail-group">
+          <div class="rail-group-label">Configuration</div>
+          {{ nav_link('/sources', 'ic-source', 'Sources', path.startswith('/sources')) }}
+          {{ nav_link('/schedules', 'ic-schedule', 'Schedules', path.startswith('/schedules')) }}
+          {{ nav_link('/suppressions', 'ic-suppress', 'Suppressions', path.startswith('/suppressions')) }}
+          {{ nav_link('/rules', 'ic-rules', 'Rules', path.startswith('/rules')) }}
+        </div>
+        {#- Administration is admin-only because every route behind it is:
+            GET /engines, GET /users and GET /notifications/channels all require
+            an admin, so showing the links to anyone else would only offer them a
+            403. The rail reflects permissions; rbac.py enforces them. -#}
+        {% if role == 'admin' %}
+        <div class="rail-group">
+          <div class="rail-group-label">Administration</div>
+          {{ nav_link('/engines', 'ic-engine', 'Engines', path.startswith('/engines')) }}
+          {{ nav_link('/channels', 'ic-bell', 'Notifications', path.startswith('/channels')) }}
+          {{ nav_link('/users', 'ic-users', 'Users', path.startswith('/users')) }}
+        </div>
+        {% endif %}
+      </nav>
+      <div class="rail-foot">
+        <div class="rail-id">
+          <div class="rail-avatar" aria-hidden="true">{{ user.display_name[:2] | upper }}</div>
+          <div class="rail-id-meta">
+            <div class="rail-id-name" title="{{ user.email }}">{{ user.display_name }}</div>
+            <div class="rail-id-role">{{ role }}</div>
+          </div>
+        </div>
+        {#- A POST, and CSRF-protected: a GET logout can be triggered by any page
+            that embeds a link to it. hx-post keeps the token on the request and
+            the API answers 204, so the handler redirects us. -#}
+        <form class="rail-logout-form" method="post" action="/logout">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="rail-logout">Sign out</button>
+        </form>
+      </div>
+    </aside>
+  {% endif %}
+
+    <div class="workspace">
+    {% if user %}
+      <header class="topbar">
+        <div class="topbar-crumb">
+          <span class="crumb-root">{{ app_name }}</span>
+          <span class="crumb-sep">/</span>
+          <span class="crumb-leaf">{% block crumb %}Overview{% endblock %}</span>
+        </div>
+        <div class="topbar-tools">{% block topbar_tools %}{% endblock %}</div>
+      </header>
+    {% endif %}
+      <main class="canvas" id="canvas">
+        <div class="canvas-inner {% block page_class %}{% endblock %}">
+          {% block content %}{% endblock %}
+        </div>
+      </main>
+    </div>
+  </div>
+</body>
+</html>

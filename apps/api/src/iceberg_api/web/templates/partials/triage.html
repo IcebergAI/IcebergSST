@@ -1,0 +1,125 @@
+{#- The triage panel and the finding's history, swapped together.
+
+    They are one fragment because they are one answer: a state change writes a
+    FindingEvent, and showing the new state without the entry that explains it
+    would make the trail look like it lagged. `PATCH /findings/{id}` returns the
+    detail shape *with* its events for the same reason.
+-#}
+<div id="triage" x-data="triageForm">
+  <script type="application/json">{{ island | tojson }}</script>
+
+  {% if error %}
+  <div class="notice notice--crit" role="alert" style="margin-bottom:16px">
+    <div><strong>Not applied.</strong> {{ error }}</div>
+  </div>
+  {% endif %}
+
+  {% if role in ('analyst', 'admin') %}
+  <section class="card card-pad">
+    <div class="eyebrow" style="margin-bottom:12px">Triage</div>
+    <form class="stack"
+          hx-post="/findings/{{ finding.id }}/triage"
+          hx-target="#triage"
+          hx-swap="outerHTML"
+          hx-indicator="#triage-save">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+      <label>
+        State
+        <select class="field" name="state" x-model="next">
+          {% for state in states %}
+          <option value="{{ state.value }}" :disabled="!allowed('{{ state.value }}')">
+            {{ state.value | humanize }}
+          </option>
+          {% endfor %}
+        </select>
+        <span class="field-hint">
+          A judgement can only go back to open, never straight to another judgement — relabelling in
+          place would leave a trail reading “it was always this”.
+        </span>
+      </label>
+
+      <div x-show="willReopen" x-cloak>
+        <div class="notice notice--warn">
+          <div>Reopening clears the resolution, so this finding will not keep an automatic one.</div>
+        </div>
+      </div>
+
+      <label>
+        Assignee
+        <select class="field" name="assignee">
+          <option value="">Leave unchanged</option>
+          <option value="none">Unassign</option>
+          <option value="{{ user.id }}">Assign to me</option>
+          {#- A full picker needs GET /users, which is admin-only. Rather than
+              offer analysts a control that 403s, they get themselves. -#}
+          {% for candidate in assignable %}
+          {% if candidate.id != user.id %}
+          <option value="{{ candidate.id }}">{{ candidate.display_name }} ({{ candidate.role.value }})</option>
+          {% endif %}
+          {% endfor %}
+        </select>
+      </label>
+
+      <label>
+        Comment
+        <textarea class="field" name="comment" rows="3" maxlength="2000" x-model="comment"
+                  placeholder="Rotated in Vault, closing"></textarea>
+        <span class="field-hint">
+          Recorded on the events this change writes. Worth more to the next analyst than the
+          transition on its own.
+        </span>
+      </label>
+
+      <div class="actions">
+        <button type="submit" class="btn btn--primary" id="triage-save" :disabled="unchanged">
+          <span class="spinner htmx-indicator" aria-hidden="true"></span>
+          Record decision
+        </button>
+        <span class="empty" x-show="unchanged" x-cloak>Change the state or add a comment.</span>
+      </div>
+    </form>
+  </section>
+  {% else %}
+  <section class="card card-pad">
+    <div class="eyebrow" style="margin-bottom:8px">Triage</div>
+    <p class="empty" style="margin:0">
+      Triage is an analyst decision — it has to have a name attached to it. Your role can read
+      findings but not change them.
+    </p>
+  </section>
+  {% endif %}
+
+  <section class="card section-gap">
+    <div class="card-head"><h2 class="section-title">History</h2></div>
+    <div class="card-pad">
+      {% if finding.events %}
+      <ol class="timeline">
+        {% for event in finding.events %}
+        <li class="{{ 'is-accent' if event.kind.value in ('state_change', 'reopened') }}">
+          <div class="timeline-head">
+            <span class="timeline-kind">{{ event.kind.value | humanize }}</span>
+            <span class="timeline-actor">
+              {#- A null actor is the system: reconciliation auto-resolving, or
+                  ingest applying a suppression. Naming it is the point. -#}
+              {{ user_names.get(event.actor_id, 'system') if event.actor_id else 'system' }}
+            </span>
+            <span class="timeline-ts">{{ event.created_at | dt }}</span>
+          </div>
+          {% if event.from_value or event.to_value %}
+          <div class="timeline-body mono" style="font-size:12.5px">
+            {{ event.from_value or '—' }} → {{ event.to_value or '—' }}
+          </div>
+          {% endif %}
+          {% if event.comment %}
+          <div class="timeline-comment">{{ event.comment }}</div>
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ol>
+      {% else %}
+      <p class="empty" style="margin:0">Nothing has happened to this finding since it was ingested.</p>
+      {% endif %}
+    </div>
+  </section>
+</div>

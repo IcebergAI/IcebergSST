@@ -1,0 +1,45 @@
+{
+  "alpine": {
+    "integrity": "sha384-MKLWq9B+VC0W3U8kDIBEsSu8uCnQ1B0UQpRaB+F7uR5ocXFbymMUKuLRntu5LLdu",
+    "path": "js/vendor/alpine.min.js",
+    "version": "3.15.12"
+  },
+  "fonts": {
+    "files": [
+      "archivo-400-normal-latin-ext.woff2",
+      "archivo-400-normal-latin.woff2",
+      "archivo-500-normal-latin-ext.woff2",
+      "archivo-500-normal-latin.woff2",
+      "archivo-600-normal-latin-ext.woff2",
+      "archivo-600-normal-latin.woff2",
+      "archivo-700-normal-latin-ext.woff2",
+      "archivo-700-normal-latin.woff2",
+      "archivo-800-normal-latin-ext.woff2",
+      "archivo-800-normal-latin.woff2",
+      "jetbrains-mono-400-normal-latin-ext.woff2",
+      "jetbrains-mono-400-normal-latin.woff2",
+      "jetbrains-mono-500-normal-latin-ext.woff2",
+      "jetbrains-mono-500-normal-latin.woff2",
+      "jetbrains-mono-600-normal-latin-ext.woff2",
+      "jetbrains-mono-600-normal-latin.woff2",
+      "jetbrains-mono-700-normal-latin-ext.woff2",
+      "jetbrains-mono-700-normal-latin.woff2",
+      "spectral-400-italic-latin-ext.woff2",
+      "spectral-400-italic-latin.woff2",
+      "spectral-400-normal-latin-ext.woff2",
+      "spectral-400-normal-latin.woff2",
+      "spectral-500-normal-latin-ext.woff2",
+      "spectral-500-normal-latin.woff2",
+      "spectral-600-normal-latin-ext.woff2",
+      "spectral-600-normal-latin.woff2"
+    ],
+    "integrity": "sha384-NnK2fvbtV+eTQChakviXGdiK86cL+/32/V4prLCTCidOOj2Q9+c5KRxen0b2XwTV",
+    "path": "css/vendor/fonts.css",
+    "version": "google-fonts"
+  },
+  "htmx": {
+    "integrity": "sha384-H5SrcfygHmAuTDZphMHqBJLc3FhssKjG7w/CeCpFReSfwBWDTKpkzPP8c+cLsK+V",
+    "path": "js/vendor/htmx.min.js",
+    "version": "2.0.10"
+  }
+}

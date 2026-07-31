@@ -8,12 +8,13 @@ IcebergSST — a secret-scanning platform for non-git enterprise sources (Conflu
 shares). See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the design spec and [`docs/adr/`](./docs/adr/)
 for decision rationale.
 
-**Where the code is:** M0–M2 are built. `packages/core` (config, DB session, secret store,
+**Where the code is:** M0–M3 are built. `packages/core` (config, DB session, secret store,
 redaction, fingerprinting, the SQLModel schema), `packages/detect` (rule packs, the detection
 engine), `packages/connectors` (Confluence, extraction, the sandbox), `apps/api` (auth, sources,
-scans, findings, engine-facing routes, scheduler/maintenance), `apps/engine` (the Dramatiq
-worker), Alembic, and the docker-compose stack all exist and are tested. The HTMX/Alpine web UI
-(M3) and notifications/Helm (M4) are still to come — `docs/backlog.md` tracks those.
+scans, findings, notification channels, engine-facing routes, scheduler/maintenance, and the
+server-rendered web console under `apps/api/src/iceberg_api/web/`), `apps/engine` (the Dramatiq
+worker), Alembic, and the docker-compose stack all exist and are tested. Notification *dispatch*
+and Helm (M4) are still to come — `docs/backlog.md` tracks those.
 
 ## Non-negotiable invariants
 
@@ -28,8 +29,13 @@ change the corresponding ADR:
 3. **Detection logic in code, tuning in data.** Rules live in versioned rule packs
    (`packages/detect`). Suppressions/allowlists live in the DB and are analyst-editable.
 4. **API-first.** The FastAPI OpenAPI schema is the contract; the HTMX/Alpine UI is just another
-   client of the same routes.
+   client of the same routes. Concretely: a web route resolves the RBAC dependency its API
+   counterpart declares and then calls that handler as a function. Nothing under
+   `iceberg_api.web` queries the database (see `docs/web.md`).
 5. **Single-org.** No `tenant_id`, no row-level tenancy.
+6. **No inline script or style in a template.** The console runs under
+   `script-src 'self'` with no `'unsafe-inline'`/`'unsafe-eval'`; Alpine components go in
+   `static/js/tags.js` and server data travels through JSON islands.
 
 ## Stack
 
@@ -53,6 +59,11 @@ Prefer extending these over adding prose:
   configuration, no master key, and stay scalable; `.env.example` documents every variable compose
   interpolates.
 - `apps/api/tests/test_migrations.py` — migrations apply, match the metadata, and reverse.
+- `apps/api/tests/test_web_invariants.py` — no `iceberg_api.web` module imports the ORM or builds a
+  query, every mutating browser route is CSRF-protected, no HTML endpoint appears in the OpenAPI
+  document, and every vendored asset matches its `assets.lock.json` integrity.
+- `apps/api/tests/test_web_shell.py` — no template carries an inline `<script>`/`<style>` or an
+  `onclick=`-style handler, and the CSP never grows `'unsafe-inline'`/`'unsafe-eval'` for scripts.
 
 ## Working style
 

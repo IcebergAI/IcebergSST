@@ -1,0 +1,170 @@
+{#- The reference partial (#54). Everything the conventions describe is here:
+
+    * one root element with a stable id, so the mutation can swap it whole;
+    * a `x-data` naming a component registered in tags.js — no behaviour inline;
+    * server state handed to Alpine through a JSON island, not an attribute;
+    * `hx-post` to a route that answers with *this same fragment* on failure, so
+      a rejected save leaves the analyst's typing on screen;
+    * a `hx-indicator` so a slow save looks like a slow save.
+
+    The credential field is never populated. The API cannot return one and this
+    form must not imply that the value it shows is the one in force.
+-#}
+<div id="source-form" class="card card-pad-lg" x-data="sourceForm">
+  <script type="application/json">{{ island | tojson }}</script>
+
+  {% if error %}
+  <div class="notice notice--crit" role="alert" style="margin-bottom:16px">
+    <div><strong>Not saved.</strong> {{ error }}</div>
+  </div>
+  {% endif %}
+
+  <form class="stack"
+        hx-post="{{ '/sources/' ~ source.id if source else '/sources' }}"
+        hx-target="#source-form"
+        hx-swap="outerHTML"
+        hx-indicator="#source-save">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <div class="field-row">
+      <label>
+        Name
+        <input class="field" name="name" required maxlength="255"
+               value="{{ source.name if source else '' }}"
+               placeholder="confluence-engineering">
+      </label>
+      {% if not source %}
+      <label>
+        Type
+        <select class="field" name="type">
+          {% for source_type in types %}
+          <option value="{{ source_type.value }}">{{ source_type.value }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      {% endif %}
+    </div>
+
+    <label>
+      Base URL
+      <input class="field" name="base_url" required inputmode="url"
+             value="{{ connection.get('base_url', '') }}"
+             placeholder="https://example.atlassian.net/wiki">
+      <span class="field-hint">The instance root. Validated on save, not hours later inside a scan.</span>
+    </label>
+
+    <label>
+      Deployment
+      <select class="field" x-model="deployment">
+        <option value="cloud">Confluence Cloud — email + API token</option>
+        <option value="server">Server / Data Center — personal access token</option>
+      </select>
+      <span class="field-hint">
+        Cloud authenticates as <code>email:token</code>; Server/DC sends the token as a bearer.
+        The account email is what selects between them.
+      </span>
+    </label>
+
+    <label x-show="deployment === 'cloud'" x-cloak>
+      Account email
+      <input class="field" type="email" x-model="email" autocomplete="off"
+             placeholder="scanner@example.com">
+    </label>
+    {#- Bound to the computed value so Server/DC posts an empty email, which the
+        API reads as "omitted" — the flag that selects bearer auth. -#}
+    <input type="hidden" name="email" :value="emailValue">
+
+    <label>
+      API prefix <span class="muted">(optional)</span>
+      <input class="field field-mono" name="api_prefix"
+             value="{{ connection.get('api_prefix', '') }}"
+             placeholder="/wiki/api/v2">
+      <span class="field-hint">Leave blank for Cloud. Server/DC deployments mount the v2 API elsewhere.</span>
+    </label>
+
+    <div>
+      <span class="field-label">Spaces</span>
+      <div class="row-inline" style="margin-bottom:8px">
+        <input class="field field--sm" style="max-width:220px"
+               x-model="spaceDraft" @keydown.enter.prevent="addSpace()"
+               placeholder="ENG" aria-label="Space key to add">
+        <button type="button" class="btn btn--ghost btn--sm" @click="addSpace()">
+          <svg class="btn-ic" aria-hidden="true"><use href="#ic-plus"/></svg>
+          Add
+        </button>
+      </div>
+      <div class="row-inline">
+        <template x-for="key in spaces" :key="key">
+          <span class="tag">
+            <span x-text="key"></span>
+            <button type="button" class="btn-link" style="line-height:1"
+                    @click="removeSpace(key)" :aria-label="'Remove ' + key">×</button>
+            <input type="hidden" name="spaces" :value="key">
+          </span>
+        </template>
+        <span class="empty" x-show="spaces.length === 0">Every space the credential can read.</span>
+      </div>
+    </div>
+
+    <label class="check">
+      <input type="checkbox" name="include_comments"
+             {{ 'checked' if connection.get('include_comments', True) }}>
+      Scan comments
+    </label>
+    <label class="check">
+      <input type="checkbox" name="include_attachments"
+             {{ 'checked' if connection.get('include_attachments', True) }}>
+      Scan text-extractable attachments
+    </label>
+    <label class="check">
+      <input type="checkbox" name="include_personal_spaces"
+             {{ 'checked' if connection.get('include_personal_spaces', False) }}>
+      Include personal spaces
+      <span class="muted">— every user's drafts; a deliberate decision</span>
+    </label>
+
+    {% if source and source.has_credential %}
+    <div>
+      <span class="field-label">Credential</span>
+      <div class="row-inline" x-show="!rotating">
+        <span class="tag tag--c is-ok"><span class="dot"></span>stored</span>
+        <button type="button" class="btn btn--quiet btn--sm" @click="startRotation()">Replace</button>
+      </div>
+      <div x-show="rotating" x-cloak>
+        <input class="field field-mono" type="password" name="credential" autocomplete="new-password"
+               placeholder="New API token — replaces the stored one">
+        <span class="field-hint">
+          Leave this blank to keep the existing credential. There is no way to remove one: a source
+          that cannot authenticate cannot be scanned, so delete the source instead.
+        </span>
+        <button type="button" class="btn btn--quiet btn--sm" style="margin-top:8px"
+                @click="cancelRotation()">Keep the stored credential</button>
+      </div>
+    </div>
+    {% else %}
+    <label>
+      Credential
+      <input class="field field-mono" type="password" name="credential" autocomplete="new-password"
+             {{ 'required' if not source }} placeholder="API token or personal access token">
+      <span class="field-hint">Sealed through the secret store on save. It is never shown again.</span>
+    </label>
+    {% endif %}
+
+    <label class="check">
+      <input type="checkbox" name="enabled" {{ 'checked' if (source.enabled if source else True) }}>
+      Enabled — a disabled source cannot be scanned
+    </label>
+
+    <div class="actions">
+      <button type="submit" class="btn btn--primary" id="source-save">
+        <span class="spinner htmx-indicator" aria-hidden="true"></span>
+        {{ 'Save changes' if source else 'Create source' }}
+      </button>
+      {% if source %}
+      <a class="btn btn--quiet" href="/sources/{{ source.id }}">Cancel</a>
+      {% else %}
+      <a class="btn btn--quiet" href="/sources">Cancel</a>
+      {% endif %}
+    </div>
+  </form>
+</div>

@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+{% block title %}Engines · {{ app_name }}{% endblock %}
+{% block crumb %}Engines{% endblock %}
+
+{% block content %}
+<div class="head-row">
+  <div>
+    <div class="eyebrow">Administration</div>
+    <h1 class="page-title">Engine fleet</h1>
+    <div class="title-rule"></div>
+  </div>
+</div>
+
+<p class="lede section-gap">
+  Engines hold no database credentials. They lease tasks over the API, receive the source credential
+  and the fingerprint pepper for the duration of one task, and post redacted results back. An engine
+  that stops heartbeating loses its leases, and the API redispatches its work.
+</p>
+
+{% if error %}
+<div class="notice notice--crit section-gap" role="alert">
+  <div><strong>Enrolment failed.</strong> {{ error }}</div>
+</div>
+{% endif %}
+
+{% if credential %}
+{#- The one moment this value exists in a response. The API stores only a
+    SHA-256 of it and cannot show it again, which is why this is rendered
+    in place rather than redirected to. -#}
+<section class="card card-pad-lg section-gap" x-data="copyable">
+  <div class="eyebrow eyebrow-accent">Copy this now — it is not shown again</div>
+  <h2 class="section-title" style="margin-top:8px">Token for {{ credential.name }}</h2>
+  <pre class="secret-once" x-ref="value" style="margin-top:12px">{{ credential.token }}</pre>
+  <div class="actions" style="margin-top:12px">
+    <button type="button" class="btn btn--ghost btn--sm" @click="copy()">
+      <span x-text="state === 'copied' ? 'Copied' : (state === 'failed' ? 'Selected — press ⌘C' : 'Copy token')">Copy token</span>
+    </button>
+    <span class="mono muted" style="font-size:12px">ICEBERG_ENGINE_ID={{ credential.engine_id }}</span>
+  </div>
+  <p class="field-hint" style="margin-top:12px">
+    Set <code>ICEBERG_ENGINE_TOKEN</code> and <code>ICEBERG_ENGINE_ID</code> on the engine. Only its
+    SHA-256 hash is stored here; re-enrolling the same name rotates the token and the old one stops
+    working immediately.
+  </p>
+</section>
+{% endif %}
+
+<section class="card section-gap">
+  <div class="card-head"><h2 class="section-title">Fleet</h2></div>
+  {% if engines %}
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Name</th><th>Status</th><th>Version</th><th>Last heartbeat</th><th>Enrolled</th></tr></thead>
+      <tbody>
+        {% for engine in engines %}
+        <tr>
+          <td><strong>{{ engine.name }}</strong></td>
+          <td>
+            <span class="tag tag--c engine-{{ engine.status.value }}"><span class="dot"></span>{{ engine.status.value }}</span>
+          </td>
+          <td class="mono" style="font-size:12px">{{ engine.version or '—' }}</td>
+          <td class="mono nowrap" style="font-size:12px">
+            {{ engine.last_heartbeat_at | ago }}
+            <span class="muted"> · {{ engine.last_heartbeat_at | dt }}</span>
+          </td>
+          <td class="mono nowrap" style="font-size:12px">{{ engine.created_at | dt }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <div class="empty-title">No engines enrolled</div>
+    <p>Nothing will scan until an engine has a token. Enrol one below, or mint the first from the
+      CLI with <code>python -m iceberg_api mint-engine-token --name engine-1</code>.</p>
+  </div>
+  {% endif %}
+</section>
+
+<div class="grid-2 section-gap">
+  <section class="card card-pad-lg">
+    <h2 class="section-title">Enrol an engine</h2>
+    <p class="lede" style="margin-top:8px">
+      An engine cannot enrol itself — otherwise anyone who could reach the API could join the fleet
+      and start leasing tasks, credentials included. Re-using an existing name rotates that engine's
+      token, which is how you replace one you think has leaked.
+    </p>
+    <form class="stack" style="margin-top:16px" hx-post="/engines/register" hx-target="body" hx-swap="outerHTML">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>
+        Engine name
+        <input class="field" name="name" required maxlength="255" placeholder="engine-1">
+      </label>
+      <div class="actions">
+        <button type="submit" class="btn btn--primary">Mint token</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="card card-pad">
+    <div class="eyebrow" style="margin-bottom:10px">Detection surface</div>
+    {% if rules.fleet_consistent %}
+    <div class="notice notice--ok" role="status">
+      <div><strong>Consistent.</strong> Every live engine reports the same rule pack.</div>
+    </div>
+    {% else %}
+    <div class="notice notice--warn" role="status">
+      <div>
+        <strong>Two rule packs are in force.</strong> Normal during a rolling deploy — each finding
+        records the version that produced it.
+      </div>
+    </div>
+    {% endif %}
+    <dl class="kv" style="margin-top:14px">
+      {% for version in rules.rulepack_versions %}
+      <dt>{{ version.version }}</dt>
+      <dd>{{ version.engine_count }} engine(s) · {{ version.rule_count }} rules</dd>
+      {% endfor %}
+      <dt>Threshold</dt><dd class="mono">{{ rules.confidence_threshold }}</dd>
+    </dl>
+    {% if rules.engines_without_a_rulepack %}
+    <p class="field-hint" style="margin-top:10px">
+      Not reporting a pack: {{ rules.engines_without_a_rulepack | join(', ') }}
+    </p>
+    {% endif %}
+    <a class="btn btn--ghost btn--sm" style="margin-top:14px" href="/rules">
+      All rules
+      <svg class="btn-ic" aria-hidden="true"><use href="#ic-arrow"/></svg>
+    </a>
+  </section>
+</div>
+{% endblock %}

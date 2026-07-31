@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}Schedules · {{ app_name }}{% endblock %}
+{% block crumb %}Schedules{% endblock %}
+
+{% block content %}
+<div class="head-row">
+  <div>
+    <div class="eyebrow">Configuration</div>
+    <h1 class="page-title">Schedules</h1>
+    <div class="title-rule"></div>
+  </div>
+</div>
+
+<p class="lede section-gap">
+  A cron cadence attached to a source. Every API replica runs the scheduler; a Postgres advisory
+  lock decides which one actually fires, so a schedule never double-launches.
+</p>
+
+{% if error %}
+<div class="notice notice--crit section-gap" role="alert">
+  <div><strong>Not saved.</strong> {{ error }}</div>
+</div>
+{% endif %}
+
+{% if role == 'admin' %}
+<div class="section-gap" x-data="disclosure" data-open="{{ 'true' if error or not schedules else 'false' }}">
+  <button type="button" class="btn btn--ghost" @click="toggle()" :aria-expanded="open ? 'true' : 'false'">
+    <svg class="btn-ic" aria-hidden="true"><use href="#ic-plus"/></svg>
+    <span x-text="open ? 'Cancel' : 'Add a schedule'">Add a schedule</span>
+  </button>
+
+  <div class="card card-pad-lg" x-show="open" x-cloak style="margin-top:14px" x-data="cronField">
+    <script type="application/json">{{ island | tojson }}</script>
+    <form class="stack" hx-post="/schedules">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>
+        Source
+        <select class="field" name="source_id" required>
+          <option value="">Choose…</option>
+          {% for source in sources %}
+          <option value="{{ source.id }}" {{ 'selected' if selected_source == source.id | string }}>{{ source.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Cron expression
+        <input class="field field-mono" name="cron" required maxlength="128" x-model="cron">
+        <span class="field-hint">Five fields, UTC. Validated when you save, not at the first missed beat.</span>
+      </label>
+      <div class="row-inline">
+        {% for expression, label in presets %}
+        <button type="button" class="btn btn--quiet btn--sm" @click="use('{{ expression }}')">{{ label }}</button>
+        {% endfor %}
+      </div>
+      <label class="check">
+        <input type="checkbox" name="enabled" checked>
+        Enabled
+      </label>
+      <div class="actions">
+        <button type="submit" class="btn btn--primary">Create schedule</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+<form class="filter-bar section-gap" method="get" action="/schedules">
+  <label>
+    Source
+    <select class="field field--sm" name="source_id">
+      <option value="">Any</option>
+      {% for source in sources %}
+      <option value="{{ source.id }}" {{ 'selected' if selected_source == source.id | string }}>{{ source.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button type="submit" class="btn btn--ghost btn--sm">Apply</button>
+  <a class="btn btn--quiet btn--sm" href="/schedules">Clear</a>
+</form>
+
+<section class="card section-gap">
+  {% if schedules %}
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr><th>Source</th><th>Cron</th><th>State</th><th>Next run</th><th>Last run</th>
+        {% if role == 'admin' %}<th class="col-actions">Actions</th>{% endif %}</tr>
+      </thead>
+      <tbody>
+        {% for schedule in schedules %}
+        <tr>
+          <td><a href="/sources/{{ schedule.source_id }}">{{ source_names.get(schedule.source_id, schedule.source_id | short) }}</a></td>
+          <td>
+            {% if role == 'admin' %}
+            <form class="row-inline" hx-post="/schedules/{{ schedule.id }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input class="field field--sm field-mono" style="max-width:150px" name="cron" value="{{ schedule.cron }}">
+              <label class="check" style="font-size:12px">
+                <input type="checkbox" name="enabled" {{ 'checked' if schedule.enabled }}>
+                on
+              </label>
+              <button type="submit" class="btn btn--ghost btn--sm">Save</button>
+            </form>
+            {% else %}
+            <span class="mono">{{ schedule.cron }}</span>
+            {% endif %}
+          </td>
+          <td>
+            <span class="tag tag--c {{ 'is-ok' if schedule.enabled else 'is-neutral' }}"><span class="dot"></span>{{ 'enabled' if schedule.enabled else 'disabled' }}</span>
+          </td>
+          <td class="mono nowrap" style="font-size:12px">{{ schedule.next_run_at | dt }}</td>
+          <td class="mono nowrap" style="font-size:12px">{{ schedule.last_run_at | dt }}</td>
+          {% if role == 'admin' %}
+          <td class="col-actions" x-data="confirmAction">
+            <button type="button" class="btn btn--danger btn--sm" x-show="!armed" @click="arm()">Delete</button>
+            <span class="row-inline" x-show="armed" x-cloak style="justify-content:flex-end">
+              <button class="btn btn--danger btn--sm" hx-delete="/schedules/{{ schedule.id }}">Confirm</button>
+              <button type="button" class="btn btn--quiet btn--sm" @click="disarm()">Cancel</button>
+            </span>
+          </td>
+          {% endif %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <div class="empty-title">No schedules</div>
+    <p>Every source here is scanned on demand only.</p>
+  </div>
+  {% endif %}
+</section>
+
+{% if next_cursor %}
+<div class="pager">
+  <span class="pager-count">Showing one page</span>
+  <a class="btn btn--ghost btn--sm" href="/schedules?cursor={{ next_cursor | urlencode }}">
+    Next page
+    <svg class="btn-ic" aria-hidden="true"><use href="#ic-arrow"/></svg>
+  </a>
+</div>
+{% endif %}
+{% endblock %}

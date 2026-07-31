@@ -7,10 +7,11 @@ Most secret-scanning tooling is git-centric. IcebergSST targets the *non-git* lo
 credentials quietly accumulate — **Confluence**, **Jira**, and **network file shares** — with an
 API-first management plane and horizontally scalable, isolated scanner engines.
 
-> ⚠️ **Status: M0 foundations.** The workspace, core package (config, secret store, redaction,
-> fingerprinting, schema), and the local container stack exist; the API routes, detection engine,
-> connectors, and UI do not yet. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`docs/`](./docs/)
-> for the spec, and the GitHub milestones/issues for what is left.
+> ⚠️ **Status: M0–M3 built.** The core package, the control-plane API, the detection engine, the
+> Confluence connector, the engine worker, the local container stack, and the web console all exist
+> and are tested. Notification *dispatch* and the Helm chart (M4) do not yet. See
+> [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`docs/`](./docs/) for the spec, and the GitHub
+> milestones/issues for what is left.
 
 ## What it does
 
@@ -30,7 +31,7 @@ API-first management plane and horizontally scalable, isolated scanner engines.
 |-------|------------|
 | Control-plane API | FastAPI (API-first; OpenAPI is the contract) |
 | ORM / database | SQLModel over PostgreSQL |
-| Web UI | Server-rendered HTML driven by HTMX + Alpine.js |
+| Web console | Server-rendered Jinja + HTMX + Alpine, under a strict CSP ([`docs/web.md`](./docs/web.md)) |
 | Job queue | Redis + Dramatiq |
 | Scanner engines | Separate Dramatiq worker processes; consume jobs from Redis, **POST results back to the API** (no database credentials) |
 | Auth | OIDC/SSO + RBAC (admin / analyst / viewer) |
@@ -51,6 +52,10 @@ make scale N=3  # more engine replicas
 make down       # stop; `make destroy` also drops the data volume
 ```
 
+The console is then at <http://localhost:8000/> and the OpenAPI docs at `/docs`. Signing in needs
+OIDC configured in `.env`; the first person to sign in lands as a viewer unless
+`ICEBERG_BOOTSTRAP_ADMIN_SUBJECT` names them.
+
 `make check` runs what CI runs: `ruff`, `mypy`, and `pytest`. `make help` lists every target.
 
 ## Repository layout
@@ -61,7 +66,8 @@ apps/engine     Dramatiq scanner worker
 packages/core   shared models, config, secret-store, fingerprinting, redaction
 packages/detect rule packs + detection engine
 packages/connectors  connector interface + Confluence (Jira/SMB later)
-web/            HTMX templates + Alpine components (M3)
+apps/api/…/web  the console: Jinja templates, Alpine components, design system
+web/            frontend asset vendoring (no Node toolchain)
 deploy/compose  docker-compose development stack
 deploy/docker   role Dockerfiles (api, engine)
 deploy/helm     Helm chart (M4)

@@ -136,6 +136,18 @@ class EngineSettings(CoreSettings):
 
 
 @lru_cache(maxsize=1)
+def get_core_settings() -> CoreSettings:
+    """The settings every role shares, and the only ones with no required field.
+
+    Exists for code that needs `environment` but must not require a database URL
+    to answer — the browser security headers, which key HSTS and
+    ``upgrade-insecure-requests`` off it and are built once per process before
+    anything has established that this process is the API role.
+    """
+    return CoreSettings()
+
+
+@lru_cache(maxsize=1)
 def get_api_settings() -> ApiSettings:
     """Process-wide API settings, read from the environment on first use."""
     return ApiSettings()  # type: ignore[call-arg]  # values come from the environment
@@ -155,6 +167,7 @@ def get_engine_settings() -> EngineSettings:
 
 def reset_settings_cache() -> None:
     """Drop cached settings. For tests that manipulate the environment."""
+    get_core_settings.cache_clear()
     get_api_settings.cache_clear()
     get_secret_store_settings.cache_clear()
     get_engine_settings.cache_clear()

@@ -127,7 +127,31 @@ are noise. A finding reported without a confidence score is kept: `null` means t
 judge it, which is not the same as judging it noise.
 
 ## Notifications
-- `GET /notifications/channels` · `POST …` · `PATCH/DELETE /notifications/channels/{id}`
+- `GET /notifications/channels` · `POST …` · `GET/PATCH/DELETE /notifications/channels/{id}`
+
+**Admin-only, every route.** A webhook channel carries redacted snippets and
+resource locations out of the deployment, so who may configure one is the control
+(docs/security.md § Notification egress), and every mutation is audited with the
+destination it points at — never with the secret.
+
+The `config` blob is validated per channel type: a webhook needs an absolute
+`http(s)` URL and may carry non-secret `headers`; an email channel needs
+recipients. The header names browsers and proxies use for authentication
+(`Authorization`, `Proxy-Authorization`, `Cookie`) are **refused**, because
+config is stored as plain JSON and a token in one would be a plaintext secret at
+rest — pointing the operator at `secret`, which is sealed through the secret
+store (ADR 0007), is the whole reason the field exists.
+
+A channel secret is write-only, exactly like a source credential: supplying one
+on `POST`/`PATCH` seals it, no response carries the plaintext *or* the sealed
+ref, and `has_secret` says whether one exists. Editing `config` keeps the sealed
+ref — fixing a typo in a URL is not a request to drop the signing key. There is
+no way to remove a secret and no way to change a channel's `type`: a config
+validated as an email list is not a webhook config, so the honest operation is a
+replacement.
+
+Dispatch itself is M4. These routes are the configuration surface the console
+drives; the delivery loop reads these rows.
 
 ## Engine-facing (per-engine token auth)
 These are the **only** routes that accept results. Lease semantics are defined in ADR 0009.
@@ -170,3 +194,6 @@ engine token is ignored everywhere else.
   shifts between requests. A malformed cursor is a `400`, never a wrong page.
 - **401 vs 403:** unauthenticated requests get `401`; authenticated requests with the wrong role, or
   a missing CSRF token, get `403`. Failure messages never say *which* check failed.
+- **The console is a client of these routes.** The HTML surface at the application root calls these
+  handlers directly rather than reimplementing them, so a change here changes the UI too. It is
+  excluded from this schema on purpose — see [`docs/web.md`](./web.md).

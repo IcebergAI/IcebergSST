@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}Users · {{ app_name }}{% endblock %}
+{% block crumb %}Users{% endblock %}
+
+{% block content %}
+<div class="head-row">
+  <div>
+    <div class="eyebrow">Administration</div>
+    <h1 class="page-title">Users &amp; roles</h1>
+    <div class="title-rule"></div>
+  </div>
+</div>
+
+<p class="lede section-gap">
+  Accounts are created by the identity provider on first sign-in and land as <strong>viewer</strong>
+  — somebody has an account because the IdP knows them, not because anyone decided what they may do.
+  Roles are assigned here and never taken from a token claim, so no IdP change can promote anyone.
+  Every change below writes an audit event.
+</p>
+
+{% if error %}
+<div class="notice notice--crit section-gap" role="alert">
+  <div><strong>Not changed.</strong> {{ error }}</div>
+</div>
+{% endif %}
+
+<div class="notice section-gap">
+  <div>
+    <strong>You cannot change your own account.</strong> It closes the obvious escalation and removes
+    every path to locking the last administrator out. A legitimate change to your own role is one
+    another admin makes for you.
+  </div>
+</div>
+
+<section class="card section-gap">
+  {% if users %}
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr><th>Person</th><th>Subject</th><th>Role</th><th>State</th><th>Last sign-in</th><th class="col-actions">Change</th></tr>
+      </thead>
+      <tbody>
+        {% for account in users %}
+        <tr>
+          <td>
+            <strong>{{ account.display_name }}</strong>
+            <div class="row-sub">{{ account.email }}</div>
+          </td>
+          <td class="mono truncate" style="font-size:11.5px;max-width:200px">{{ account.oidc_subject }}</td>
+          <td><span class="role-chip">{{ account.role.value }}</span></td>
+          <td>
+            {% if account.disabled %}
+            <span class="tag tag--c is-crit"><span class="dot"></span>disabled</span>
+            {% else %}
+            <span class="tag tag--c is-ok"><span class="dot"></span>active</span>
+            {% endif %}
+          </td>
+          <td class="mono nowrap" style="font-size:12px">{{ account.last_login_at | dt }}</td>
+          <td class="col-actions">
+            {% if account.id == user.id %}
+            <span class="empty">that is you</span>
+            {% else %}
+            <form class="row-inline" style="justify-content:flex-end" hx-post="/users/{{ account.id }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <select class="field field--sm" name="role" style="max-width:120px" aria-label="Role for {{ account.display_name }}">
+                {% for role_option in roles %}
+                <option value="{{ role_option.value }}" {{ 'selected' if account.role == role_option }}>{{ role_option.value }}</option>
+                {% endfor %}
+              </select>
+              <label class="check" style="font-size:12px">
+                <input type="checkbox" name="disabled" {{ 'checked' if account.disabled }}>
+                disabled
+              </label>
+              <button type="submit" class="btn btn--ghost btn--sm">Apply</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <div class="empty-title">No accounts yet</div>
+    <p>The first person to sign in through the identity provider gets one.</p>
+  </div>
+  {% endif %}
+</section>
+
+{% if next_cursor %}
+<div class="pager">
+  <span class="pager-count">Showing one page</span>
+  <a class="btn btn--ghost btn--sm" href="/users?cursor={{ next_cursor | urlencode }}">
+    Next page
+    <svg class="btn-ic" aria-hidden="true"><use href="#ic-arrow"/></svg>
+  </a>
+</div>
+{% endif %}
+{% endblock %}

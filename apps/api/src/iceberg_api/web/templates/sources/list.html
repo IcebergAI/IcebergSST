@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Sources · {{ app_name }}{% endblock %}
+{% block crumb %}Sources{% endblock %}
+
+{% block content %}
+<div class="head-row">
+  <div>
+    <div class="eyebrow">Configuration</div>
+    <h1 class="page-title">Sources</h1>
+    <div class="title-rule"></div>
+  </div>
+</div>
+
+<p class="lede section-gap">
+  Where IcebergSST looks. Each source carries its own credential, sealed through the secret store —
+  no response ever returns it, and rotating one is an audited action separate from editing the source.
+</p>
+
+{% if role == 'admin' %}
+{#- Creating is demoted behind a disclosure so the list is the page, not the
+    form. `data-open` lets the server decide the initial state. -#}
+<div class="section-gap" x-data="disclosure" data-open="{{ 'true' if not sources else 'false' }}">
+  <button type="button" class="btn btn--ghost" @click="toggle()" :aria-expanded="open ? 'true' : 'false'">
+    <svg class="btn-ic" aria-hidden="true"><use href="#ic-plus"/></svg>
+    <span x-text="open ? 'Cancel' : 'Add a source'">Add a source</span>
+  </button>
+  <div x-show="open" x-cloak style="margin-top:14px">
+    {#- The partial reads these names from the surrounding context; `with` is
+        what supplies them when a page embeds it rather than a route rendering
+        it on its own. -#}
+    {% with source = form.source, connection = form.connection, types = form.types,
+            island = form.island, error = none %}
+      {% include "partials/source_form.html" %}
+    {% endwith %}
+  </div>
+</div>
+{% endif %}
+
+<section class="card section-gap">
+  {% if sources %}
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th><th>Type</th><th>Where</th><th>Credential</th><th>State</th><th>Added</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for source in sources %}
+        <tr>
+          <td><a href="/sources/{{ source.id }}"><strong>{{ source.name }}</strong></a></td>
+          <td><span class="tag">{{ source.type.value }}</span></td>
+          <td class="truncate mono" style="font-size:12px;max-width:340px">{{ source.connection.get('base_url', '—') }}</td>
+          <td>
+            {% if source.has_credential %}
+            <span class="tag tag--c is-ok"><span class="dot"></span>stored</span>
+            {% else %}
+            <span class="tag tag--c is-warn"><span class="dot"></span>missing</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if source.enabled %}
+            <span class="tag tag--c is-ok"><span class="dot"></span>enabled</span>
+            {% else %}
+            <span class="tag tag--c is-neutral"><span class="dot"></span>disabled</span>
+            {% endif %}
+          </td>
+          <td class="mono nowrap" style="font-size:12px">{{ source.created_at | dt }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <div class="empty-title">No sources yet</div>
+    <p>
+      {% if role == 'admin' %}
+      Add a Confluence instance above. Nothing is scanned until a source exists and a scan is launched.
+      {% else %}
+      An administrator configures the systems this deployment scans.
+      {% endif %}
+    </p>
+  </div>
+  {% endif %}
+</section>
+
+{% if next_cursor %}
+<div class="pager">
+  <span class="pager-count">Showing one page</span>
+  <a class="btn btn--ghost btn--sm" href="/sources?cursor={{ next_cursor | urlencode }}">
+    Next page
+    <svg class="btn-ic" aria-hidden="true"><use href="#ic-arrow"/></svg>
+  </a>
+</div>
+{% endif %}
+{% endblock %}
