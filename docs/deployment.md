@@ -48,9 +48,13 @@ is a shared trust surface (`docs/security.md`).
   secret-store backend selection (env-key vs Vault).
 
 ## Migrations
-Alembic, configured at `apps/api/alembic.ini`. Only the **api** role runs migrations (it owns the
-schema); engines never touch the DB. In the compose stack: `make migrate`. Directly:
-`uv run alembic -c apps/api/alembic.ini upgrade head`, which reads `ICEBERG_DATABASE_URL`.
+Alembic, configured at `apps/api/src/iceberg_api/alembic.ini` — inside the package, so it ships in
+the wheel with the revisions it points at and the api image can find it without a source tree.
+Only the **api** role runs migrations (it owns the schema); engines never touch the DB.
+
+`python -m iceberg_api migrate` is the entry point everywhere: `make migrate` in the compose
+stack, the pre-upgrade `Job` in Helm, and `uv run python -m iceberg_api migrate` locally. All of
+them read `ICEBERG_DATABASE_URL`.
 
 ## Scaling model
 - Throughput scales by adding **engine** replicas — more Dramatiq consumers pulling scan tasks

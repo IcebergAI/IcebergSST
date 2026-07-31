@@ -16,6 +16,10 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never
 
+# The builder works at the same path the runtime stage will use. A venv is not
+# relocatable: uv writes `#!/app/.venv/bin/python` into every console script, so
+# building at /src and copying to /app leaves `uvicorn` with a shebang pointing at
+# a directory that does not exist — "exec: no such file or directory" at start.
 WORKDIR /app
 
 # Dependencies first, from the lock file and manifests alone: editing application
@@ -27,11 +31,15 @@ COPY apps/engine/pyproject.toml apps/engine/
 COPY packages/core/pyproject.toml packages/core/
 COPY packages/detect/pyproject.toml packages/detect/
 COPY packages/connectors/pyproject.toml packages/connectors/
-RUN uv sync --locked --no-dev --no-install-workspace --package iceberg-api
+RUN uv sync --locked --no-dev --no-editable --no-install-workspace --package iceberg-api
 
 COPY apps/ apps/
 COPY packages/ packages/
-RUN uv sync --locked --no-dev --package iceberg-api
+# --no-editable installs the workspace packages into the venv proper rather than
+# linking back at /src, so the venv is self-contained and the runtime stage can
+# take it alone. Templates, static assets, migrations and alembic.ini all live
+# under src/iceberg_api/ and travel in the wheel with it.
+RUN uv sync --locked --no-dev --no-editable --package iceberg-api
 
 
 FROM python:3.14-slim AS runtime
@@ -44,7 +52,9 @@ ENV PYTHONUNBUFFERED=1 \
 RUN useradd --create-home --uid 10001 iceberg
 
 WORKDIR /app
-COPY --from=builder --chown=iceberg:iceberg /app /app
+# The venv and nothing else: no source tree, no uv, no build dependencies. What
+# is not in the image cannot be imported by accident or read by an attacker.
+COPY --from=builder --chown=iceberg:iceberg /app/.venv /app/.venv
 
 USER iceberg
 EXPOSE 8000

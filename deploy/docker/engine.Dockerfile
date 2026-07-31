@@ -17,21 +17,24 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never
 
+# Same path as the runtime stage — a venv is not relocatable. See api.Dockerfile.
 WORKDIR /app
 
 # Dependency layer first — see api.Dockerfile for why. --package iceberg-engine
-# means the api's dependencies (and its Postgres driver) are not installed here.
+# means the api's dependencies are not installed here: no Postgres driver, no
+# alembic, and no ORM, because iceberg-core carries sqlmodel in its `db` extra
+# and only apps/api asks for it.
 COPY pyproject.toml uv.lock ./
 COPY apps/api/pyproject.toml apps/api/
 COPY apps/engine/pyproject.toml apps/engine/
 COPY packages/core/pyproject.toml packages/core/
 COPY packages/detect/pyproject.toml packages/detect/
 COPY packages/connectors/pyproject.toml packages/connectors/
-RUN uv sync --locked --no-dev --no-install-workspace --package iceberg-engine
+RUN uv sync --locked --no-dev --no-editable --no-install-workspace --package iceberg-engine
 
 COPY apps/ apps/
 COPY packages/ packages/
-RUN uv sync --locked --no-dev --package iceberg-engine
+RUN uv sync --locked --no-dev --no-editable --package iceberg-engine
 
 
 FROM python:3.14-slim AS runtime
@@ -44,7 +47,10 @@ ENV PYTHONUNBUFFERED=1 \
 RUN useradd --create-home --uid 10001 iceberg
 
 WORKDIR /app
-COPY --from=builder --chown=iceberg:iceberg /app /app
+# The venv alone — see api.Dockerfile. Here it also carries the ADR 0002
+# boundary: deploy/docker/verify-images.sh proves no database package is
+# importable in this image, which is only true because nothing copies one in.
+COPY --from=builder --chown=iceberg:iceberg /app/.venv /app/.venv
 
 USER iceberg
 EXPOSE 9191

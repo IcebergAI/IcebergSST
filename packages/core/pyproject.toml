@@ -3,17 +3,26 @@ name = "iceberg-core"
 version = "0.1.0"
 description = "Shared models, config, secret-store, fingerprinting, and redaction utilities."
 requires-python = ">=3.14"
+# Deliberately no ORM here. Everything in this list is needed by both roles —
+# config, logging, secret store, redaction, fingerprinting. `iceberg_core.db` and
+# `iceberg_core.models` are api-role modules and their dependency lives in the
+# `db` extra below, so an engine image cannot even import an ORM (ADR 0002).
 dependencies = [
     "cryptography>=49.0.0",
     "prometheus-client>=0.25.0",
     "pydantic-settings>=2.13.0",
-    "sqlmodel>=0.0.39",
     "structlog>=26.1.0",
 ]
 
 [project.optional-dependencies]
-# Only needed to load the pytest plugin below; production images skip this.
-testing = ["pytest>=9.1.1"]
+# The api role's half of this package: iceberg_core.db and iceberg_core.models.
+# apps/api depends on iceberg-core[db]; apps/engine depends on plain iceberg-core,
+# which is what keeps sqlalchemy out of the engine image entirely rather than
+# merely unused — deploy/docker/verify-images.sh probes for it.
+db = ["sqlmodel>=0.0.39"]
+# Only needed to load the pytest plugin below; production images skip this. The
+# shared fixtures are database fixtures, so this implies the db extra.
+testing = ["iceberg-core[db]", "pytest>=9.1.1"]
 
 [project.entry-points.pytest11]
 # Publishes iceberg_core.testing so every workspace member gets the shared

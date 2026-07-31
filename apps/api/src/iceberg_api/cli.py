@@ -16,8 +16,11 @@ import sys
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 
 import structlog
+from alembic import command
+from alembic.config import Config
 from iceberg_core.config import get_api_settings
 from iceberg_core.db import session_scope
 from iceberg_core.logging import configure_logging
@@ -55,7 +58,35 @@ def _build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("reclaim", help="return expired-lease tasks to the queue")
     commands.add_parser("scheduler-tick", help="run one scheduler round now")
+
+    migrate_parser = commands.add_parser("migrate", help="apply migrations up to a revision")
+    migrate_parser.add_argument(
+        "--revision",
+        default="head",
+        help="target revision (default: head; accepts e.g. -1 to step back)",
+    )
     return parser
+
+
+#: The packaged alembic config, resolved against this module rather than the
+#: working directory. The api image installs the package and copies no source
+#: tree, so a repo-relative path would be correct in a checkout and wrong in
+#: every container.
+ALEMBIC_INI = Path(__file__).resolve().parent / "alembic.ini"
+
+
+def alembic_config() -> Config:
+    """The alembic config as every role should reach it.
+
+    One loader for the compose `make migrate`, the Helm pre-upgrade Job, and the
+    migration tests, so none of them can drift onto a different script location.
+    """
+    return Config(str(ALEMBIC_INI))
+
+
+def migrate(revision: str = "head") -> None:
+    """Apply migrations. The api role owns the schema; nothing else runs this."""
+    command.upgrade(alembic_config(), revision)
 
 
 def mint_engine_token(name: str, version: str | None) -> tuple[uuid.UUID, str]:
@@ -127,6 +158,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"skipped={len(result.skipped)}",
                 file=sys.stderr,
             )
+        case "migrate":
+            migrate(args.revision)
+            print(f"migrated to {args.revision}", file=sys.stderr)
     return 0
 
 

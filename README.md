@@ -118,7 +118,9 @@ The console is then at <http://localhost:8000/> and the OpenAPI docs at `/docs`.
 OIDC configured in `.env`; the first person to sign in lands as a viewer unless
 `ICEBERG_BOOTSTRAP_ADMIN_SUBJECT` names them.
 
-`make check` runs what CI runs: `ruff`, `mypy`, and `pytest`. `make help` lists every target.
+`make check` runs what CI runs: `ruff`, `mypy`, and `pytest`. `make images-verify` builds both role
+images and asserts the properties they must have — both entrypoints serve, both run non-root, and
+no database package is importable in the engine image (ADR 0002). `make help` lists every target.
 
 ## Repository layout
 

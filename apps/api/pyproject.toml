@@ -8,8 +8,15 @@ dependencies = [
     "alembic>=1.18.5",
     # Cron expression parsing for the schedule model and scheduler tick.
     "croniter>=6.0.0",
+    # iceberg_api.dispatch enqueues task ids on the broker (ADR 0009). Declared
+    # here because the api image installs this package alone: leaning on the
+    # workspace having iceberg-engine installed builds an image that imports
+    # dramatiq and does not have it.
+    "dramatiq[redis]>=2.2.0",
     "fastapi>=0.139.2",
-    "iceberg-core",
+    # [db] pulls in the ORM: the api role is the only one that owns the schema,
+    # so it is the only one that declares a dependency on it (ADR 0002).
+    "iceberg-core[db]",
     # The M3 web UI's template engine. Imported directly by iceberg_api.web —
     # declared rather than leaned on transitively through fastapi's extras.
     "jinja2>=3.1.6",
