@@ -7,6 +7,7 @@ import pytest
 from conftest import RecordingDispatcher
 from iceberg_api import maintenance
 from iceberg_api.scans import service
+from iceberg_core.config import ApiSettings
 from iceberg_core.db import set_db_engine
 from iceberg_core.enums import (
     ScanStatus,
@@ -24,6 +25,8 @@ from iceberg_core.models import (
     Source,
     Suppression,
 )
+from iceberg_core.secrets import SecretStore
+from pydantic import SecretStr
 from sqlalchemy import Engine as SAEngine
 from sqlmodel import Session, select
 
@@ -34,6 +37,25 @@ def process_engine_fixture(db_engine: SAEngine) -> Iterator[None]:
     set_db_engine(db_engine)
     yield
     set_db_engine(None)
+
+
+@pytest.fixture(name="run_round")
+def run_round_fixture(secret_store: SecretStore) -> Callable[..., None]:
+    """One maintenance round with settings supplied rather than read from the env.
+
+    A round delivers queued notifications (#60), so it needs settings and a secret
+    store. Injecting them keeps these tests from depending on a configured
+    deployment — and from needing an SMTP relay to prove the scheduler fires.
+    """
+    settings = ApiSettings(
+        database_url="postgresql+psycopg://unused/unused",
+        master_key=SecretStr("unused"),
+    )
+
+    def run(dispatcher: RecordingDispatcher, **kwargs: object) -> None:
+        maintenance.run_once(dispatcher, settings=settings, store=secret_store, **kwargs)  # type: ignore[arg-type]
+
+    return run
 
 
 def _source(session: Session, name: str = "confluence-prod") -> Source:
@@ -48,7 +70,9 @@ def _source(session: Session, name: str = "confluence-prod") -> Source:
 
 
 def test_a_round_launches_due_scans_and_advances_the_schedule(
-    session: Session, dispatcher: RecordingDispatcher
+    session: Session,
+    dispatcher: RecordingDispatcher,
+    run_round: Callable[..., None],
 ) -> None:
     source = _source(session)
     schedule = Schedule(
@@ -59,7 +83,7 @@ def test_a_round_launches_due_scans_and_advances_the_schedule(
     session.add(schedule)
     session.commit()
 
-    maintenance.run_once(dispatcher)
+    run_round(dispatcher)
 
     scans = session.exec(select(Scan)).all()
     assert len(scans) == 1
@@ -69,7 +93,9 @@ def test_a_round_launches_due_scans_and_advances_the_schedule(
     assert schedule.last_run_at is not None
 
 
-def test_a_round_reclaims_expired_leases(session: Session, dispatcher: RecordingDispatcher) -> None:
+def test_a_round_reclaims_expired_leases(
+    session: Session, dispatcher: RecordingDispatcher, run_round: Callable[..., None]
+) -> None:
     source = _source(session)
     scan = service.launch_scan(session, source, trigger=ScanTrigger.MANUAL, dispatcher=dispatcher)
     task = session.exec(select(ScanTask).where(ScanTask.scan_id == scan.id)).one()
@@ -79,7 +105,7 @@ def test_a_round_reclaims_expired_leases(session: Session, dispatcher: Recording
     service.claim_task(session, task.id, engine.id, lease_seconds=1)
     dispatcher.enqueued.clear()
 
-    maintenance.run_once(dispatcher, now=datetime.now(UTC) + timedelta(minutes=10))
+    run_round(dispatcher, now=datetime.now(UTC) + timedelta(minutes=10))
 
     session.refresh(task)
     assert task.status is ScanTaskStatus.QUEUED
@@ -87,7 +113,9 @@ def test_a_round_reclaims_expired_leases(session: Session, dispatcher: Recording
 
 
 def test_a_source_with_an_active_scan_is_skipped_not_double_scanned(
-    session: Session, dispatcher: RecordingDispatcher
+    session: Session,
+    dispatcher: RecordingDispatcher,
+    run_round: Callable[..., None],
 ) -> None:
     """The cadence said "scan now" and one is already running; the next beat will do."""
     source = _source(session)
@@ -100,7 +128,7 @@ def test_a_source_with_an_active_scan_is_skipped_not_double_scanned(
     session.add(schedule)
     session.commit()
 
-    maintenance.run_once(dispatcher)
+    run_round(dispatcher)
 
     assert len(session.exec(select(Scan)).all()) == 1
     session.refresh(schedule)
@@ -109,7 +137,9 @@ def test_a_source_with_an_active_scan_is_skipped_not_double_scanned(
 
 
 def test_a_disabled_source_is_not_scanned_on_its_cadence(
-    session: Session, dispatcher: RecordingDispatcher
+    session: Session,
+    dispatcher: RecordingDispatcher,
+    run_round: Callable[..., None],
 ) -> None:
     source = _source(session)
     source.enabled = False
@@ -121,13 +151,15 @@ def test_a_disabled_source_is_not_scanned_on_its_cadence(
     session.add(schedule)
     session.commit()
 
-    maintenance.run_once(dispatcher)
+    run_round(dispatcher)
 
     assert session.exec(select(Scan)).all() == []
 
 
 def test_a_round_redispatches_a_queued_task_whose_message_was_lost(
-    session: Session, dispatcher: RecordingDispatcher
+    session: Session,
+    dispatcher: RecordingDispatcher,
+    run_round: Callable[..., None],
 ) -> None:
     """A crash between commit and enqueue leaves a queued row with no message;
     the sweep is the only thing that will ever deliver it."""
@@ -137,17 +169,19 @@ def test_a_round_redispatches_a_queued_task_whose_message_was_lost(
     dispatcher.enqueued.clear()  # the launch enqueue is the message that "got lost"
 
     later = datetime.now(UTC) + timedelta(minutes=10)
-    maintenance.run_once(dispatcher, now=later)
+    run_round(dispatcher, now=later)
 
     assert dispatcher.enqueued == [task.id]
     # Paced: the same round does not spam the queue on the next beat.
     dispatcher.enqueued.clear()
-    maintenance.run_once(dispatcher, now=later + timedelta(seconds=30))
+    run_round(dispatcher, now=later + timedelta(seconds=30))
     assert dispatcher.enqueued == []
 
 
 def test_a_round_finalizes_a_scan_stranded_by_a_crash(
-    session: Session, dispatcher: RecordingDispatcher
+    session: Session,
+    dispatcher: RecordingDispatcher,
+    run_round: Callable[..., None],
 ) -> None:
     """All tasks terminal but the scan still active: the finalize sweep settles it,
     so the source is not blocked forever by the one-active-scan index."""
@@ -157,7 +191,7 @@ def test_a_round_finalizes_a_scan_stranded_by_a_crash(
     service.complete_task(session, task, status=ScanTaskStatus.FAILED, error="engine died")
     session.commit()  # ...and the follow-up finalisation never ran
 
-    maintenance.run_once(dispatcher)
+    run_round(dispatcher)
 
     session.refresh(scan)
     assert scan.status is ScanStatus.FAILED
@@ -167,6 +201,7 @@ def test_a_round_finalizes_a_scan_stranded_by_a_crash(
 def test_a_round_releases_findings_whose_suppression_expired(
     session: Session,
     dispatcher: RecordingDispatcher,
+    run_round: Callable[..., None],
     make_finding: Callable[..., Finding],
 ) -> None:
     """Expiry is a property of the clock, so it cannot wait for the next scan.
@@ -188,7 +223,7 @@ def test_a_round_releases_findings_whose_suppression_expired(
     session.add(finding)
     session.commit()
 
-    maintenance.run_once(dispatcher)
+    run_round(dispatcher)
 
     session.refresh(finding)
     released = session.get(Finding, finding.id)
@@ -200,6 +235,7 @@ def test_a_round_releases_findings_whose_suppression_expired(
 def test_a_lapsed_suppression_hands_over_to_another_that_still_covers_the_finding(
     session: Session,
     dispatcher: RecordingDispatcher,
+    run_round: Callable[..., None],
     make_finding: Callable[..., Finding],
 ) -> None:
     """A finding covered by both an expiring rule and a permanent one must stay
@@ -224,7 +260,7 @@ def test_a_lapsed_suppression_hands_over_to_another_that_still_covers_the_findin
     session.add(finding)
     session.commit()
 
-    maintenance.run_once(dispatcher)
+    run_round(dispatcher)
 
     session.refresh(finding)
     assert finding.suppressed_at is not None  # still hidden

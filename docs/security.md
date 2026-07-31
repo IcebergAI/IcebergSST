@@ -77,6 +77,22 @@ the header names that carry authentication (`Authorization`, `Proxy-Authorizatio
 text in `notification_channel.config` would be precisely the finding this product exists to report
 in other people's systems.
 
+At **dispatch** time (see [`notifications.md`](./notifications.md) for the full contract) the same
+boundary applies to what goes over the wire:
+
+- The payload is built from an **explicit field list**, never by serialising the ORM row, so a new
+  column on `Finding` cannot silently start being exported. It carries the redacted snippet
+  (ADR 0004) and the peppered hash — nothing reversible — and no analyst notes or assignee.
+- Requests are **signed** (`X-Iceberg-Signature`, HMAC-SHA256 over `timestamp.body`) when the
+  channel has a secret, so a receiver can distinguish a real announcement from anything else that
+  can reach its URL. The timestamp is inside the MAC, so replay has a bounded window.
+- **Redirects are not followed.** A `302` would relocate where findings are sent without anyone
+  editing the channel, so it is a failed delivery.
+- Response bodies are never read into an error message or a log line: they are somebody else's
+  data.
+- Email is sent as **plain text**. Resource locators come from scanned systems, so an HTML message
+  would carry attacker-influenced content into whatever client opens it.
+
 ## The browser surface (M3)
 The console renders attacker-influenced strings — Confluence page titles, resource paths, redacted
 snippets — which makes it the highest-value stored-XSS target in the deployment. The mitigations,

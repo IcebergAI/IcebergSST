@@ -24,9 +24,11 @@ from datetime import UTC, datetime
 import structlog
 from iceberg_core.config import ApiSettings, get_api_settings
 from iceberg_core.db import session_scope
+from iceberg_core.secrets import SecretStore, build_secret_store
 
 from iceberg_api import suppressions
 from iceberg_api.dispatch import Dispatcher, build_dispatcher
+from iceberg_api.notifications import dispatch as notification_dispatch
 from iceberg_api.scans import service
 from iceberg_api.scheduler import postgres_advisory_lock, tick
 from iceberg_api.scheduler_launcher import build_launcher
@@ -34,8 +36,14 @@ from iceberg_api.scheduler_launcher import build_launcher
 logger = structlog.get_logger()
 
 
-def run_once(dispatcher: Dispatcher, *, now: datetime | None = None) -> None:
-    """One maintenance round: schedules, reclaim, then the safety sweeps.
+def run_once(
+    dispatcher: Dispatcher,
+    *,
+    now: datetime | None = None,
+    settings: ApiSettings | None = None,
+    store: SecretStore | None = None,
+) -> None:
+    """One maintenance round: schedules, reclaim, the safety sweeps, then alerts.
 
     Leadership is held on a session of its own for the whole round. Holding it on
     the working session would not work: ``pg_try_advisory_xact_lock`` releases at
@@ -43,8 +51,13 @@ def run_once(dispatcher: Dispatcher, *, now: datetime | None = None) -> None:
     gone after the first schedule fired, and every replica would run the rest of
     the round at once. The guard session runs no other statements, so its
     transaction — and the lock — spans everything below.
+
+    ``settings``/``store`` are injectable so a test can drive a round without a
+    configured SMTP relay; both default to the process configuration.
     """
     at = now or datetime.now(UTC)
+    resolved = settings or get_api_settings()
+    secret_store = store or build_secret_store(resolved)
     with session_scope() as guard:
         if not postgres_advisory_lock(guard):
             # Another replica is doing this round — the whole round, sweeps
@@ -69,6 +82,12 @@ def run_once(dispatcher: Dispatcher, *, now: datetime | None = None) -> None:
         # that source, which for a weekly cadence is six days of silence (ADR 0008).
         with session_scope() as db:
             suppressions.release_lapsed(db, now=at)
+        # Announcements queued by reconciliation (#60). Sending here rather than at
+        # ingest means a webhook that hangs for its full timeout delays an alert
+        # instead of an engine's result submission, and a receiver that is down
+        # gets retried on the next beat instead of losing the alert.
+        with session_scope() as db:
+            notification_dispatch.deliver_pending(db, resolved, secret_store, now=at)
 
 
 def _already_leader(db: object) -> bool:
