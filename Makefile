@@ -2,7 +2,8 @@ COMPOSE ?= docker compose -f deploy/compose/docker-compose.yml --env-file .env
 # Engine replica count for `make scale`.
 N ?= 2
 
-.PHONY: help sync hooks lint format type test check up down destroy migrate seed logs ps scale init-env secrets
+.PHONY: help sync hooks lint format type test check images images-verify up down destroy \
+        migrate seed logs ps scale init-env secrets
 
 help: ## List the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -37,6 +38,18 @@ test: ## pytest across all workspace members
 
 check: lint type test ## Everything CI runs
 
+# ─── Images ───────────────────────────────────────────────────────────────────
+
+images: ## Build both role images
+	docker build -f deploy/docker/api.Dockerfile -t icebergsst/api:verify .
+	docker build -f deploy/docker/engine.Dockerfile -t icebergsst/engine:verify .
+
+# Properties of the built artefact rather than of the Dockerfile text: both
+# entrypoints serve, both run non-root, and no database package is importable in
+# the engine image (ADR 0002). CI runs this on every PR (#81).
+images-verify: ## Build both images and assert their deployment invariants
+	./deploy/docker/verify-images.sh
+
 # ─── Local stack ──────────────────────────────────────────────────────────────
 # `up` waits for every healthcheck before migrating, so what it hands back is a
 # stack that is ready rather than one that is merely started.
@@ -52,7 +65,7 @@ destroy: ## Stop the stack and delete its data volume
 	$(COMPOSE) down --volumes
 
 migrate: ## Apply migrations (api role only — it owns the schema)
-	$(COMPOSE) run --rm api alembic -c apps/api/alembic.ini upgrade head
+	$(COMPOSE) run --rm api python -m iceberg_api migrate
 
 seed: ## Load development fixtures (refuses to run in prod)
 	$(COMPOSE) run --rm api python -m iceberg_api.seed

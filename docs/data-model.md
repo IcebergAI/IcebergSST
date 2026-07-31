@@ -129,15 +129,25 @@ Registered worker.
 
 ## Migrations
 
-Alembic lives with the api role (`apps/api/alembic.ini`, migrations under
-`apps/api/src/iceberg_api/migrations/`), because only the api role owns the schema. Autogenerate
-targets the shared SQLModel metadata, and the database URL comes from `ICEBERG_DATABASE_URL` via
-`ApiSettings` rather than the ini, so migrations cannot point somewhere the API does not.
+Alembic lives with the api role, *inside* the package: `apps/api/src/iceberg_api/alembic.ini`
+alongside the migrations under `apps/api/src/iceberg_api/migrations/`. Only the api role owns the
+schema. Keeping the config in the package means it travels in the wheel, so the api image — which
+installs the package and copies no source tree — can find it; `%(here)s` resolves correctly in a
+checkout and in site-packages alike. Autogenerate targets the shared SQLModel metadata, and the
+database URL comes from `ICEBERG_DATABASE_URL` via `ApiSettings` rather than the ini, so migrations
+cannot point somewhere the API does not.
+
+Applying migrations goes through the operator CLI, which loads the packaged config. One entry
+point for the compose stack, the Helm pre-upgrade Job and the tests means none of them can drift
+onto a different script location:
 
 ```
-make migrate                                        # in the compose stack
-uv run alembic -c apps/api/alembic.ini upgrade head # against ICEBERG_DATABASE_URL
-uv run alembic -c apps/api/alembic.ini revision --autogenerate -m "add x"
+make migrate                              # in the compose stack
+uv run python -m iceberg_api migrate      # against ICEBERG_DATABASE_URL
+uv run python -m iceberg_api migrate --revision -1   # step back one
+
+# Authoring a revision reads the source tree by nature, so it calls alembic directly:
+uv run alembic -c apps/api/src/iceberg_api/alembic.ini revision --autogenerate -m "add x"
 ```
 
 A new entity must be re-exported from `iceberg_core.models` or autogenerate will not see it.

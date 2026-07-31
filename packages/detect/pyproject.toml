@@ -7,6 +7,9 @@ dependencies = [
     "iceberg-core",
     # Rule packs are YAML shipped inside the engine image (ADR 0008).
     "pyyaml>=6.0.3",
+    # Imported directly by the engine module — declared rather than leaned on
+    # transitively through iceberg-core, same as everywhere else here.
+    "structlog>=26.1.0",
 ]
 
 [build-system]

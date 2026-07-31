@@ -39,6 +39,20 @@ jobs:
       - name: Test
         run: make test
 
+  images:
+    name: build + verify role images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Reading a Dockerfile cannot tell you an image builds, that its entrypoint
+      # serves, or that sqlalchemy is genuinely absent from the engine rather than
+      # merely unmentioned. tests/test_deploy_invariants.py does the cheap textual
+      # half in the unit suite; this job does the half that needs a Docker daemon,
+      # so the ADR 0002 boundary is re-proved against the artefact on every PR (#81).
+      - name: Build both images and assert their deployment invariants
+        run: make images-verify
+
   secret-scan:
     name: secret scan (gitleaks)
     runs-on: ubuntu-latest

@@ -12,20 +12,22 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from iceberg_api.cli import alembic_config
 from iceberg_core.enums import ScanStatus, ScanTrigger, SourceType
 from iceberg_core.models import Scan, Source, metadata
 from sqlalchemy import Engine, create_engine, inspect
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
-
 
 @pytest.fixture(name="migrated_engine")
 def migrated_engine_fixture(tmp_path: Path) -> Iterator[tuple[Engine, Config]]:
     """A file-backed SQLite database with migrations applied to head."""
     url = f"sqlite:///{tmp_path / 'migrations.db'}"
-    config = Config(str(ALEMBIC_INI))
+    # Deliberately the same loader the operator CLI and the Helm Job use: these
+    # tests are only evidence about production migrations if they run the same
+    # config, from the same place.
+    config = alembic_config()
     config.attributes["sqlalchemy.url"] = url
     # The suite configures its own logging; let Alembic keep its hands off it.
     config.attributes["skip_logging_config"] = True

@@ -1,9 +1,16 @@
 """Deployment-level invariants (ADR 0002).
 
-`make up` and `docker build` are not runnable in CI, so the properties the
-containers must have are asserted against the files that define them. These are
-cheap checks for expensive mistakes: an engine handed a database URL is a
-credential-isolation failure that no unit test would notice.
+These read the files that define the containers rather than the containers: cheap
+checks for expensive mistakes, running in the ordinary unit-test suite where an
+engine handed a database URL fails in seconds.
+
+They are the fast half of the story. The slow half is
+``deploy/docker/verify-images.sh`` (``make images-verify``), which builds both
+images and probes the artefacts — no database package importable in the engine,
+both entrypoints serving, both running non-root. Reading a Dockerfile cannot tell
+you an image builds, and a text check cannot tell you sqlalchemy is genuinely
+absent rather than merely unmentioned (#81). Keep both: this file catches the
+mistake in the edit, that script catches it in the result.
 """
 
 import importlib
@@ -38,6 +45,20 @@ def _configured_variables(dockerfile: Path) -> list[str]:
     return [match.group(1) for match in CONFIG_DIRECTIVE_RE.finditer(text)]
 
 
+def _instructions(dockerfile: Path) -> str:
+    """The Dockerfile with comments stripped.
+
+    These files explain themselves at length, and several comments name the very
+    packages the checks below forbid — "no Postgres driver, no alembic" is the
+    engine Dockerfile stating the invariant, not breaking it. Substring checks
+    over the raw text would read prose as instruction and fail on a comment that
+    got the rule right.
+    """
+    return "\n".join(
+        line for line in dockerfile.read_text().splitlines() if not line.lstrip().startswith("#")
+    )
+
+
 def test_both_role_images_exist() -> None:
     assert API_DOCKERFILE.is_file()
     assert ENGINE_DOCKERFILE.is_file()
@@ -53,12 +74,52 @@ def test_the_engine_image_carries_no_database_configuration() -> None:
 
 
 def test_the_engine_image_installs_no_database_driver() -> None:
-    """``uv sync --package iceberg-engine`` is what keeps psycopg out of the image."""
-    contents = ENGINE_DOCKERFILE.read_text()
+    """``uv sync --package iceberg-engine`` is what keeps psycopg out of the image.
+
+    The stronger form of this — proving nothing database-shaped is importable in
+    the built image — is in ``deploy/docker/verify-images.sh``.
+    """
+    contents = _instructions(ENGINE_DOCKERFILE)
 
     assert "--package iceberg-engine" in contents
     assert "psycopg" not in contents
     assert "alembic" not in contents
+
+
+def test_the_engine_never_asks_for_the_orm_extra() -> None:
+    """``iceberg-core[db]`` carries sqlmodel; only the api role may depend on it.
+
+    This is what makes the image probe pass: the engine's dependency closure has
+    no ORM in it, so none is installed, so none can be imported (ADR 0002).
+    """
+    engine_manifest = (REPO_ROOT / "apps" / "engine" / "pyproject.toml").read_text()
+    api_manifest = (REPO_ROOT / "apps" / "api" / "pyproject.toml").read_text()
+
+    assert "iceberg-core[db]" not in engine_manifest
+    assert "iceberg-core[db]" in api_manifest
+
+    core_manifest = (REPO_ROOT / "packages" / "core" / "pyproject.toml").read_text()
+    base, _, extras = core_manifest.partition("[project.optional-dependencies]")
+    assert "sqlmodel" not in base, "sqlmodel must stay in the db extra, not core's base deps"
+    assert "sqlmodel" in extras
+
+
+def test_the_image_verification_runs_in_ci() -> None:
+    """The artefact-level checks are only worth having if they actually run.
+
+    ``verify-images.sh`` is the thing that proves the images build and that the
+    engine cannot import an ORM. A green PR should mean both were re-checked, so
+    the CI job that does it is asserted here rather than trusted (#81).
+    """
+    script = DOCKER_DIR / "verify-images.sh"
+    assert script.is_file()
+    assert script.stat().st_mode & 0o111, "verify-images.sh must be executable"
+
+    workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert "make images-verify" in workflow
+
+    makefile = (REPO_ROOT / "Makefile").read_text()
+    assert "images-verify:" in makefile
 
 
 def test_neither_image_runs_as_root() -> None:
@@ -90,8 +151,8 @@ def test_the_build_context_excludes_secrets_and_history() -> None:
 
 def test_only_the_api_image_owns_migrations() -> None:
     """Schema ownership is the api role's alone (docs/deployment.md § Migrations)."""
-    assert "alembic" not in ENGINE_DOCKERFILE.read_text()
-    assert "--package iceberg-api" in API_DOCKERFILE.read_text()
+    assert "alembic" not in _instructions(ENGINE_DOCKERFILE)
+    assert "--package iceberg-api" in _instructions(API_DOCKERFILE)
 
 
 @pytest.fixture(name="compose", scope="module")
