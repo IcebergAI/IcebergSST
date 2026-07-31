@@ -6,12 +6,14 @@ change lands in the database, and the things that must never appear on a page �
 a credential, a webhook secret, anything derived from a detected secret — do not.
 """
 
+import re
 import uuid
 from collections.abc import Callable
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from iceberg_api.pagination import DEFAULT_LIMIT
 from iceberg_api.sources.routes import get_prober
 from iceberg_api.sources.schemas import ConnectivityResult
 from iceberg_core.enums import (
@@ -24,6 +26,7 @@ from iceberg_core.enums import (
     ScanTrigger,
     Severity,
     SourceType,
+    SuppressionScope,
     UserRole,
 )
 from iceberg_core.models import (
@@ -35,6 +38,7 @@ from iceberg_core.models import (
     NotificationChannel,
     Scan,
     ScanTask,
+    Schedule,
     Source,
     Suppression,
     User,
@@ -270,6 +274,33 @@ def test_launching_a_scan_drives_the_sources_scan_route(
     assert len(dispatcher.enqueued) == 1  # type: ignore[attr-defined]
 
 
+def test_launching_a_scan_on_a_disabled_source_says_so_instead_of_nothing(
+    client: TestClient,
+    session: Session,
+    make_source: Callable[..., Source],
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """The 409 the route deliberately leaves to the error handler has to land.
+
+    Another admin disabling the source between page load and click is the whole
+    reason this conflict exists; htmx swaps nothing on a 4xx, so the retargeted
+    fragment is what turns it from a dead button into an answer.
+    """
+    headers = login_as(make_user(UserRole.ANALYST))
+    source = make_source()
+    source.enabled = False
+    session.add(source)
+    session.commit()
+
+    response = client.post(f"/sources/{source.id}/scan", headers=headers | {"HX-Request": "true"})
+
+    assert response.status_code == 200
+    assert response.headers["HX-Retarget"] == "#hx-error"
+    assert "conflicts with the current state" in response.text
+    assert "source is disabled" in response.text
+
+
 def test_a_viewer_cannot_launch_a_scan(
     client: TestClient,
     make_source: Callable[..., Source],
@@ -475,6 +506,30 @@ def test_an_illegal_transition_is_refused_with_its_reason_and_changes_nothing(
     assert finding.assignee_id is None
 
 
+def test_an_unrecognised_state_re_renders_the_panel_rather_than_500ing(
+    client: TestClient,
+    session: Session,
+    make_finding: Callable[..., Finding],
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """A stale form or a crafted post is a refused decision, not a crash."""
+    headers = login_as(make_user(UserRole.ANALYST))
+    finding = make_finding()
+
+    response = client.post(
+        f"/findings/{finding.id}/triage",
+        data={"csrf_token": headers["X-CSRF-Token"], "state": "not-a-state"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert "Not applied" in response.text
+    assert 'id="triage"' in response.text
+    session.refresh(finding)
+    assert finding.state is FindingState.OPEN
+
+
 def test_a_viewer_sees_the_history_but_is_offered_no_triage_form(
     client: TestClient,
     make_finding: Callable[..., Finding],
@@ -558,6 +613,62 @@ def test_a_suppression_without_a_reason_is_refused_with_the_reason_why(
 
     assert response.status_code == 204
     assert "error=" in response.headers["HX-Redirect"]
+
+
+def test_an_unparseable_expiry_comes_back_as_the_sentence_the_route_wrote(
+    client: TestClient, make_user: Callable[..., User], login_as: Callable[[User], dict[str, str]]
+) -> None:
+    """`_expiry` authors its own copy; a generic fallback would discard it."""
+    headers = login_as(make_user(UserRole.ANALYST))
+
+    response = client.post(
+        "/suppressions",
+        data={
+            "csrf_token": headers["X-CSRF-Token"],
+            "scope": "rule",
+            "pattern": "generic-password",
+            "reason": "Placeholder values",
+            "expires_at": "next tuesday",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 204
+    assert "expires_at%20must%20be%20a%20date%20and%20time" in response.headers["HX-Redirect"]
+
+
+def test_the_suppressions_pager_carries_the_filters_that_built_the_page(
+    client: TestClient,
+    session: Session,
+    make_source: Callable[..., Source],
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """The cursor is a position in the *filtered* keyset.
+
+    Resuming it against the unfiltered listing is not "the same list, page two" —
+    it skips rows and silently drops the filter the analyst is reading by.
+    """
+    login_as(make_user(UserRole.ANALYST))
+    source = make_source()
+    for index in range(DEFAULT_LIMIT + 1):
+        session.add(
+            Suppression(
+                scope=SuppressionScope.RULE,
+                pattern=f"rule-{index}",
+                source_id=source.id,
+                reason="Placeholder values",
+            )
+        )
+    session.commit()
+
+    body = client.get(f"/suppressions?source_id={source.id}&scope=rule&active=true").text
+
+    pager = re.search(r'href="(/suppressions\?cursor=[^"]*)"', body)
+    assert pager is not None, "no next-page link rendered"
+    assert f"source_id={source.id}" in pager.group(1)
+    assert "scope=rule" in pager.group(1)
+    assert "active=true" in pager.group(1)
 
 
 def test_deleting_a_suppression_releases_what_it_was_hiding(
@@ -656,6 +767,46 @@ def test_an_invalid_cron_is_refused_with_an_explanation(
 
     assert response.status_code == 204
     assert "cron" in response.headers["HX-Redirect"]
+
+
+@pytest.mark.parametrize("source_id", ["", "not-a-uuid"])
+def test_a_schedule_with_no_source_says_which_choice_is_missing(
+    client: TestClient,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+    source_id: str,
+) -> None:
+    """`create_schedule` raises a bare ValueError with copy meant to be read."""
+    headers = login_as(make_user(UserRole.ADMIN))
+
+    response = client.post(
+        "/schedules",
+        data={"csrf_token": headers["X-CSRF-Token"], "source_id": source_id, "cron": "0 3 * * *"},
+        headers=headers,
+    )
+
+    assert response.status_code == 204, response.text
+    assert "choose%20a%20source" in response.headers["HX-Redirect"]
+
+
+def test_the_schedules_pager_carries_the_source_filter(
+    client: TestClient,
+    session: Session,
+    make_source: Callable[..., Source],
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    login_as(make_user(UserRole.VIEWER))
+    source = make_source()
+    for _ in range(DEFAULT_LIMIT + 1):
+        session.add(Schedule(source_id=source.id, cron="0 3 * * *"))
+    session.commit()
+
+    body = client.get(f"/schedules?source_id={source.id}").text
+
+    pager = re.search(r'href="(/schedules\?cursor=[^"]*)"', body)
+    assert pager is not None, "no next-page link rendered"
+    assert f"source_id={source.id}" in pager.group(1)
 
 
 def test_the_engine_dashboard_shows_heartbeat_and_status(
@@ -803,6 +954,40 @@ def test_only_an_admin_reaches_the_channels_screen(
         ).status_code
         == 403
     )
+
+
+def test_a_channel_is_created_and_deleted_but_never_edited(
+    client: TestClient,
+    session: Session,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """The screen offers no edit, so no route answers one.
+
+    An unreachable handler is untested behaviour that rots — the "blank secret
+    keeps the sealed one" rule in particular, which nothing on this page exercises.
+    """
+    headers = login_as(make_user(UserRole.ADMIN))
+    client.post(
+        "/channels",
+        data={
+            "csrf_token": headers["X-CSRF-Token"],
+            "name": "security-alerts",
+            "type": "webhook",
+            "url": "https://chat.example.com/hooks/abc",
+        },
+        headers=headers,
+    )
+    channel = session.exec(select(NotificationChannel)).one()
+
+    response = client.post(
+        f"/channels/{channel.id}",
+        data={"csrf_token": headers["X-CSRF-Token"], "name": "renamed", "type": "webhook"},
+        headers=headers,
+    )
+
+    assert response.status_code == 405
+    assert "edit it after saving" not in client.get("/channels").text
 
 
 def test_deleting_a_channel_is_audited(

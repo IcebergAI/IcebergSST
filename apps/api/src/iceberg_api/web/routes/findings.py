@@ -156,18 +156,21 @@ async def triage(  # one parameter per form field
     is a user id. That mirrors ``FindingUpdate``, where a field omitted and a
     field set to ``null`` are deliberately different.
     """
-    payload: dict[str, Any] = {"state": FindingState(state) if state else None}
-    if comment.strip():
-        payload["comment"] = comment.strip()
-    if notes is not None:
-        payload["notes"] = notes.strip() or None
-    if assignee == "none":
-        payload["assignee_id"] = None
-    elif assignee:
-        payload["assignee_id"] = id_or_none(assignee)
-
     error = None
     try:
+        # Inside the try because ``FindingState(state)`` is a parse of a posted
+        # string: a stale form or a hand-made request is a rejected decision the
+        # analyst should see on the panel, not a 500.
+        payload: dict[str, Any] = {"state": FindingState(state) if state else None}
+        if comment.strip():
+            payload["comment"] = comment.strip()
+        if notes is not None:
+            payload["notes"] = notes.strip() or None
+        if assignee == "none":
+            payload["assignee_id"] = None
+        elif assignee:
+            payload["assignee_id"] = id_or_none(assignee)
+
         finding = await api.update_finding(
             finding_id=finding_id,
             changes=FindingUpdate(**payload),

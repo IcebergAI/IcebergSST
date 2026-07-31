@@ -18,6 +18,7 @@ the shared ones and convert that one status into :class:`LoginRequired`, which
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated
+from urllib.parse import urlsplit
 
 from fastapi import Depends, HTTPException, Request, status
 from iceberg_core.enums import UserRole
@@ -41,14 +42,28 @@ class LoginRequired(Exception):
         self.return_path = return_path
 
 
-def _return_path(request: Request) -> str:
-    """The path the browser wanted, query string included.
+def login_return_path(request: Request) -> str:
+    """Where to send this browser once it has signed in.
 
     Reduced to a local path by ``safe_return_path`` before it is ever used as a
     redirect target, so a crafted ``?next=`` cannot ride out of this origin.
+
+    A GET is its own return target, query string included. A mutation is not: the
+    round trip ends with the browser *navigating* to whatever is remembered here,
+    and ``POST /findings/{id}/triage`` answers a GET with a 405 — which is the
+    common expiry path, since every ``hx-post`` in the console is one. The
+    ``Referer`` is the page the mutation was issued from, which is where the
+    analyst actually was; without one, the parent path is the nearest thing that
+    is navigable.
     """
-    query = request.url.query
-    return f"{request.url.path}?{query}" if query else request.url.path
+    if request.method == "GET":
+        query = request.url.query
+        return f"{request.url.path}?{query}" if query else request.url.path
+
+    referer = urlsplit(request.headers.get("referer", ""))
+    if referer.path.startswith("/"):
+        return f"{referer.path}?{referer.query}" if referer.query else referer.path
+    return request.url.path.rsplit("/", 1)[0] or "/"
 
 
 def web_session_data(request: Request, settings: SettingsDep) -> SessionData:
@@ -57,7 +72,7 @@ def web_session_data(request: Request, settings: SettingsDep) -> SessionData:
         return current_session(request, settings)
     except HTTPException as exc:
         if exc.status_code == status.HTTP_401_UNAUTHORIZED:
-            raise LoginRequired(_return_path(request)) from exc
+            raise LoginRequired(login_return_path(request)) from exc
         # 503: authentication is misconfigured. That is an operator's problem and
         # bouncing them to a login page that cannot work would hide it.
         raise
@@ -72,7 +87,7 @@ def web_user(request: Request, session_data: WebSessionData, db: SessionDep) -> 
         return current_user(session_data, db)
     except HTTPException as exc:
         if exc.status_code == status.HTTP_401_UNAUTHORIZED:
-            raise LoginRequired(_return_path(request)) from exc
+            raise LoginRequired(login_return_path(request)) from exc
         raise
 
 

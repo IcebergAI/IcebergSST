@@ -24,7 +24,7 @@ from iceberg_api.findings.schemas import SuppressionCreate
 from iceberg_api.pagination import DEFAULT_LIMIT
 from iceberg_api.sources.routes import list_sources
 from iceberg_api.web.dependencies import CurrentViewer, WebAnalyst, WebViewer
-from iceberg_api.web.forms import error_text, optional
+from iceberg_api.web.forms import optional, redirect_with_error
 from iceberg_api.web.templating import hx_redirect, id_or_none, render_page
 
 router = APIRouter(include_in_schema=False)
@@ -105,7 +105,7 @@ async def create_suppression(  # one parameter per form field
         # Round-tripped through the URL rather than a swapped fragment: this form
         # is short, and a full reload after a create is what shows the analyst the
         # findings that just disappeared from the queue.
-        return hx_redirect(f"/suppressions?error={_quote(error_text(exc))}")
+        return redirect_with_error("/suppressions", exc)
 
     return hx_redirect("/suppressions")
 
@@ -145,9 +145,3 @@ def _expiry(value: str) -> datetime | None:
     except ValueError as exc:
         raise ValueError("expires_at must be a date and time") from exc
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-
-def _quote(text: str) -> str:
-    from urllib.parse import quote
-
-    return quote(text, safe="")

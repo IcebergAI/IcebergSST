@@ -208,27 +208,20 @@ document.addEventListener('alpine:init', () => {
   }));
 
   /* ----------------------------------------------------------------------- *
-   * channelForm — notification-channel create/edit (#72).
+   * channelForm — the notification-channel create form (#72).
    *
    * Which config fields exist depends entirely on the channel type, and the two
    * shapes share nothing. Switching the type swaps the fieldset rather than
    * leaving an email list visible on a webhook.
+   *
+   * There is no edit flow: a channel is created and deleted, so this carries no
+   * "keep the stored secret" state the way sourceForm does.
    * ----------------------------------------------------------------------- */
   Alpine.data('channelForm', () => ({
     type: 'webhook',
-    rotating: true,
-    hasSecret: false,
     init() {
       const data = readIsland(this.$el);
       this.type = data.type || 'webhook';
-      this.hasSecret = data.hasSecret === true;
-      this.rotating = !this.hasSecret;
-    },
-    startRotation() {
-      this.rotating = true;
-    },
-    cancelRotation() {
-      this.rotating = false;
     },
   }));
 

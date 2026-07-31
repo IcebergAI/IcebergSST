@@ -22,7 +22,7 @@ from iceberg_api.sources import schedule_routes as api
 from iceberg_api.sources.routes import list_sources
 from iceberg_api.sources.schemas import ScheduleCreate, ScheduleUpdate
 from iceberg_api.web.dependencies import CurrentViewer, WebAdmin, WebViewer
-from iceberg_api.web.forms import checkbox, error_text
+from iceberg_api.web.forms import checkbox, redirect_with_error
 from iceberg_api.web.templating import hx_redirect, id_or_none, render_page
 
 router = APIRouter(include_in_schema=False)
@@ -78,8 +78,11 @@ async def schedules_page(
 async def create_schedule(
     admin: WebAdmin,
     db: SessionDep,
-    source_id: Annotated[str, Form()],
     cron: Annotated[str, Form()],
+    # Defaulted, as on the suppressions form: FastAPI reads a blank form field as
+    # an absent one, and the "Choose…" option posts exactly that. Required here
+    # would answer it with the API's JSON 422 instead of the sentence below.
+    source_id: Annotated[str, Form()] = "",
     enabled: Annotated[str | None, Form()] = None,
     csrf_token: Annotated[str, Form()] = "",
 ) -> Response:
@@ -91,7 +94,7 @@ async def create_schedule(
         body = ScheduleCreate(source_id=target, cron=cron, enabled=checkbox(enabled))
         await api.create_schedule(body=body, admin=admin, db=db)
     except (HTTPException, ValidationError, ValueError) as exc:
-        return hx_redirect(f"/schedules?error={_quote(error_text(exc))}")
+        return redirect_with_error("/schedules", exc)
     return hx_redirect("/schedules")
 
 
@@ -109,7 +112,7 @@ async def update_schedule(
         changes = ScheduleUpdate(cron=cron, enabled=checkbox(enabled))
         await api.update_schedule(schedule_id=schedule_id, changes=changes, admin=admin, db=db)
     except (HTTPException, ValidationError, ValueError) as exc:
-        return hx_redirect(f"/schedules?error={_quote(error_text(exc))}")
+        return redirect_with_error("/schedules", exc)
     return hx_redirect("/schedules")
 
 
@@ -121,9 +124,3 @@ async def delete_schedule(
 ) -> Response:
     await api.delete_schedule(schedule_id=schedule_id, admin=admin, db=db)
     return hx_redirect("/schedules")
-
-
-def _quote(text: str) -> str:
-    from urllib.parse import quote
-
-    return quote(text, safe="")

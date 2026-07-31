@@ -35,6 +35,19 @@ from iceberg_core.config import CoreSettings, get_core_settings
 #: they are exempted by path instead of weakening the header everywhere.
 DOCS_PATHS = frozenset({"/docs", "/docs/oauth2-redirect", "/redoc"})
 
+#: The vendored fonts, stylesheet and scripts. They are version-pinned and carry
+#: no session state, so they are the one prefix that stays cacheable — everything
+#: else on this surface is answered for one signed-in person.
+STATIC_PREFIX = "/static/"
+
+#: Every other response. A console page renders redacted snippets, resource
+#: locators and — on the engines screen — a token that exists in exactly one
+#: response and can never be reissued; a browser heuristically caching those
+#: leaves them restorable through the back button on a shared machine after
+#: somebody signs out. ``no-store`` is the only directive that also covers the
+#: bfcache and disk-cached copies, which ``no-cache`` does not.
+CACHE_CONTROL = "no-store"
+
 #: Browser features the UI never uses. An empty allowlist denies every origin,
 #: this one included, so a future injection cannot reach them either.
 PERMISSIONS_POLICY = ", ".join(
@@ -129,6 +142,8 @@ def security_headers_middleware(
         response = await call_next(request)
         if request.url.path in DOCS_PATHS:
             return response
+        if not request.url.path.startswith(STATIC_PREFIX):
+            response.headers.setdefault("Cache-Control", CACHE_CONTROL)
         for name, value in resolved.items():
             # setdefault, never overwrite: a route that set a header deliberately
             # (a per-download nosniff, say) knows something this layer does not.
