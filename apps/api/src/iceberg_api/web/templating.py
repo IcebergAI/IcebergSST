@@ -80,6 +80,24 @@ def _humanize(value: object) -> str:
     return str(value).replace("_", " ").capitalize()
 
 
+def _person(value: object, names: dict[uuid.UUID, str]) -> str:
+    """A user id recorded on an audit event, rendered as the person's name.
+
+    An assignment event stores the assignee's id in ``to_value``, because that is
+    what stays correct when somebody is renamed. A trail that reads
+    "assign — → 966d7342-…" is technically complete and practically useless, so
+    the name is substituted wherever the reader is allowed to know it, and the id
+    is shortened rather than dropped when they are not.
+    """
+    if value in (None, ""):
+        return "unassigned"
+    try:
+        key = uuid.UUID(str(value))
+    except ValueError:
+        return str(value)
+    return names.get(key, f"{str(value)[:12]}…")
+
+
 def build_environment() -> Environment:
     """The template environment.
 
@@ -99,6 +117,7 @@ def build_environment() -> Environment:
     env.filters["ago"] = _format_ago
     env.filters["short"] = _shorten
     env.filters["humanize"] = _humanize
+    env.filters["person"] = _person
     env.globals["app_name"] = APP_NAME
     return env
 
