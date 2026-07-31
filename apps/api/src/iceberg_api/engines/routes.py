@@ -329,19 +329,25 @@ async def submit_results(
     outcome = ingest.IngestOutcome()
     fetch_tasks: list[ScanTask] = []
 
-    if body.status is ScanTaskStatus.COMPLETED:
-        if task.kind is ScanTaskKind.DISCOVERY:
+    if task.kind is ScanTaskKind.DISCOVERY:
+        if body.status is ScanTaskStatus.COMPLETED:
             # Created in the same transaction that completes the discovery task: a
             # crash cannot record the discovery as done yet lose what it discovered.
             fetch_tasks = service.create_fetch_tasks(db, scan, body.task_specs)
-        elif body.findings:
-            outcome = ingest.ingest_findings(
-                db,
-                scan,
-                body.findings,
-                now=now,
-                threshold=settings.confidence_threshold,
-            )
+    elif body.findings:
+        # Ingested whatever the task's outcome. A connector that dies halfway
+        # through a space still saw real secrets before it died, and
+        # `complete_task(status=failed)` is terminal — reclaim only touches leased
+        # work — so discarding them means they surface only if an operator re-runs
+        # the whole scan. The scan's own status still records that it was partial,
+        # and reconciliation still refuses to auto-resolve on it (ADR 0009 §4).
+        outcome = ingest.ingest_findings(
+            db,
+            scan,
+            body.findings,
+            now=now,
+            threshold=settings.confidence_threshold,
+        )
 
     ingest.merge_scan_counts(scan, outcome, body.counts)
     if body.rulepack_version:

@@ -15,6 +15,7 @@ pin down.
   request, which is the same as having no limit at all.
 """
 
+import time
 import uuid
 from collections.abc import Callable
 
@@ -90,6 +91,42 @@ def test_a_refusal_reports_when_to_come_back() -> None:
 
     assert refused.allowed is False
     assert 1 <= refused.reset_after <= 60
+
+
+def test_the_in_memory_store_drops_lapsed_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fallback store must not grow for the life of the process.
+
+    Unauthenticated buckets are keyed by client address, and an attacker rotating
+    source addresses — trivial over IPv6 — would otherwise add an entry per
+    request that nothing ever removed.
+    """
+    clock = [1_000]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(InMemoryStore, "SWEEP_THRESHOLD", 4)
+    store = InMemoryStore()
+    for address in range(6):
+        store.hit(f"auth:{address}", limit=100, window_seconds=60)
+    assert len(store._windows) == 6
+
+    clock[0] += 120
+    store.hit("auth:latecomer", limit=100, window_seconds=60)
+
+    # Only the entry from the current window is left; the six lapsed ones went.
+    assert list(store._windows) == ["auth:latecomer"]
+
+
+def test_a_counter_from_a_lapsed_window_does_not_carry_over(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sweeping is bookkeeping, not budget: the caller starts each window fresh."""
+    clock = [1_000]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    store = InMemoryStore()
+    store.hit("k", limit=1, window_seconds=60)
+
+    clock[0] += 120
+
+    assert store.hit("k", limit=1, window_seconds=60).allowed is True
 
 
 class _BrokenRedis:

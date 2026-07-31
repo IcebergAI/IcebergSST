@@ -259,6 +259,64 @@ def test_a_failed_task_makes_the_scan_partial_and_reconciles_nothing(
     assert stale.state is FindingState.OPEN
 
 
+def test_a_failed_task_still_has_its_findings_ingested(scan_fixture: Fixture) -> None:
+    """A connector that dies halfway through a space still saw real secrets first.
+
+    `complete_task(failed)` is terminal — reclaim only touches leased work — so a
+    finding dropped here surfaces only if an operator re-runs the whole scan,
+    which defeats the unit-level tolerance the design already pays for (#115).
+    """
+    fixture = scan_fixture
+    task = fixture.fetch_task()
+
+    response = fixture.report(
+        task,
+        status="failed",
+        error="pagination cap hit",
+        findings=[_finding_payload()],
+        counts={"units_scanned": 3, "units_failed": 1},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["findings_ingested"] == 1
+    finding = fixture.session.exec(select(Finding)).one()
+    assert finding.fingerprint == FINGERPRINT
+    assert finding.state is FindingState.OPEN
+    fixture.session.refresh(fixture.scan)
+    # Still partial, so reconciliation refuses to auto-resolve on it (ADR 0009 §4).
+    assert fixture.scan.status is ScanStatus.PARTIAL
+    assert fixture.scan.counts["findings"] == 1
+    assert fixture.scan.counts["units_failed"] == 1
+
+
+def test_a_failed_scan_says_why_it_failed(scan_fixture: Fixture) -> None:
+    """`Scan.error` is on the read contract, so something has to write it.
+
+    Reporting a bare `failed` and a null left every caller chasing the task list
+    for the one string that explains the run.
+    """
+    fixture = scan_fixture
+    fixture.lease(fixture.discovery)
+    fixture.session.refresh(fixture.discovery)
+
+    fixture.report(fixture.discovery, status="failed", error="401 from Confluence")
+
+    fixture.session.refresh(fixture.scan)
+    assert fixture.scan.status is ScanStatus.FAILED
+    assert fixture.scan.error == "401 from Confluence"
+
+
+def test_a_completed_scan_says_nothing_went_wrong(scan_fixture: Fixture) -> None:
+    fixture = scan_fixture
+    task = fixture.fetch_task()
+
+    fixture.report(task, findings=[_finding_payload()])
+
+    fixture.session.refresh(fixture.scan)
+    assert fixture.scan.status is ScanStatus.COMPLETED
+    assert fixture.scan.error is None
+
+
 def test_a_completed_scan_auto_resolves_what_it_did_not_see(
     scan_fixture: Fixture,
 ) -> None:

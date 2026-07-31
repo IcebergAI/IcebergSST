@@ -129,30 +129,36 @@ def _purge_findings(db: Session, days: int, *, at: datetime, batch: int) -> int:
     if cutoff is None:
         return 0
 
-    eligible = list(
-        db.exec(
-            select(col(Finding.id))
-            .where(
-                col(Finding.state) == FindingState.RESOLVED,
-                col(Finding.resolution).in_(PURGEABLE_RESOLUTIONS),
-                # `updated_at` moves when the finding is resolved, so it is the
-                # age of the *decision*, not of the first sighting. A finding
-                # found two years ago and resolved yesterday is a day old here.
-                col(Finding.updated_at) < cutoff,
-                # A suppressed finding is hidden, not gone: deleting it would
-                # bring it back as new on the next scan (ADR 0008).
-                col(Finding.suppressed_at).is_(None),
-            )
-            .limit(batch)
-        )
+    eligible_where = (
+        col(Finding.state) == FindingState.RESOLVED,
+        col(Finding.resolution).in_(PURGEABLE_RESOLUTIONS),
+        # `updated_at` moves when the finding is resolved, so it is the age of the
+        # *decision*, not of the first sighting. A finding found two years ago and
+        # resolved yesterday is a day old here.
+        col(Finding.updated_at) < cutoff,
+        # A suppressed finding is hidden, not gone: deleting it would bring it back
+        # as new on the next scan (ADR 0008).
+        col(Finding.suppressed_at).is_(None),
     )
+    eligible = list(db.exec(select(col(Finding.id)).where(*eligible_where).limit(batch)))
     if not eligible:
         return 0
 
+    # The predicates are repeated on the delete, with the id list serving only as
+    # the batch limiter. Under READ COMMITTED an ingest can re-open one of these
+    # findings between the select and the delete, and a delete by id alone would
+    # remove a live secret finding — and, by cascade, its whole event trail.
+    #
     # FindingEvent cascades on finding_id, so the trail goes with the finding it
     # describes rather than being orphaned.
-    db.exec(delete(Finding).where(col(Finding.id).in_(eligible)))
-    return len(eligible)
+    result = db.exec(
+        delete(Finding)
+        .where(col(Finding.id).in_(eligible), *eligible_where)
+        # The datetime predicate cannot be evaluated against in-session objects
+        # (SQLite hands back naive datetimes), so sync by re-select.
+        .execution_options(synchronize_session="fetch")
+    )
+    return int(result.rowcount)
 
 
 def _purge_finding_events(db: Session, days: int, *, at: datetime, batch: int) -> int:
@@ -166,21 +172,22 @@ def _purge_finding_events(db: Session, days: int, *, at: datetime, batch: int) -
         return 0
 
     still_open = select(col(Finding.id)).where(col(Finding.state) == FindingState.OPEN)
-    eligible = list(
-        db.exec(
-            select(col(FindingEvent.id))
-            .where(
-                col(FindingEvent.created_at) < cutoff,
-                col(FindingEvent.finding_id).not_in(still_open),
-            )
-            .limit(batch)
-        )
+    eligible_where = (
+        col(FindingEvent.created_at) < cutoff,
+        col(FindingEvent.finding_id).not_in(still_open),
     )
+    eligible = list(db.exec(select(col(FindingEvent.id)).where(*eligible_where).limit(batch)))
     if not eligible:
         return 0
 
-    db.exec(delete(FindingEvent).where(col(FindingEvent.id).in_(eligible)))
-    return len(eligible)
+    # Repeated on the delete for the same reason as above: a finding re-opened
+    # between the two statements keeps the trail an analyst needs to read it.
+    result = db.exec(
+        delete(FindingEvent)
+        .where(col(FindingEvent.id).in_(eligible), *eligible_where)
+        .execution_options(synchronize_session="fetch")
+    )
+    return int(result.rowcount)
 
 
 def _purge_audit_events(db: Session, days: int, *, at: datetime, batch: int) -> int:

@@ -78,6 +78,8 @@ class Scan(TimestampedModel, table=True):
             postgresql_where=_ACTIVE_SCAN_WHERE,
             sqlite_where=_ACTIVE_SCAN_WHERE,
         ),
+        # The keyset order `GET /scans` pages on.
+        Index("ix_scan_created_at_id", "created_at", "id"),
     )
 
     source_id: uuid.UUID = Field(foreign_key="source.id", ondelete="CASCADE", index=True)

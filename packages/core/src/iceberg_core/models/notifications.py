@@ -70,6 +70,11 @@ class NotificationDelivery(TimestampedModel, table=True):
         ),
         # The delivery loop's query: what is pending and due.
         Index("ix_notification_delivery_status_next_attempt_at", "status", "next_attempt_at"),
+        # The unique constraint above leads on channel_id, so it cannot serve the
+        # per-row lookups Postgres does to enforce these two CASCADEs — and
+        # retention deletes findings a thousand at a time (#73).
+        Index("ix_notification_delivery_finding_id", "finding_id"),
+        Index("ix_notification_delivery_scan_id", "scan_id"),
     )
 
     channel_id: uuid.UUID = Field(foreign_key="notification_channel.id", ondelete="CASCADE")

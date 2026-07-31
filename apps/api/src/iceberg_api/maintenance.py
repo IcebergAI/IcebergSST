@@ -6,6 +6,7 @@ decides which replica actually does them:
 * **the scheduler tick** — fire due schedules;
 * **lease reclaim** — return work from engines that stopped heartbeating;
 * **the safety sweeps** — repair scans a crash left wedged;
+* **fleet health** — mark engines that have gone quiet offline;
 * **suppression lapse** — return findings whose suppression has expired.
 
 They live in the API rather than in a separate cron container because both need the
@@ -24,10 +25,13 @@ from datetime import UTC, datetime
 import structlog
 from iceberg_core.config import ApiSettings, get_api_settings
 from iceberg_core.db import session_scope
+from iceberg_core.metrics import QUEUE_DEPTH
 from iceberg_core.secrets import SecretStore, build_secret_store
+from iceberg_core.tasks import SCAN_TASK_QUEUE
 
 from iceberg_api import retention, suppressions
 from iceberg_api.dispatch import Dispatcher, build_dispatcher
+from iceberg_api.engines import fleet
 from iceberg_api.notifications import dispatch as notification_dispatch
 from iceberg_api.scans import service
 from iceberg_api.scheduler import postgres_advisory_lock, tick
@@ -78,6 +82,13 @@ def run_once(
             service.redispatch_stale_tasks(db, dispatcher=dispatcher, now=at)
         with session_scope() as db:
             service.finalize_stalled_scans(db, now=at)
+        # An engine cannot report that it died, so silence is the only evidence
+        # there is. Without this every engine ever registered reads as active
+        # forever, in the fleet view and in `GET /rules` (#58, #70).
+        with session_scope() as db:
+            fleet.mark_stale_engines_offline(
+                db, stale_after_seconds=resolved.engine_offline_after_seconds, now=at
+            )
         # Expiry is a property of the clock, not of the scan schedule: without this
         # a lapsed suppression would keep hiding findings until the next scan of
         # that source, which for a weekly cadence is six days of silence (ADR 0008).
@@ -95,6 +106,16 @@ def run_once(
         # never been purged, and nothing else waits on it.
         with session_scope() as db:
             retention.purge(db, resolved, now=at)
+        # Sampled once per round, by the leader only: every replica scraping the
+        # broker would report the same number N times and cost N round-trips.
+        _sample_queue_depth(dispatcher)
+
+
+def _sample_queue_depth(dispatcher: Dispatcher) -> None:
+    """Publish the broker's backlog, when the broker can be asked."""
+    depth = dispatcher.queue_depth()
+    if depth is not None:
+        QUEUE_DEPTH.labels(queue=SCAN_TASK_QUEUE).set(depth)
 
 
 def _already_leader(db: object) -> bool:

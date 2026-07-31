@@ -32,14 +32,7 @@ from sqlmodel import select
 from iceberg_api import audit
 from iceberg_api.auth.dependencies import CsrfProtected, SecretStoreDep, SessionDep
 from iceberg_api.auth.rbac import AdminUser, ViewerUser
-from iceberg_api.pagination import (
-    DEFAULT_LIMIT,
-    MAX_LIMIT,
-    Cursor,
-    CursorError,
-    after,
-    resolve_cursor,
-)
+from iceberg_api.pagination import DEFAULT_LIMIT, MAX_LIMIT, after, build_page, position
 from iceberg_api.schemas import Page
 from iceberg_api.sources.probe import ProbeError, probe_source
 from iceberg_api.sources.schemas import (
@@ -112,28 +105,14 @@ async def list_sources(
     cursor: str | None = Query(default=None),
 ) -> Page[SourceRead]:
     """List sources, oldest first, in stable ``(created_at, id)`` order."""
-    try:
-        position = resolve_cursor(cursor)
-    except CursorError as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "cursor is not valid") from exc
-
     statement = after(
         select(Source),
         created_at=Source.created_at,  # type: ignore[arg-type]
         row_id=Source.id,  # type: ignore[arg-type]
-        cursor=position,
+        cursor=position(cursor),
     )
     rows = list(db.exec(statement.limit(limit + 1)))
-    page, has_more = rows[:limit], len(rows) > limit
-
-    return Page(
-        items=[_read(source) for source in page],
-        next_cursor=(
-            Cursor(created_at=page[-1].created_at, row_id=page[-1].id).encode()
-            if has_more and page
-            else None
-        ),
-    )
+    return build_page(rows, limit=limit, read=_read)
 
 
 @router.get("/{source_id}")

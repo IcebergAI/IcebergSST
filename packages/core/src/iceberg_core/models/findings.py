@@ -38,6 +38,10 @@ class Finding(TimestampedModel, table=True):
         # Reconciliation's lookup, and the reason a fingerprint means one finding.
         UniqueConstraint("source_id", "fingerprint", name="uq_finding_source_id_fingerprint"),
         Index("ix_finding_source_id_state", "source_id", "state"),
+        # The keyset order every list endpoint pages on. On the one table that
+        # grows with every scan, its absence made the default queue view sort the
+        # whole table per page request.
+        Index("ix_finding_created_at_id", "created_at", "id"),
     )
 
     source_id: uuid.UUID = Field(foreign_key="source.id", ondelete="CASCADE", index=True)

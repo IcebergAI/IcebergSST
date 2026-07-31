@@ -75,6 +75,30 @@ def test_indexes_and_constraints_carry_their_conventional_names(
     assert "uq_scan_active_per_source" in scan_indexes
 
 
+def test_the_paginated_and_cascaded_columns_are_indexed(
+    migrated_engine: tuple[Engine, Config],
+) -> None:
+    """Two costs that only appear once a deployment has data.
+
+    Every list endpoint orders on ``(created_at, id)``, so without that pair the
+    findings queue sorts the whole table per page; and ``notification_delivery``
+    cascades from finding and scan, which Postgres enforces with a per-row lookup
+    on each of the thousand rows a retention round can delete.
+    """
+    engine, _ = migrated_engine
+    inspector = inspect(engine)
+
+    def index_names(table: str) -> set[str]:
+        return {str(index["name"]) for index in inspector.get_indexes(table)}
+
+    assert "ix_finding_created_at_id" in index_names("finding")
+    assert "ix_scan_created_at_id" in index_names("scan")
+    assert {
+        "ix_notification_delivery_finding_id",
+        "ix_notification_delivery_scan_id",
+    } <= index_names("notification_delivery")
+
+
 def test_one_active_scan_per_source_is_enforced_by_the_database(
     migrated_engine: tuple[Engine, Config],
 ) -> None:

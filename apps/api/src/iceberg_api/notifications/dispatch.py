@@ -200,6 +200,12 @@ def deliver_pending(
     delivered = retrying = failed = 0
     for delivery in due:
         result = _attempt(db, delivery, settings, resolved, at=at)
+        # Per delivery, not per batch. The outbox is at-least-once by design, but a
+        # crash after N sends and before a batch-wide commit would leave all N
+        # pending with a past due time and re-send every one of them on the next
+        # beat. Rounds are already serialised by the maintenance advisory lock, so
+        # committing here costs nothing but the extra transactions.
+        db.commit()
         match result:
             case NotificationDeliveryStatus.DELIVERED:
                 delivered += 1
@@ -207,7 +213,6 @@ def deliver_pending(
                 failed += 1
             case _:
                 retrying += 1
-    db.commit()
 
     logger.info(
         "notifications_delivered",
@@ -248,14 +253,19 @@ def _attempt(
     if transport is None:  # pragma: no cover — every enum member has a transport
         return _fail(db, delivery, f"no transport for channel type {channel.type}", at=at)
 
-    payload = finding_opened(finding, source=source, scan=scan, channel=channel)
+    # Building the payload is inside the guard, not before it: a row whose finding
+    # carries something the formatter chokes on would otherwise abort the round
+    # before its commit, undoing the marks and counters of every delivery already
+    # sent — and re-sending all of them, every beat, until an operator noticed.
+    # A poisoned row now fails itself.
     try:
+        payload = finding_opened(finding, source=source, scan=scan, channel=channel)
         transport.send(channel, payload, subject=email_subject(finding, source))
     except DeliveryError as exc:
         return _retry_or_fail(db, delivery, exc, settings, at=at)
-    except Exception as exc:  # a transport bug must not strand the row
-        logger.exception("notification_transport_crashed", delivery_id=str(delivery.id))
-        crash = DeliveryError(f"transport error: {exc.__class__.__name__}")
+    except Exception as exc:  # a formatter or transport bug must not strand the row
+        logger.exception("notification_attempt_crashed", delivery_id=str(delivery.id))
+        crash = DeliveryError(f"delivery error: {exc.__class__.__name__}")
         return _retry_or_fail(db, delivery, crash, settings, at=at)
 
     delivery.status = NotificationDeliveryStatus.DELIVERED

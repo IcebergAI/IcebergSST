@@ -117,9 +117,15 @@ class RecordingDispatcher:
 
     def __init__(self) -> None:
         self.enqueued: list[uuid.UUID] = []
+        #: What :meth:`queue_depth` reports. ``None`` stands in for a broker that
+        #: cannot be asked, which is what the stub broker is in a dev deployment.
+        self.depth: int | None = None
 
     def enqueue(self, task_id: uuid.UUID) -> None:
         self.enqueued.append(task_id)
+
+    def queue_depth(self) -> int | None:
+        return self.depth
 
 
 @pytest.fixture(name="dispatcher")

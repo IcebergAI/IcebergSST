@@ -390,6 +390,34 @@ def test_a_malformed_cursor_is_a_400_not_a_500(
     assert response.status_code == 400
 
 
+def test_the_documented_base_url_is_the_site_root(
+    client: TestClient,
+    session: Session,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """The connector appends its own context path.
+
+    `base_url` is stored verbatim and the Confluence client builds requests as
+    ``base_url + api_prefix``, with ``/wiki/api/v2`` the Cloud default — so an
+    operator following the field's documented example must be given the site
+    root. The example used to carry ``/wiki`` and yielded ``/wiki/wiki/api/v2``.
+    """
+    headers = login_as(make_user(UserRole.ADMIN))
+
+    response = client.post(
+        SOURCES,
+        json=_payload(connection={"base_url": "https://example.atlassian.net"}),
+        headers=headers,
+    )
+
+    assert response.status_code == 201
+    stored = session.exec(select(Source)).one()
+    assert stored.connection["base_url"] == "https://example.atlassian.net"
+    # Unset, so the connector's own default prefix applies exactly once.
+    assert stored.connection["api_prefix"] is None
+
+
 def test_the_connectivity_check_reports_success(
     client: TestClient,
     app: FastAPI,

@@ -4,6 +4,8 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
+from conftest import RecordingDispatcher
+from iceberg_api.scans import service
 from iceberg_api.scheduler import (
     SCHEDULER_LOCK_KEY,
     TickResult,
@@ -12,9 +14,10 @@ from iceberg_api.scheduler import (
     postgres_advisory_lock,
     tick,
 )
-from iceberg_core.enums import SourceType
-from iceberg_core.models import Schedule, Source
-from sqlmodel import Session
+from iceberg_api.scheduler_launcher import build_launcher
+from iceberg_core.enums import ScanTrigger, SourceType
+from iceberg_core.models import Scan, Schedule, Source
+from sqlmodel import Session, select
 
 NIGHTLY = "0 3 * * *"
 MONDAYS = "0 4 * * 1"
@@ -165,6 +168,35 @@ def test_a_failing_launcher_does_not_take_the_round_down(session: Session) -> No
     # The failed one keeps its due time, so the next tick tries again.
     session.refresh(broken)
     assert broken.last_run_at is None
+
+
+def test_a_refused_launch_keeps_an_earlier_schedules_bookkeeping(
+    session: Session, dispatcher: RecordingDispatcher
+) -> None:
+    """The real launcher shares this session, and a source already scanning is
+    refused by the one-active-scan index (ADR 0009 §3).
+
+    That refusal has to cost only the schedule that hit it. Rolled back to the
+    start of the round, the schedules that already fired would keep their old
+    `next_run_at`, be due again on the very next beat, and — for a small source
+    that finished in the meantime — start a second scan of work just done.
+    """
+    idle = _source(session, "idle")
+    busy = _source(session, "busy")
+    service.launch_scan(session, busy, trigger=ScanTrigger.MANUAL, dispatcher=dispatcher)
+    now = datetime(2026, 7, 29, 3, 0, tzinfo=UTC)
+    first = _schedule(session, idle, next_run_at=now - timedelta(minutes=1))
+    second = _schedule(session, busy, next_run_at=now - timedelta(minutes=1))
+
+    result = tick(session, now=now, launcher=build_launcher(dispatcher), lock=lambda _: True)
+
+    assert result.fired == [first.id, second.id]
+    session.refresh(first)
+    assert first.last_run_at is not None
+    assert first.next_run_at is not None
+    assert _utc(first.next_run_at) == datetime(2026, 7, 30, 3, 0, tzinfo=UTC)
+    # The busy source got no second scan, which is the refusal working.
+    assert len(session.exec(select(Scan).where(Scan.source_id == busy.id)).all()) == 1
 
 
 def test_a_missed_beat_fires_once_not_once_per_beat_missed(session: Session) -> None:

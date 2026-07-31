@@ -30,14 +30,7 @@ from iceberg_api.findings.schemas import (
     FindingRead,
     FindingUpdate,
 )
-from iceberg_api.pagination import (
-    DEFAULT_LIMIT,
-    MAX_LIMIT,
-    Cursor,
-    CursorError,
-    after,
-    resolve_cursor,
-)
+from iceberg_api.pagination import DEFAULT_LIMIT, MAX_LIMIT, after, build_page, position
 from iceberg_api.schemas import Page
 
 router = APIRouter(prefix="/findings", tags=["findings"])
@@ -76,11 +69,6 @@ async def list_findings(
     cursor: Annotated[str | None, Query()] = None,
 ) -> Page[FindingRead]:
     """The findings queue, filtered and in stable `(created_at, id)` order."""
-    try:
-        position = resolve_cursor(cursor)
-    except CursorError as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "cursor is not valid") from exc
-
     statement = select(Finding)
     if source_id is not None:
         statement = statement.where(col(Finding.source_id) == source_id)
@@ -100,20 +88,11 @@ async def list_findings(
         statement,
         created_at=Finding.created_at,  # type: ignore[arg-type]  # instrumented attribute
         row_id=Finding.id,  # type: ignore[arg-type]
-        cursor=position,
+        cursor=position(cursor),
     )
     # One extra row answers "is there another page?" without a second count query.
     rows = list(db.exec(statement.limit(limit + 1)))
-    page, has_more = rows[:limit], len(rows) > limit
-
-    return Page(
-        items=[FindingRead.model_validate(finding) for finding in page],
-        next_cursor=(
-            Cursor(created_at=page[-1].created_at, row_id=page[-1].id).encode()
-            if has_more and page
-            else None
-        ),
-    )
+    return build_page(rows, limit=limit, read=FindingRead.model_validate)
 
 
 @router.get("/{finding_id}")

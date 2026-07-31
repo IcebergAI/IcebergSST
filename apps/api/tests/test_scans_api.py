@@ -217,6 +217,39 @@ def test_only_a_completed_scan_may_reconcile(
     assert reconcile_scan(session, scan) is None
 
 
+def test_finalisation_and_reconciliation_stand_or_fall_together(
+    session: Session,
+    dispatcher: RecordingDispatcher,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One transaction, because there is no repair path for half of it.
+
+    Every sweep and the engine-replay path look only at *active* scans, so a
+    completed scan that never reconciled is unreachable: its remediated findings
+    stay open until some later scan happens to resolve them, and its
+    announcements are never queued at all.
+    """
+    scan = _launch(session, dispatcher, _source(session))
+    task = session.exec(select(ScanTask).where(ScanTask.scan_id == scan.id)).one()
+    service.complete_task(session, task, status=ScanTaskStatus.COMPLETED)
+    session.commit()
+
+    def die(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("the pod went away")
+
+    monkeypatch.setattr(service, "reconcile_scan", die)
+
+    with pytest.raises(RuntimeError):
+        service.finalize_and_reconcile(session, scan.id)
+    session.rollback()
+
+    session.refresh(scan)
+    assert scan.status is ScanStatus.QUEUED
+    # And so the safety sweep, which only looks at active scans, still finds it.
+    monkeypatch.undo()
+    assert service.finalize_stalled_scans(session) == [scan.id]
+
+
 def test_an_unknown_scan_is_a_404(
     client: TestClient,
     make_user: Callable[..., User],

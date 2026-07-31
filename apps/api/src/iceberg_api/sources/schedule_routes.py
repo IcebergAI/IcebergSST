@@ -28,14 +28,7 @@ from sqlmodel import select
 from iceberg_api import audit
 from iceberg_api.auth.dependencies import CsrfProtected, SessionDep
 from iceberg_api.auth.rbac import AdminUser, ViewerUser
-from iceberg_api.pagination import (
-    DEFAULT_LIMIT,
-    MAX_LIMIT,
-    Cursor,
-    CursorError,
-    after,
-    resolve_cursor,
-)
+from iceberg_api.pagination import DEFAULT_LIMIT, MAX_LIMIT, after, build_page, position
 from iceberg_api.scheduler import next_fire_time
 from iceberg_api.schemas import Page
 from iceberg_api.sources.schemas import ScheduleCreate, ScheduleRead, ScheduleUpdate
@@ -62,11 +55,6 @@ async def list_schedules(
     cursor: Annotated[str | None, Query()] = None,
 ) -> Page[ScheduleRead]:
     """List schedules, optionally for one source, in stable order."""
-    try:
-        position = resolve_cursor(cursor)
-    except CursorError as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "cursor is not valid") from exc
-
     statement = select(Schedule)
     if source_id is not None:
         statement = statement.where(Schedule.source_id == source_id)
@@ -74,19 +62,10 @@ async def list_schedules(
         statement,
         created_at=Schedule.created_at,  # type: ignore[arg-type]
         row_id=Schedule.id,  # type: ignore[arg-type]
-        cursor=position,
+        cursor=position(cursor),
     )
     rows = list(db.exec(statement.limit(limit + 1)))
-    page, has_more = rows[:limit], len(rows) > limit
-
-    return Page(
-        items=[ScheduleRead.model_validate(schedule) for schedule in page],
-        next_cursor=(
-            Cursor(created_at=page[-1].created_at, row_id=page[-1].id).encode()
-            if has_more and page
-            else None
-        ),
-    )
+    return build_page(rows, limit=limit, read=ScheduleRead.model_validate)
 
 
 @router.get("/{schedule_id}")

@@ -9,9 +9,10 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 from iceberg_api import suppressions
-from iceberg_core.enums import SuppressionScope, UserRole
+from iceberg_core.enums import FindingState, SuppressionScope, UserRole
 from iceberg_core.models import (
     AUDIT_TARGET_SUPPRESSION,
     AuditEvent,
@@ -113,6 +114,100 @@ def test_a_path_glob_matches_the_locator(
     session.refresh(in_prod)
     assert in_sandbox.suppressed_at is not None
     assert in_prod.suppressed_at is None
+
+
+def test_a_path_glob_only_reaches_findings_that_are_still_open(
+    client: TestClient,
+    session: Session,
+    make_source: Callable[..., Source],
+    make_finding: Callable[..., Finding],
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """Nothing narrows a glob in SQL, so unbounded it walks every finding ever
+    recorded — inside the request, holding a write transaction.
+
+    Open findings are the ones a suppression is for; a settled one is already out
+    of the analyst's queue, and if the secret comes back, ingest applies the rule
+    to it then.
+    """
+    headers = login_as(make_user(UserRole.ANALYST))
+    source = make_source()
+    live = make_finding(source, resource_locator={"path": "/space/SANDBOX/page-9"})
+    settled = make_finding(
+        source,
+        resource_locator={"path": "/space/SANDBOX/page-10"},
+        state=FindingState.FALSE_POSITIVE,
+    )
+
+    client.post(
+        SUPPRESSIONS,
+        json={"scope": "path_glob", "pattern": "/space/SANDBOX/*", "reason": "throwaway"},
+        headers=headers,
+    )
+
+    assert _is_hidden(session, live)
+    assert not _is_hidden(session, settled)
+
+
+def test_applying_a_suppression_walks_past_the_first_batch(
+    client: TestClient,
+    session: Session,
+    make_source: Callable[..., Source],
+    make_finding: Callable[..., Finding],
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sweep reads in keyset batches, and suppressing a row takes it out of
+    the query's own filter — so the cursor, not the filter, is what advances it."""
+    headers = login_as(make_user(UserRole.ANALYST))
+    source = make_source()
+    monkeypatch.setattr(suppressions, "SWEEP_BATCH", 2)
+    findings = [
+        make_finding(source, resource_locator={"path": f"/space/SANDBOX/page-{index}"})
+        for index in range(5)
+    ]
+
+    client.post(
+        SUPPRESSIONS,
+        json={"scope": "path_glob", "pattern": "/space/SANDBOX/*", "reason": "throwaway"},
+        headers=headers,
+    )
+
+    assert all(_is_hidden(session, finding) for finding in findings)
+
+
+def test_a_lapse_sweep_walks_past_the_first_batch(
+    session: Session,
+    make_source: Callable[..., Source],
+    make_finding: Callable[..., Finding],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same batching on the maintenance beat, where releasing a finding likewise
+    takes it out of the statement that found it."""
+    source = make_source()
+    monkeypatch.setattr(suppressions, "SWEEP_BATCH", 2)
+    lapsed = Suppression(
+        scope=SuppressionScope.RULE,
+        pattern="generic-high-entropy",
+        reason="silenced for a sprint",
+        expires_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    session.add(lapsed)
+    session.commit()
+    findings = [make_finding(source, rule_id="generic-high-entropy") for _ in range(5)]
+    for finding in findings:
+        finding.suppressed_at = datetime.now(UTC) - timedelta(days=1)
+        finding.suppressed_by_id = lapsed.id
+        session.add(finding)
+    session.commit()
+
+    released = suppressions.release_lapsed(session)
+    session.commit()
+
+    assert released == 5
+    assert not any(_is_hidden(session, finding) for finding in findings)
 
 
 def test_a_global_suppression_covers_every_source(
