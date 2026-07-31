@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block title %}Notifications · {{ app_name }}{% endblock %}
+{% block crumb %}Notification channels{% endblock %}
+
+{% block content %}
+<div class="head-row">
+  <div>
+    <div class="eyebrow">Administration</div>
+    <h1 class="page-title">Notification channels</h1>
+    <div class="title-rule"></div>
+  </div>
+</div>
+
+<p class="lede section-gap">
+  Where newly-opened findings are announced. A webhook sends redacted snippets and resource
+  locations to a URL you choose — a deliberate egress path, so configuring one is admin-only and
+  every change is written to the audit trail.
+</p>
+
+{% if error %}
+<div class="notice notice--crit section-gap" role="alert">
+  <div><strong>Not saved.</strong> {{ error }}</div>
+</div>
+{% endif %}
+
+<div class="section-gap" x-data="disclosure" data-open="{{ 'true' if error or not channels else 'false' }}">
+  <button type="button" class="btn btn--ghost" @click="toggle()" :aria-expanded="open ? 'true' : 'false'">
+    <svg class="btn-ic" aria-hidden="true"><use href="#ic-plus"/></svg>
+    <span x-text="open ? 'Cancel' : 'Add a channel'">Add a channel</span>
+  </button>
+
+  <div class="card card-pad-lg" x-show="open" x-cloak style="margin-top:14px" x-data="channelForm">
+    <script type="application/json">{{ island | tojson }}</script>
+    <form class="stack" hx-post="/channels">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="field-row">
+        <label>
+          Name
+          <input class="field" name="name" required maxlength="255" placeholder="security-alerts">
+        </label>
+        <label>
+          Type
+          <select class="field" name="type" x-model="type">
+            {% for channel_type in types %}
+            <option value="{{ channel_type.value }}">{{ channel_type.value }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+
+      <label x-show="type === 'webhook'" x-cloak>
+        Webhook URL
+        <input class="field field-mono" name="url" type="url" placeholder="https://chat.example.com/hooks/abc">
+        <span class="field-hint">
+          May be internal. There is no address blocklist — the control is that only an admin can set
+          one, and the destination is recorded in the audit trail.
+        </span>
+      </label>
+
+      <label x-show="type === 'email'" x-cloak>
+        Recipients
+        <input class="field" name="recipients" type="email" placeholder="secops@example.com">
+        <span class="field-hint">One address. Add the channel again for more, or edit it after saving.</span>
+      </label>
+
+      <label>
+        Signing secret <span class="muted">(optional)</span>
+        <input class="field field-mono" type="password" name="secret" autocomplete="new-password"
+               placeholder="Shared secret used to sign the payload">
+        <span class="field-hint">
+          Sealed through the secret store and never returned. Put credentials here rather than in a
+          header — headers are stored in the clear, and the API refuses the ones that carry auth.
+        </span>
+      </label>
+
+      <label>
+        Minimum severity
+        <select class="field" name="min_severity">
+          <option value="">Every severity</option>
+          <option value="low">low and above</option>
+          <option value="medium">medium and above</option>
+          <option value="high">high and above</option>
+          <option value="critical">critical only</option>
+        </select>
+      </label>
+
+      <label class="check">
+        <input type="checkbox" name="enabled" checked>
+        Enabled
+      </label>
+
+      <div class="actions">
+        <button type="submit" class="btn btn--primary">Create channel</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<section class="card section-gap">
+  {% if channels %}
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr><th>Name</th><th>Type</th><th>Destination</th><th>Filter</th><th>Secret</th><th>State</th><th class="col-actions">Actions</th></tr>
+      </thead>
+      <tbody>
+        {% for channel in channels %}
+        <tr>
+          <td><strong>{{ channel.name }}</strong></td>
+          <td><span class="tag">{{ channel.type.value }}</span></td>
+          <td class="truncate mono" style="font-size:12px;max-width:320px">
+            {% if channel.type.value == 'webhook' %}
+              {{ channel.config.get('url', '—') }}
+            {% else %}
+              {{ channel.config.get('recipients', []) | join(', ') or '—' }}
+            {% endif %}
+          </td>
+          <td class="mono" style="font-size:12px">
+            {{ (channel.event_filter.min_severity.value ~ '+') if channel.event_filter.min_severity else 'all' }}
+          </td>
+          <td>
+            {% if channel.has_secret %}
+            <span class="tag tag--c is-ok"><span class="dot"></span>sealed</span>
+            {% else %}
+            <span class="tag tag--c is-neutral"><span class="dot"></span>none</span>
+            {% endif %}
+          </td>
+          <td>
+            <span class="tag tag--c {{ 'is-ok' if channel.enabled else 'is-neutral' }}"><span class="dot"></span>{{ 'enabled' if channel.enabled else 'disabled' }}</span>
+          </td>
+          <td class="col-actions" x-data="confirmAction">
+            <button type="button" class="btn btn--danger btn--sm" x-show="!armed" @click="arm()">Delete</button>
+            <span class="row-inline" x-show="armed" x-cloak style="justify-content:flex-end">
+              <button class="btn btn--danger btn--sm" hx-delete="/channels/{{ channel.id }}">Confirm</button>
+              <button type="button" class="btn btn--quiet btn--sm" @click="disarm()">Cancel</button>
+            </span>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <div class="empty-title">No channels</div>
+    <p>Nothing leaves this deployment. Findings are visible in the console and through the API only.</p>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

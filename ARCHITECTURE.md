@@ -160,8 +160,9 @@ connector credentials, full audit trail on finding state changes, and RBAC on ev
 - **M1 — Control plane MVP:** auth, sources/schedules, scan orchestration, findings/triage.
 - **M2 — Detection + Confluence:** detection engine, connector framework, Confluence connector,
   engine worker.
-- **M3 — Web UI:** HTMX/Alpine screens.
-- **M4 — Notifications & prod deploy:** notifications, Helm, hardening.
+- **M3 — Web UI:** HTMX/Alpine screens, served by the API at the application root and driving the
+  same route handlers the JSON API exposes ([`docs/web.md`](./docs/web.md)).
+- **M4 — Notifications & prod deploy:** notification dispatch, Helm, hardening.
 
 Non-goals for MVP: Jira/SMB connectors, incremental/delta scanning, image OCR, external ticket
 creation, multi-tenancy.

@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}{{ finding.rule_id }} · Findings · {{ app_name }}{% endblock %}
+{% block crumb %}{{ finding.rule_id }}{% endblock %}
+
+{% block content %}
+<a class="backlink" href="/findings?state=open&amp;suppressed=false">← Findings</a>
+
+<div class="head-row" style="margin-top:10px">
+  <div>
+    <div class="eyebrow">Finding</div>
+    <h1 class="page-title mono">{{ finding.rule_id }}</h1>
+    <div class="row-inline" style="margin-top:12px">
+      <span class="tag tag--c sev-{{ finding.severity.value }}"><span class="dot"></span>{{ finding.severity.value }}</span>
+      <span class="tag tag--c state-{{ finding.state.value }}"><span class="dot"></span>{{ finding.state.value | humanize }}</span>
+      {% if finding.resolution %}<span class="tag">{{ finding.resolution.value }} resolution</span>{% endif %}
+      {% if finding.suppressed_at %}<span class="tag tag--c is-neutral"><span class="dot"></span>suppressed</span>{% endif %}
+    </div>
+  </div>
+</div>
+
+{% if finding.suppressed_at %}
+<div class="notice section-gap" role="status">
+  <div>
+    <strong>Suppressed {{ finding.suppressed_at | ago }}.</strong>
+    It is recorded, not discarded — out of the active view until the suppression lapses or is
+    deleted, at which point it comes back with an event saying why.
+  </div>
+</div>
+{% endif %}
+
+<div class="grid-2 section-gap">
+  <div class="stack-gap">
+    <section class="card">
+      <div class="card-head"><h2 class="section-title">Evidence</h2></div>
+      <div class="card-pad">
+        <div class="eyebrow" style="margin-bottom:8px">Redacted snippet</div>
+        {#- Masked inside the engine before it left the worker (ADR 0004). The
+            database has never held the plaintext, so there is nothing here to
+            reveal — and the string is autoescaped because it came out of
+            somebody else's Confluence. -#}
+        <pre class="snippet">{{ finding.redacted_snippet }}</pre>
+        <p class="field-hint" style="margin-top:8px">
+          The secret itself was never transmitted or stored — only this mask and a peppered hash,
+          which is what makes the finding identifiable across re-scans without being reversible.
+        </p>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2 class="section-title">Where it is</h2></div>
+      <div class="card-pad">
+        <dl class="kv">
+          {% for key, value in finding.resource_locator.items() %}
+          <dt>{{ key | humanize }}</dt>
+          <dd class="mono" style="font-size:12.5px">
+            {% if key in ('url', 'link') and value is string and (value.startswith('https://') or value.startswith('http://')) %}
+            {#- rel=noopener: the target is an operator-supplied instance, and a
+                new tab must not get a handle on this one. -#}
+            <a href="{{ value }}" target="_blank" rel="noopener noreferrer">{{ value }}
+              <svg class="btn-ic" aria-hidden="true" style="vertical-align:-2px"><use href="#ic-external"/></svg>
+            </a>
+            {% else %}
+            {{ value }}
+            {% endif %}
+          </dd>
+          {% endfor %}
+        </dl>
+      </div>
+    </section>
+
+    {% include "partials/triage.html" %}
+  </div>
+
+  <div class="stack-gap">
+    <section class="card card-pad">
+      <div class="eyebrow" style="margin-bottom:10px">Record</div>
+      <dl class="kv">
+        <dt>Id</dt><dd class="mono" style="font-size:12px">{{ finding.id }}</dd>
+        <dt>Fingerprint</dt><dd class="mono" style="font-size:11.5px">{{ finding.fingerprint }}</dd>
+        <dt>Rule pack</dt><dd class="mono" style="font-size:12px">{{ finding.rulepack_version }}</dd>
+        <dt>Confidence</dt><dd class="mono">{{ '%.2f' % finding.confidence if finding.confidence is not none else 'not scored' }}</dd>
+        <dt>Entropy</dt><dd class="mono">{{ '%.2f' % finding.entropy if finding.entropy is not none else '—' }}</dd>
+        <dt>Source</dt><dd><a href="/sources/{{ finding.source_id }}">{{ finding.source_id | short }}</a></dd>
+        <dt>First seen</dt><dd><a class="mono" style="font-size:12px" href="/scans/{{ finding.first_seen_scan_id }}">{{ finding.created_at | dt }}</a></dd>
+        <dt>Last seen</dt><dd><a class="mono" style="font-size:12px" href="/scans/{{ finding.last_seen_scan_id }}">{{ finding.updated_at | dt }}</a></dd>
+        <dt>Assignee</dt>
+        <dd>{{ user_names.get(finding.assignee_id, finding.assignee_id | short) if finding.assignee_id else 'unassigned' }}</dd>
+      </dl>
+      {% if finding.notes %}
+      <div class="hr"></div>
+      <div class="eyebrow" style="margin-bottom:6px">Notes</div>
+      <p style="margin:0;font-size:13.5px">{{ finding.notes }}</p>
+      {% endif %}
+    </section>
+
+    {% if role in ('analyst', 'admin') %}
+    <section class="card card-pad">
+      <div class="eyebrow" style="margin-bottom:10px">Suppress</div>
+      <p class="empty" style="margin-top:0">
+        If this exact match is known-benign, a fingerprint suppression hides it here and at every
+        future ingest — and records why.
+      </p>
+      <a class="btn btn--ghost btn--sm"
+         href="/suppressions?scope=fingerprint&amp;pattern={{ finding.fingerprint | urlencode }}&amp;source_id={{ finding.source_id }}">
+        Create a suppression
+        <svg class="btn-ic" aria-hidden="true"><use href="#ic-arrow"/></svg>
+      </a>
+    </section>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

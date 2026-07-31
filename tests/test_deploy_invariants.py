@@ -270,3 +270,28 @@ def test_init_env_refuses_to_overwrite_an_existing_env(tmp_path: Path) -> None:
 
     assert code == 1
     assert existing.read_text() == "ICEBERG_MASTER_KEY=precious\n"
+
+
+def test_the_api_image_ships_the_console_and_its_assets() -> None:
+    """The console is served from inside the package, so the image must carry it.
+
+    ``.dockerignore`` exists to keep secrets and build noise out of the layer, and
+    a pattern broad enough to also drop the templates or the vendored fonts would
+    produce an API that boots, answers `/healthz`, and renders an unstyled page
+    with no JavaScript — a failure nobody would attribute to the Dockerfile.
+    """
+    web_root = REPO_ROOT / "apps" / "api" / "src" / "iceberg_api" / "web"
+    ignored = {
+        line.strip()
+        for line in (REPO_ROOT / ".dockerignore").read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    }
+
+    # The whole apps/ tree goes in, which is what carries templates and static.
+    assert "COPY apps/ apps/" in API_DOCKERFILE.read_text()
+
+    for required in ("templates/base.html", "static/assets.lock.json", "static/css/iceberg.css"):
+        assert (web_root / required).is_file(), f"{required} is missing from the package"
+
+    for pattern in ("**/static", "**/templates", "static", "templates", "**/*.css", "**/*.js"):
+        assert pattern not in ignored, f".dockerignore would strip the console: {pattern}"

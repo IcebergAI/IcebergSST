@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}Suppressions · {{ app_name }}{% endblock %}
+{% block crumb %}Suppressions{% endblock %}
+
+{% block content %}
+<div class="head-row">
+  <div>
+    <div class="eyebrow">Configuration</div>
+    <h1 class="page-title">Suppressions</h1>
+    <div class="title-rule"></div>
+  </div>
+</div>
+
+<p class="lede section-gap">
+  Tuning lives in data, not in the rule pack — a suppression takes effect immediately and without a
+  release. Creating one hides the findings it already covers; deleting it gives them back, with an
+  event saying why they returned.
+</p>
+
+{% if error %}
+<div class="notice notice--crit section-gap" role="alert">
+  <div><strong>Not created.</strong> {{ error }}</div>
+</div>
+{% endif %}
+
+{% if role in ('analyst', 'admin') %}
+<div class="section-gap" x-data="disclosure" data-open="{{ 'true' if prefilled or error else 'false' }}">
+  <button type="button" class="btn btn--ghost" @click="toggle()" :aria-expanded="open ? 'true' : 'false'">
+    <svg class="btn-ic" aria-hidden="true"><use href="#ic-plus"/></svg>
+    <span x-text="open ? 'Cancel' : 'Add a suppression'">Add a suppression</span>
+  </button>
+
+  <div class="card card-pad-lg" x-show="open" x-cloak style="margin-top:14px">
+    <form class="stack" hx-post="/suppressions">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="field-row">
+        <label>
+          Scope
+          <select class="field" name="scope" required>
+            <option value="">Choose…</option>
+            {% for scope in scopes %}
+            <option value="{{ scope.value }}" {{ 'selected' if draft.scope == scope.value }}>{{ scope.value | humanize }}</option>
+            {% endfor %}
+          </select>
+          <span class="field-hint">
+            <strong>Fingerprint</strong> hides one exact match; <strong>rule</strong> hides everything a
+            rule finds; <strong>path glob</strong> hides a location.
+          </span>
+        </label>
+        <label>
+          Source
+          <select class="field" name="source_id">
+            <option value="">Global — every source</option>
+            {% for source in sources %}
+            <option value="{{ source.id }}" {{ 'selected' if draft.source_id == source.id | string }}>{{ source.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+      <label>
+        Pattern
+        <input class="field field-mono" name="pattern" required maxlength="512"
+               value="{{ draft.pattern }}" placeholder="docs/**/fixtures/*">
+      </label>
+      <label>
+        Reason
+        <textarea class="field" name="reason" required rows="2"
+                  placeholder="Example credentials in the onboarding guide; confirmed with the docs team"></textarea>
+        <span class="field-hint">
+          Required, and required to be non-blank: a suppression without a stated reason is
+          indistinguishable from a mistake six months later.
+        </span>
+      </label>
+      <label>
+        Expires <span class="muted">(optional)</span>
+        <input class="field" type="datetime-local" name="expires_at">
+        <span class="field-hint">Read as UTC, like every other timestamp here. Must be in the future.</span>
+      </label>
+      <div class="actions">
+        <button type="submit" class="btn btn--primary">Create suppression</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+<form class="filter-bar section-gap" method="get" action="/suppressions">
+  <label>
+    Source
+    <select class="field field--sm" name="source_id">
+      <option value="">Any</option>
+      {% for source in sources %}
+      <option value="{{ source.id }}" {{ 'selected' if selected.source_id == source.id | string }}>{{ source.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>
+    Scope
+    <select class="field field--sm" name="scope">
+      <option value="">Any</option>
+      {% for scope in scopes %}
+      <option value="{{ scope.value }}" {{ 'selected' if selected.scope == scope.value }}>{{ scope.value | humanize }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>
+    Live
+    <select class="field field--sm" name="active">
+      <option value="">Either</option>
+      <option value="true" {{ 'selected' if selected.active == 'true' }}>Not expired</option>
+      <option value="false" {{ 'selected' if selected.active == 'false' }}>Expired</option>
+    </select>
+  </label>
+  <button type="submit" class="btn btn--ghost btn--sm">Apply</button>
+  <a class="btn btn--quiet btn--sm" href="/suppressions">Clear</a>
+</form>
+
+<section class="card section-gap">
+  {% if suppressions %}
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr><th>Scope</th><th>Pattern</th><th>Source</th><th>Reason</th><th>Expires</th><th>Created</th>
+        {% if role in ('analyst', 'admin') %}<th class="col-actions">Action</th>{% endif %}</tr>
+      </thead>
+      <tbody>
+        {% for suppression in suppressions %}
+        <tr>
+          <td><span class="tag">{{ suppression.scope.value | humanize }}</span></td>
+          <td class="mono truncate" style="font-size:12px;max-width:300px">{{ suppression.pattern }}</td>
+          <td class="truncate">
+            {% if suppression.source_id %}
+              {{ source_names.get(suppression.source_id, suppression.source_id | short) }}
+            {% else %}
+              <span class="muted">global</span>
+            {% endif %}
+          </td>
+          <td class="truncate" style="max-width:320px;font-size:13px">{{ suppression.reason }}</td>
+          <td class="mono nowrap" style="font-size:12px">{{ suppression.expires_at | dt if suppression.expires_at else 'never' }}</td>
+          <td class="mono nowrap" style="font-size:12px">{{ suppression.created_at | dt }}</td>
+          {% if role in ('analyst', 'admin') %}
+          <td class="col-actions" x-data="confirmAction">
+            <button type="button" class="btn btn--danger btn--sm" x-show="!armed" @click="arm()">Delete</button>
+            <span class="row-inline" x-show="armed" x-cloak style="justify-content:flex-end">
+              <button class="btn btn--danger btn--sm" hx-delete="/suppressions/{{ suppression.id }}">Release findings</button>
+              <button type="button" class="btn btn--quiet btn--sm" @click="disarm()">Cancel</button>
+            </span>
+          </td>
+          {% endif %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <div class="empty-title">Nothing is suppressed</div>
+    <p>Every finding this deployment records is in the active view.</p>
+  </div>
+  {% endif %}
+</section>
+
+{% if next_cursor %}
+<div class="pager">
+  <span class="pager-count">Showing one page</span>
+  <a class="btn btn--ghost btn--sm" href="/suppressions?cursor={{ next_cursor | urlencode }}">
+    Next page
+    <svg class="btn-ic" aria-hidden="true"><use href="#ic-arrow"/></svg>
+  </a>
+</div>
+{% endif %}
+{% endblock %}

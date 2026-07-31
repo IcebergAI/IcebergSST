@@ -1,0 +1,128 @@
+{#- The live status region (#56).
+
+    It polls *itself*: the `hx-trigger="every Ns"` lives on this fragment, and the
+    terminal version of the fragment omits it. So a scan that finishes stops the
+    polling by the act of rendering — the browser never needs to know which
+    statuses are terminal, and there is no timer to leak.
+-#}
+<div id="scan-status"
+     {% if active %}
+     hx-get="/scans/{{ scan.id }}/status"
+     hx-trigger="every {{ poll_seconds }}s"
+     hx-swap="outerHTML"
+     {% endif %}>
+
+  {% if message %}
+  <div class="notice notice--warn" role="status" style="margin-bottom:16px">
+    <div><strong>Nothing to cancel.</strong> {{ message }}</div>
+  </div>
+  {% endif %}
+
+  <section class="card card-pad-lg">
+    <div class="head-row" style="align-items:center">
+      <div class="row-inline">
+        {% if active %}<span class="live-dot" aria-hidden="true"></span>{% endif %}
+        <span class="tag tag--c status-{{ scan.status.value }}"><span class="dot"></span>{{ scan.status.value }}</span>
+        <span class="muted">
+          {% if active %}
+            {{ task_finished }} of {{ task_total }} task(s) finished
+          {% elif scan.finished_at %}
+            finished {{ scan.finished_at | ago }}
+          {% else %}
+            not started
+          {% endif %}
+        </span>
+      </div>
+      {% if active and role in ('analyst', 'admin') %}
+      <div x-data="confirmAction">
+        <button type="button" class="btn btn--danger btn--sm" x-show="!armed" @click="arm()">Cancel scan</button>
+        <span class="row-inline" x-show="armed" x-cloak>
+          <button class="btn btn--danger btn--sm"
+                  hx-post="/scans/{{ scan.id }}/cancel"
+                  hx-target="#scan-status"
+                  hx-swap="outerHTML">Confirm cancel</button>
+          <button type="button" class="btn btn--quiet btn--sm" @click="disarm()">Keep running</button>
+        </span>
+      </div>
+      {% endif %}
+    </div>
+
+    <div class="progress {{ 'is-done' if scan.status.value == 'completed' }} {{ 'is-failed' if scan.status.value in ('failed', 'cancelled') }}"
+         style="margin-top:14px"
+         role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ percent }}"
+         aria-label="Scan progress">
+      <span style="width:{{ percent }}%"></span>
+    </div>
+
+    {% if scan.error %}
+    <div class="notice notice--crit" role="alert" style="margin-top:16px">
+      <div><strong>The scan reported an error.</strong> {{ scan.error }}</div>
+    </div>
+    {% endif %}
+
+    {% if scan.status.value == 'partial' %}
+    <div class="notice notice--warn" style="margin-top:16px">
+      <div>
+        <strong>Partial.</strong> Some tasks failed, so this scan did not see the whole source —
+        findings it did not observe were deliberately <em>not</em> auto-resolved.
+      </div>
+    </div>
+    {% elif scan.status.value == 'cancelled' %}
+    <div class="notice" style="margin-top:16px">
+      <div>
+        <strong>Cancelled.</strong> A cancelled scan never reconciles: it saw part of the source,
+        and resolving findings on that basis would be wrong.
+      </div>
+    </div>
+    {% endif %}
+
+    <div class="stat-grid" style="margin-top:18px">
+      <div class="stat">
+        <div class="stat-label">Units scanned</div>
+        <div class="stat-num">{{ scan.counts.get('units', 0) }}</div>
+        <div class="stat-foot">{{ scan.counts.get('units_skipped', 0) }} skipped · {{ scan.counts.get('units_failed', 0) }} failed</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Findings</div>
+        <div class="stat-num">{{ scan.counts.get('findings', 0) }}</div>
+        <div class="stat-foot">{{ scan.counts.get('suppressed', 0) }} suppressed at ingest</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">New / reopened</div>
+        <div class="stat-num">{{ scan.counts.get('new', 0) }}</div>
+        <div class="stat-foot">{{ scan.counts.get('reopened', 0) }} reopened</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Auto-resolved</div>
+        <div class="stat-num">{{ scan.counts.get('resolved', 0) }}</div>
+        <div class="stat-foot">no longer present at the source</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card section-gap">
+    <div class="card-head"><h2 class="section-title">Tasks</h2></div>
+    {% if tasks %}
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Kind</th><th>Status</th><th>Engine</th><th>Attempts</th><th>Lease</th><th>Finished</th><th>Error</th></tr></thead>
+        <tbody>
+          {% for task in tasks %}
+          <tr>
+            <td class="mono" style="font-size:12px">{{ task.kind.value }}</td>
+            <td><span class="tag tag--c status-{{ task.status.value }}"><span class="dot"></span>{{ task.status.value }}</span></td>
+            <td class="mono" style="font-size:12px">{{ task.engine_id | short if task.engine_id else '—' }}</td>
+            <td class="mono">{{ task.attempts }}</td>
+            <td class="mono nowrap" style="font-size:12px">{{ task.lease_expires_at | dt }}</td>
+            <td class="mono nowrap" style="font-size:12px">{{ task.finished_at | dt }}</td>
+            <td class="truncate" style="max-width:280px;font-size:12.5px">{{ task.error or '' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="card-pad empty">No tasks yet — the discovery task has not been created.</div>
+    {% endif %}
+  </section>
+</div>

@@ -39,13 +39,19 @@ Confluence-scan-to-triaged-finding flow). M3–M4 complete the product.
   report (ADR 0009 semantics).
 
 ## M3 — Web UI
-- **Epic: HTMX + Alpine shell** — layout, auth-gated nav, base templates.
+- **Epic: HTMX + Alpine shell** — layout, auth-gated nav, base templates. Server-rendered Jinja
+  under a strict CSP (`script-src 'self'`), self-hosted Alpine CSP build + HTMX + fonts with SRI,
+  the shared Iceberg design system. See [`docs/web.md`](./web.md).
 - **Epic: Screens** — sources list/form, scan launch + live status, findings table + filters +
   detail/triage, suppressions, schedules, engine health dashboard, notification channels,
-  user & role management.
+  user & role management. Every screen calls the corresponding API route handler; the boundary is
+  asserted by `apps/api/tests/test_web_invariants.py`.
+- Notification-channel **CRUD** landed here rather than in M4, because the M3 screen needs routes
+  to drive. Dispatch remains M4.
 
 ## M4 — Notifications & prod deploy
-- **Epic: Notifications** — channel model, email/SMTP + webhook dispatch, new-finding events.
+- **Epic: Notifications** — email/SMTP + webhook **dispatch**, new-finding events. The channel model
+  and its CRUD API shipped with M3.
 - **Epic: Helm chart** — api Deploy, engine Deploy + HPA, pg/redis, secrets, ingress, values.
 - **Epic: Hardening** — security review, rate limiting, audit logging, data-retention policy,
   key + pepper rotation runbook, docs polish.

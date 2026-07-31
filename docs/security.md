@@ -68,7 +68,39 @@ Two features deliberately send traffic out of the deployment, both admin-gated a
 ## Notification egress
 Webhook channels send redacted snippets + resource locations to arbitrary URLs — a deliberate
 egress channel. Channel configuration is **admin-only**, the payload is documented, and adding
-a channel is audit-logged.
+a channel is audit-logged with the destination it points at.
+
+A channel's signing secret is sealed through the secret store and never returned in a response —
+the same contract source credentials have. Custom webhook *headers* are stored as plain JSON, so
+the header names that carry authentication (`Authorization`, `Proxy-Authorization`, `Cookie`) are
+**refused on write** with a pointer at the sealed `secret` field. A bearer token sitting in clear
+text in `notification_channel.config` would be precisely the finding this product exists to report
+in other people's systems.
+
+## The browser surface (M3)
+The console renders attacker-influenced strings — Confluence page titles, resource paths, redacted
+snippets — which makes it the highest-value stored-XSS target in the deployment. The mitigations,
+in full in [`web.md`](./web.md):
+
+- **`script-src 'self'` with no `'unsafe-inline'` and no `'unsafe-eval'`.** Possible because the UI
+  carries no inline JavaScript at all: Alpine runs from its CSP build, every component is registered
+  in a same-origin `/static` file, and server data reaches it through
+  `<script type="application/json">` islands. `style-src` keeps `'unsafe-inline'` for dynamic
+  `style=` attributes only — the standard "strict CSP targets scripts" carve-out.
+- **Every frontend dependency is first-party**, pinned in `static/assets.lock.json` with an SRI
+  hash, and verified against the committed bytes by a test rather than by a network call. Fonts are
+  self-hosted, so the console also works air-gapped.
+- **`frame-ancestors 'none'`** (plus the legacy `X-Frame-Options: DENY`), `nosniff`,
+  `Referrer-Policy: strict-origin-when-cross-origin` so a source name in the URL does not leak
+  cross-origin, a deny-all `Permissions-Policy`, `Cross-Origin-Opener-Policy: same-origin`, and HSTS
+  in production.
+- **CSRF on every mutating browser route** — asserted across the whole router, not route by route.
+- **No credential is ever rendered.** The source form has none to echo, the channels screen shows
+  `sealed`/`none`, and an engine token appears once, in the response that minted it.
+
+FastAPI's interactive docs (`/docs`, `/redoc`) are exempted from the CSP by path: they load Swagger
+UI from a CDN and bootstrap it inline, and a policy loose enough to run them would be no policy.
+They are a developer tool, not part of the product surface.
 
 ## Authentication in practice (ADR 0005)
 - **Flow:** authorization code + PKCE. `state` lives in a short-lived signed cookie (blocks a forced

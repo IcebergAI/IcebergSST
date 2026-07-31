@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Scans · {{ app_name }}{% endblock %}
+{% block crumb %}Scans{% endblock %}
+
+{% block content %}
+<div class="head-row">
+  <div>
+    <div class="eyebrow">Workspace</div>
+    <h1 class="page-title">Scans</h1>
+    <div class="title-rule"></div>
+  </div>
+</div>
+
+{#- A plain GET form. The filters are in the URL, so a filtered view can be
+    bookmarked, linked in a ticket, and reloaded — none of which a client-side
+    filter gives you. -#}
+<form class="filter-bar section-gap" method="get" action="/scans">
+  <label>
+    Source
+    <select class="field field--sm" name="source_id">
+      <option value="">Any source</option>
+      {% for source in sources %}
+      <option value="{{ source.id }}" {{ 'selected' if selected_source == source.id | string }}>{{ source.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>
+    Status
+    <select class="field field--sm" name="status">
+      <option value="">Any status</option>
+      {% for status in statuses %}
+      <option value="{{ status.value }}" {{ 'selected' if selected_status == status.value }}>{{ status.value }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button type="submit" class="btn btn--ghost btn--sm">Apply</button>
+  <a class="btn btn--quiet btn--sm" href="/scans">Clear</a>
+</form>
+
+<section class="card section-gap">
+  {% if scans %}
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr><th>Status</th><th>Source</th><th>Trigger</th><th>Findings</th><th>Rule pack</th><th>Started</th><th>Finished</th></tr>
+      </thead>
+      <tbody>
+        {% for scan in scans %}
+        <tr>
+          <td>
+            <a href="/scans/{{ scan.id }}">
+              <span class="tag tag--c status-{{ scan.status.value }}"><span class="dot"></span>{{ scan.status.value }}</span>
+            </a>
+          </td>
+          <td class="truncate">
+            <a href="/sources/{{ scan.source_id }}">{{ source_names.get(scan.source_id, scan.source_id | short) }}</a>
+          </td>
+          <td class="mono" style="font-size:12px">{{ scan.trigger.value }}</td>
+          <td class="mono">{{ scan.counts.get('findings', 0) }} / {{ scan.counts.get('units', 0) }} units</td>
+          <td class="mono" style="font-size:12px">{{ scan.rulepack_version or '—' }}</td>
+          <td class="mono nowrap" style="font-size:12px">{{ scan.started_at | dt }}</td>
+          <td class="mono nowrap" style="font-size:12px">{{ scan.finished_at | dt }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <div class="empty-title">No scans match</div>
+    <p>Launch one from a source, or clear the filters above.</p>
+  </div>
+  {% endif %}
+</section>
+
+{% if next_cursor %}
+<div class="pager">
+  <span class="pager-count">Showing one page</span>
+  <a class="btn btn--ghost btn--sm"
+     href="/scans?cursor={{ next_cursor | urlencode }}{% if selected_source %}&amp;source_id={{ selected_source | urlencode }}{% endif %}{% if selected_status %}&amp;status={{ selected_status | urlencode }}{% endif %}">
+    Next page
+    <svg class="btn-ic" aria-hidden="true"><use href="#ic-arrow"/></svg>
+  </a>
+</div>
+{% endif %}
+{% endblock %}

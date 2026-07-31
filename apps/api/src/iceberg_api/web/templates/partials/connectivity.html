@@ -1,0 +1,28 @@
+{#- The connectivity-check result, swapped in beside the button that asked.
+
+    Nothing from the source's response body appears here. The API reduces the
+    probe to a reachable flag, a status code, and a bounded explanation — the URL
+    is operator-supplied and the response is untrusted (docs/security.md
+    § Outbound requests).
+-#}
+<div id="connectivity">
+  {% if error %}
+  <div class="notice notice--crit" role="status">
+    <div><strong>Could not test.</strong> {{ error }}</div>
+  </div>
+  {% elif result.reachable %}
+  <div class="notice notice--ok" role="status">
+    <div>
+      <strong>Reachable.</strong> {{ result.detail }}
+      {% if result.status_code %}<span class="mono muted"> · HTTP {{ result.status_code }}</span>{% endif %}
+    </div>
+  </div>
+  {% else %}
+  <div class="notice notice--warn" role="status">
+    <div>
+      <strong>Not reachable.</strong> {{ result.detail }}
+      {% if result.status_code %}<span class="mono muted"> · HTTP {{ result.status_code }}</span>{% endif %}
+    </div>
+  </div>
+  {% endif %}
+</div>

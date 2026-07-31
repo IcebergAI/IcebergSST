@@ -35,6 +35,10 @@ AUDIT_SUPPRESSION_CREATED = "suppression.created"
 AUDIT_SUPPRESSION_DELETED = "suppression.deleted"
 AUDIT_ENGINE_REGISTERED = "engine.registered"
 AUDIT_ENGINE_TOKEN_ROTATED = "engine.token_rotated"  # noqa: S105  # an audit action name
+AUDIT_CHANNEL_CREATED = "channel.created"
+AUDIT_CHANNEL_UPDATED = "channel.updated"
+AUDIT_CHANNEL_DELETED = "channel.deleted"
+AUDIT_CHANNEL_SECRET_SET = "channel.secret_set"  # noqa: S105  # an audit action name
 
 #: Values for ``target_type``.
 AUDIT_TARGET_USER = "user"
@@ -42,6 +46,7 @@ AUDIT_TARGET_SOURCE = "source"
 AUDIT_TARGET_SCHEDULE = "schedule"
 AUDIT_TARGET_SUPPRESSION = "suppression"
 AUDIT_TARGET_ENGINE = "engine"
+AUDIT_TARGET_CHANNEL = "channel"
 
 
 class AuditEvent(IcebergModel, table=True):
