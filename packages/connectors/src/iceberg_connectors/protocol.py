@@ -61,7 +61,7 @@ class TaskSpec:
         return {"label": self.label, "params": self.params}
 
     @classmethod
-    def from_payload(cls, payload: dict[str, Any]) -> "TaskSpec":
+    def from_payload(cls, payload: dict[str, Any]) -> TaskSpec:
         """Rebuild a spec from a lease. Tolerates a bare params mapping.
 
         A spec written by an older engine may have no ``label``; that is cosmetic,

@@ -102,12 +102,17 @@ See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full picture and
 Needs [uv](https://docs.astral.sh/uv/) and Docker.
 
 ```bash
+make sync       # install the workspace, and the git hooks that keep secrets out of history
 make init-env   # .env from .env.example, with a master key and sealed pepper generated
 make up         # build, start api + engine + postgres + redis, wait for health, migrate
 make seed       # optional: a disabled demo source to click around
 make scale N=3  # more engine replicas
 make down       # stop; `make destroy` also drops the data volume
 ```
+
+Run `make sync` in a fresh clone before anything else: git hooks live in `.git/hooks`, which is
+not part of a checkout, so until it runs the pre-commit gitleaks hook is not installed and a
+secret can be committed locally. (`make hooks` installs them on their own.)
 
 The console is then at <http://localhost:8000/> and the OpenAPI docs at `/docs`. Signing in needs
 OIDC configured in `.env`; the first person to sign in lands as a viewer unless

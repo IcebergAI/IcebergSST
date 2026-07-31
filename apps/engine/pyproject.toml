@@ -2,7 +2,7 @@
 name = "iceberg-engine"
 version = "0.1.0"
 description = "Dramatiq scanner worker: connector fetch, detection, redaction. No DB credentials."
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = [
     "iceberg-core",
     "iceberg-detect",

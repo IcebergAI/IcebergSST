@@ -213,7 +213,7 @@ class EngineClient:
                 self.sleep(delay)
             try:
                 return self._send(method, url, json)
-            except (LeaseRefused, AuthenticationFailed):
+            except LeaseRefused, AuthenticationFailed:
                 # The API's considered answer. Asking again changes nothing.
                 raise
             except RetryableApiError as exc:
@@ -276,6 +276,6 @@ def _parse_cancelled_ids(raw: object) -> list[uuid.UUID]:
     for value in raw:
         try:
             parsed.append(uuid.UUID(str(value)))
-        except (ValueError, AttributeError):
+        except ValueError, AttributeError:
             logger.warning("heartbeat_bad_cancelled_id", value=str(value)[:64])
     return parsed

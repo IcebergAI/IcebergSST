@@ -57,7 +57,7 @@ class Span:
         if self.start < 0 or self.end <= self.start:
             raise ValueError(f"invalid span: [{self.start}, {self.end})")
 
-    def overlaps(self, other: "Span") -> bool:
+    def overlaps(self, other: Span) -> bool:
         return self.start < other.end and other.start < self.end
 
 
@@ -78,7 +78,7 @@ class RedactionPolicy:
     min_length_to_reveal: int = 16
 
     @classmethod
-    def from_strategy_name(cls, name: str, **overrides: int) -> "RedactionPolicy":
+    def from_strategy_name(cls, name: str, **overrides: int) -> RedactionPolicy:
         """Build a policy from a rule pack's ``redaction:`` value.
 
         Unknown names raise: a typo in a rule pack must fail at load time, not

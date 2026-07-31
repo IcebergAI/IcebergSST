@@ -29,8 +29,8 @@ metadata for **all 34 packages in the lock**:
   `greenlet`, `markupsafe`, `pydantic-core`).
 - No package's `Requires-Python` excludes 3.14.
 
-Live execution on 3.14 is delegated to the **CI matrix** (issue #19), which runs the full
-lint/type/test suite on both 3.13 and 3.14 on every PR — so 3.14 is continuously proven, not
+Live execution on 3.14 was delegated to the **CI matrix** (issue #19), which ran the full
+lint/type/test suite on both 3.13 and 3.14 on every PR — so 3.14 was continuously proven, not
 assumed.
 
 ## Decision
@@ -41,6 +41,21 @@ assumed.
   restricted dev environments without a 3.14 build keep working. Raise the floor to `>=3.14`
   once the M0 containers epic lands a dev image with 3.14 baked in.
 - CI treats **3.14 as primary** and 3.13 as the compatibility leg.
+
+## Resolved — floor raised (issue #82, 2026-07-31)
+
+The condition set above was met: #80 landed both role images on `python:3.14-slim`, and its CI
+run was the first in this repo to actually execute the 3.14 leg end to end. So 3.14 is now the
+runtime *and* a proven test target, and the fallback exists to protect an environment that no
+longer has to be catered for.
+
+- The workspace and all five members pin `requires-python = ">=3.14"`; ruff targets `py314`
+  and mypy checks against `3.14`.
+- The 3.13 CI leg is **dropped, not kept as a compatibility check**. With the floor at `>=3.14`
+  a 3.13 leg cannot resolve the environment, so it could only ever fail — the floor and the
+  matrix have to agree. CI now runs a single 3.14 job, the same interpreter the images ship.
+
+The consequence, stated plainly: contributors and images on 3.13 are no longer supported.
 
 ## Reproducing
 

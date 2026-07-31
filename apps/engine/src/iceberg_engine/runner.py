@@ -198,7 +198,7 @@ def _submit(
             lease.task_id, report.as_submission(lease.idempotency_key, pack.version)
         )
         return True
-    except (LeaseRefused, AuthenticationFailed):
+    except LeaseRefused, AuthenticationFailed:
         # On the results route a 403/409 means the lease is gone, not a bad token:
         # it worked at lease time moments ago. The task is no longer ours to report.
         log.info("scan_task_lease_lost_before_report", status=report.status)

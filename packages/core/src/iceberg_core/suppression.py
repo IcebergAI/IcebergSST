@@ -47,7 +47,7 @@ class SuppressionRule:
         return {"id": str(self.id), "scope": self.scope.value, "pattern": self.pattern}
 
     @classmethod
-    def from_payload(cls, payload: dict[str, str]) -> "SuppressionRule":
+    def from_payload(cls, payload: dict[str, str]) -> SuppressionRule:
         """Rebuild a rule an engine received in its lease.
 
         Raises rather than skipping an unparseable entry: an engine that quietly

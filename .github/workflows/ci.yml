@@ -13,21 +13,19 @@ permissions:
 
 jobs:
   checks:
-    name: lint + type + test (py${{ matrix.python-version }})
+    name: lint + type + test (py3.14)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # 3.14 is the target runtime; 3.13 is the supported floor
-        # (docs/spikes/python-3.14-compat.md).
-        python-version: ["3.13", "3.14"]
     steps:
       - uses: actions/checkout@v5
 
+      # Single version by design. The workspace pins requires-python = ">=3.14"
+      # (#82), so a 3.13 leg could not resolve the environment even to report a
+      # compatibility signal — the floor and the matrix have to agree. 3.14 is
+      # also what both role images run, so CI and production share an interpreter.
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.14"
 
       - name: Sync workspace (locked)
         run: uv sync --locked

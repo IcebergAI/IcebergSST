@@ -203,7 +203,7 @@ class ScheduleUpdate(BaseModel):
     enabled: bool | None = None
 
     @model_validator(mode="after")
-    def _valid_cron(self) -> "ScheduleUpdate":
+    def _valid_cron(self) -> ScheduleUpdate:
         if self.cron is not None and not croniter.is_valid(self.cron.strip()):
             raise ValueError("cron must be a valid 5-field expression, e.g. '0 3 * * *'")
         return self

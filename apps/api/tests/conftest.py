@@ -72,7 +72,7 @@ def app_fixture(
     db_engine: Engine,
     session: Session,
     secret_store: EnvKeyBackend,
-    dispatcher: "RecordingDispatcher",
+    dispatcher: RecordingDispatcher,
 ) -> FastAPI:
     """The real app, with settings, the database, and the provider overridden."""
     # background=False: the tests drive the scheduler and reclaim directly.

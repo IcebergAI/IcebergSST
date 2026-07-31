@@ -81,7 +81,7 @@ class ExtractionSandbox:
     def close(self) -> None:
         self._discard_pool()
 
-    def __enter__(self) -> "ExtractionSandbox":
+    def __enter__(self) -> ExtractionSandbox:
         return self
 
     def __exit__(self, *_exc: object) -> None:

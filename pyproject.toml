@@ -2,7 +2,7 @@
 name = "icebergsst"
 version = "0.1.0"
 description = "IcebergSST — secret scanning for non-git enterprise sources (workspace root)"
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = [
     "iceberg-api",
     "iceberg-engine",
@@ -39,7 +39,7 @@ dev = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py313"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = [
@@ -63,7 +63,7 @@ select = [
 
 [tool.mypy]
 strict = true
-python_version = "3.13"
+python_version = "3.14"
 files = ["apps", "packages"]
 warn_unreachable = true
 pretty = true

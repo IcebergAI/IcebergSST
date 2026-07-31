@@ -38,7 +38,7 @@ def get_db_session() -> Iterator[Session]:
     yield from session_dependency()
 
 
-def get_secret_store(settings: "SettingsDep") -> SecretStore:
+def get_secret_store(settings: SettingsDep) -> SecretStore:
     """The secret store as a dependency (ADR 0007), overridable in tests."""
     return build_secret_store(settings)
 

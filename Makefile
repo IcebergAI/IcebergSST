@@ -2,7 +2,7 @@ COMPOSE ?= docker compose -f deploy/compose/docker-compose.yml --env-file .env
 # Engine replica count for `make scale`.
 N ?= 2
 
-.PHONY: help sync lint format type test check up down destroy migrate seed logs ps scale init-env secrets
+.PHONY: help sync hooks lint format type test check up down destroy migrate seed logs ps scale init-env secrets
 
 help: ## List the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -10,8 +10,16 @@ help: ## List the available targets
 
 # ─── Workspace ────────────────────────────────────────────────────────────────
 
-sync: ## Install/refresh the workspace environment
+sync: ## Install/refresh the workspace environment (and install git hooks)
 	uv sync
+	$(MAKE) hooks
+
+# Hooks are per-clone: .pre-commit-config.yaml is committed, .git/hooks is not.
+# Without this the gitleaks hook — the one that stops a secret reaching history in
+# the first place — is silently absent from every fresh clone. CI runs the same
+# checks either way, but by then the secret is already committed.
+hooks: ## Install the pre-commit hooks into this clone
+	uv run pre-commit install --install-hooks
 
 lint: ## Ruff lint + formatting check
 	uv run ruff check .

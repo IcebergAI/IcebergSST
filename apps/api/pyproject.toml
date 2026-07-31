@@ -2,7 +2,7 @@
 name = "iceberg-api"
 version = "0.1.0"
 description = "FastAPI control plane: REST API, HTMX UI, scheduler, notifications. Sole writer of record."
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = [
     # Only the api role owns the schema and runs migrations (docs/deployment.md).
     "alembic>=1.18.5",

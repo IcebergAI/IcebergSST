@@ -134,7 +134,7 @@ class SuppressionCreate(BaseModel):
         return trimmed
 
     @model_validator(mode="after")
-    def _expiry_in_the_future(self) -> "SuppressionCreate":
+    def _expiry_in_the_future(self) -> SuppressionCreate:
         if self.expires_at is None:
             return self
         # A naive timestamp is read as UTC, the same assumption every other

@@ -2,7 +2,7 @@
 name = "iceberg-detect"
 version = "0.1.0"
 description = "Detection engine and versioned rule packs (regex + entropy + keyword proximity)."
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = [
     "iceberg-core",
     # Rule packs are YAML shipped inside the engine image (ADR 0008).
