@@ -37,15 +37,76 @@ Postgres publishes no host port by default, and Redis requires a password even i
 is a shared trust surface (`docs/security.md`).
 
 ## Production — Helm
-`deploy/helm/` chart:
-- **api** `Deployment` + `Service` + `Ingress` (OIDC in front).
-- **engine** `Deployment` + **HPA** — autoscaling is safe because engines are stateless workers
-  with no DB coupling.
-- **Postgres** and **Redis** as managed services or operator-provisioned; connection details and
-  the master encryption key injected via Kubernetes `Secret`s.
-- Migrations run as a pre-upgrade `Job`.
-- Values expose: image tags, replica counts/HPA bounds, OIDC config, DB/Redis endpoints,
-  secret-store backend selection (env-key vs Vault).
+
+`deploy/helm/icebergsst/`. What it renders:
+
+| Object | Notes |
+|---|---|
+| api `Deployment` + `Service` + `Ingress` | The only role with a Service — engines are consumers, nothing calls them. |
+| engine `Deployment` + **HPA** | Autoscaling is on by default and safe: engines hold leases, not state, and a lapsed lease is reclaimed by the api (ADR 0009). |
+| migration `Job` | `pre-install,pre-upgrade` hook, api image, `python -m iceberg_api migrate`. |
+| `ConfigMap` | Everything non-secret. |
+| **Two** `Secret`s | See below. |
+| Two `ServiceAccount`s | One per role, neither with a mounted token. |
+| `NetworkPolicy` pair | Off by default; needs a policy-enforcing CNI. |
+
+**Postgres and Redis are not in the chart.** A bundled database is a development convenience that
+becomes a production liability — no backups, no failover, and a `helm uninstall` that takes the
+findings with it. Point the chart at a managed service or an operator-provisioned instance.
+
+### Two Secrets, not one
+
+The api's Secret holds the database URL, the master key, the session secret and the OIDC client
+secret. The engine's holds a broker URL and its own token — **no database credential and no master
+key**, because there is nothing an engine could correctly do with either (ADR 0002). The engine
+Deployment does not reference the api's Secret at all, so separate Kubernetes RBAC on the two
+ServiceAccounts expresses the same boundary the code draws.
+
+For production, create both out of band (sealed-secrets, External Secrets, a Vault injector) and
+name them:
+
+```yaml
+secrets:
+  existingApiSecret: icebergsst-api
+  existingEngineSecret: icebergsst-engine
+```
+
+Values passed to Helm end up in the release's stored manifest, which is not where a master key
+belongs. The inline `secrets.api.*` / `secrets.engine.*` values exist so a first install works;
+they are not the production path.
+
+### Installing
+
+```bash
+helm install icebergsst deploy/helm/icebergsst -f my-values.yaml
+
+# Then mint an engine token against the database, from the api pod:
+kubectl exec deploy/icebergsst-api -- python -m iceberg_api mint-engine-token --name engine-1
+```
+
+`deploy/helm/example-values.yaml` is a complete, working values file with placeholder credentials.
+
+### Two settings that are wrong by default for your cluster
+
+- **`config.rateLimit.trustedProxyHops`** must match the number of proxies in front of the api.
+  With an ingress controller and the default of 1 it is right; at 0, every request is charged to
+  the controller's address and the auth rate limit protects nothing (`docs/security.md` § Rate
+  limiting).
+- **`config.oidc.redirectUrl`** defaults to the ingress host when an Ingress is enabled. If you
+  terminate TLS somewhere else, set it explicitly — the identity provider will reject a mismatch.
+
+### Verifying a change to the chart
+
+```bash
+make helm-verify
+```
+
+Lints, renders with the example values, and then asserts things about the **rendered manifests**
+that `helm lint` cannot see: the engine carries no database configuration and mounts only its own
+Secret, migrations are a pre-upgrade hook running the api image, every workload is non-root,
+unprivileged, read-only-rootfs and has resource requests, the engine has an HPA and no Service.
+CI runs it on every PR. The cheap half — reading the templates — runs in the ordinary test suite
+(`tests/test_deploy_invariants.py`).
 
 ## Migrations
 Alembic, configured at `apps/api/src/iceberg_api/alembic.ini` — inside the package, so it ships in

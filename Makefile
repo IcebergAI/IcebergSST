@@ -2,7 +2,8 @@ COMPOSE ?= docker compose -f deploy/compose/docker-compose.yml --env-file .env
 # Engine replica count for `make scale`.
 N ?= 2
 
-.PHONY: help sync hooks lint format type test check images images-verify up down destroy \
+.PHONY: help sync hooks lint format type test check images images-verify \
+        helm-verify helm-template up down destroy \
         migrate seed logs ps scale init-env secrets
 
 help: ## List the available targets
@@ -49,6 +50,14 @@ images: ## Build both role images
 # the engine image (ADR 0002). CI runs this on every PR (#81).
 images-verify: ## Build both images and assert their deployment invariants
 	./deploy/docker/verify-images.sh
+
+# ─── Helm ─────────────────────────────────────────────────────────────────────
+
+helm-verify: ## Lint the chart, render it, and assert the rendered manifests
+	./deploy/helm/verify-chart.sh
+
+helm-template: ## Render the chart with the example values, to stdout
+	helm template icebergsst deploy/helm/icebergsst -f deploy/helm/example-values.yaml
 
 # ─── Local stack ──────────────────────────────────────────────────────────────
 # `up` waits for every healthcheck before migrating, so what it hands back is a

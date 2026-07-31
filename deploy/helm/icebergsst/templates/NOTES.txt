@@ -1,0 +1,51 @@
+IcebergSST {{ .Chart.AppVersion }} is installed as {{ .Release.Name }}.
+
+{{ if .Values.api.ingress.enabled -}}
+Console:  http{{ if .Values.api.ingress.tls.enabled }}s{{ end }}://{{ .Values.api.ingress.host }}/
+API docs: http{{ if .Values.api.ingress.tls.enabled }}s{{ end }}://{{ .Values.api.ingress.host }}/docs
+{{- else -}}
+No Ingress is enabled. To reach the console:
+
+  kubectl --namespace {{ .Release.Namespace }} port-forward \
+    svc/{{ include "icebergsst.componentName" (dict "context" . "role" "api") }} 8000:{{ .Values.api.service.port }}
+{{- end }}
+
+Before anyone can sign in
+-------------------------
+{{ if not .Values.config.oidc.issuer -}}
+!! OIDC is not configured, so login will return 503. Set config.oidc.issuer,
+   config.oidc.clientId and secrets.api.oidcClientSecret.
+{{ end -}}
+{{ if not .Values.config.bootstrapAdmin.subject -}}
+!! No bootstrap admin is set. The first person to sign in will land as a viewer
+   and nobody will be able to promote them. Set config.bootstrapAdmin.subject to
+   the OIDC subject of your first administrator (docs/security.md § Bootstrap).
+{{ end }}
+Enrolling an engine
+-------------------
+Engines authenticate with a per-engine token, minted against the database from
+the api pod:
+
+  kubectl --namespace {{ .Release.Namespace }} exec deploy/{{ include "icebergsst.componentName" (dict "context" . "role" "api") }} -- \
+    python -m iceberg_api mint-engine-token --name engine-1
+
+Put the printed id and token into secrets.engine.engineId / engineToken (or the
+Secret named by secrets.existingEngineSecret) and upgrade. The token is shown
+once; only its hash is stored.
+
+Things worth checking
+---------------------
+{{ if eq (int .Values.config.rateLimit.trustedProxyHops) 0 -}}
+* config.rateLimit.trustedProxyHops is 0 while an ingress is in front. Every
+  request will be charged to the ingress controller's address, so the auth rate
+  limit protects nothing. Set it to the number of proxies (usually 1).
+{{ end -}}
+{{ if not .Values.secrets.existingApiSecret -}}
+* Secrets came from values, so they are in this release's stored manifest.
+  For production, create them out of band and name them in
+  secrets.existingApiSecret / secrets.existingEngineSecret.
+{{ end -}}
+{{ if and (eq (int .Values.config.retention.resolvedFindingsDays) 0) (eq (int .Values.config.retention.auditEventsDays) 0) -}}
+* Retention is off: nothing is ever deleted. That is the default on purpose —
+  see docs/retention.md before changing it.
+{{ end }}

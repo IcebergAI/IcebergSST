@@ -1,0 +1,255 @@
+# Default values for IcebergSST.
+#
+# The shape of this file follows the role split the whole system is built on
+# (ADR 0002): `api` holds database credentials and the master key, `engine` holds
+# neither and has nowhere to put them. That is enforced by the templates — the
+# engine Deployment mounts a different Secret — and asserted by
+# tests/test_deploy_invariants.py, which fails if a database variable ever
+# appears in the engine's manifest.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  registry: ghcr.io
+  pullPolicy: IfNotPresent
+  # Named separately because they are genuinely different images with different
+  # dependency closures — the engine image has no database driver at all.
+  api:
+    repository: icebergai/icebergsst-api
+    # Empty means Chart.appVersion. Pin a digest or an immutable tag in
+    # production; `latest` and a mutable tag both make a rollback a guess.
+    tag: ""
+  engine:
+    repository: icebergai/icebergsst-engine
+    tag: ""
+  pullSecrets: []
+
+serviceAccount:
+  # Separate accounts per role, so a Kubernetes RBAC policy can express
+  # "engines may not read the api's Secret" — the same boundary the code draws.
+  create: true
+  annotations: {}
+  apiName: ""
+  engineName: ""
+
+# ─── Non-secret configuration ────────────────────────────────────────────────
+# Everything here lands in a ConfigMap. Anything sensitive belongs in `secrets`
+# below; a value in this block is readable by anyone who can read ConfigMaps.
+config:
+  environment: prod
+  logLevel: INFO
+
+  # ADR 0007. `vault` selects the Vault backend; `env_key` uses the master key
+  # from the api Secret.
+  secretStoreBackend: env_key
+
+  # Matches scoring below this are dropped (#70). Delivered to engines in their
+  # lease, so it is api-side only.
+  confidenceThreshold: 0.5
+
+  # Authentication (ADR 0005). The client *secret* is in `secrets`.
+  oidc:
+    issuer: ""
+    clientId: ""
+    redirectUrl: ""
+    scopes: "openid profile email"
+
+  session:
+    ttlMinutes: 480
+    # Leave true. A session cookie sent in clear is a session anyone on the path
+    # can steal; this is false only for local HTTP development.
+    cookieSecure: true
+
+  # The first admin (docs/security.md § Bootstrap). Matched at user creation, so
+  # a later demotion is not undone by re-login.
+  bootstrapAdmin:
+    subject: ""
+    email: ""
+
+  # Rate limiting (#63).
+  rateLimit:
+    enabled: true
+    auth: 20
+    engine: 600
+    engineAuth: 30
+    # MUST match the number of proxies in front of the api, or every request is
+    # charged to the ingress controller's address and the limit protects nothing.
+    # With a single ingress controller terminating TLS, this is 1.
+    trustedProxyHops: 1
+
+  # Data retention (#73). Zero means keep forever, which is the default because
+  # this database is evidence — see docs/retention.md before changing any of it.
+  retention:
+    resolvedFindingsDays: 0
+    findingEventsDays: 0
+    auditEventsDays: 0
+
+  # Notification dispatch (#60). Empty host disables email; the password is in
+  # `secrets`.
+  smtp:
+    host: ""
+    port: 587
+    from: icebergsst@localhost
+    starttls: true
+    username: ""
+
+  notifications:
+    maxAttempts: 5
+    retryBackoffSeconds: 60
+
+# ─── Secrets ─────────────────────────────────────────────────────────────────
+# Two Secrets, never one. The api's carries the database URL, the master key and
+# the session secret; the engine's carries only its own token and the broker URL.
+# An engine that cannot read the api's Secret cannot reach the database even if
+# its process is compromised — which is the deployment-layer half of ADR 0002.
+#
+# In production, create both out of band (sealed-secrets, External Secrets, Vault
+# injector) and name them here. Values in this file end up in the release's
+# stored manifest, which is not where a master key belongs.
+secrets:
+  # Set either of these and the chart will not template that Secret at all.
+  existingApiSecret: ""
+  existingEngineSecret: ""
+
+  api:
+    # postgresql+psycopg://user:password@host:5432/iceberg
+    databaseUrl: ""
+    # redis://:password@host:6379/0
+    redisUrl: ""
+    # `make secrets` prints a matching pair. Losing the master key makes every
+    # stored credential ref undecryptable; back it up before you need it.
+    masterKey: ""
+    fingerprintPepperRef: ""
+    # Rotating this logs everyone out, which is the intended blast radius.
+    sessionSecret: ""
+    oidcClientSecret: ""
+    smtpPassword: ""
+
+  engine:
+    redisUrl: ""
+    # Minted with `python -m iceberg_api mint-engine-token` in the api pod. One
+    # per fleet is workable; one per replica is better and needs a Secret each.
+    engineId: ""
+    engineToken: ""
+
+# ─── api role ────────────────────────────────────────────────────────────────
+api:
+  replicaCount: 2
+
+  service:
+    type: ClusterIP
+    port: 8000
+    annotations: {}
+
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    host: icebergsst.example.com
+    path: /
+    pathType: Prefix
+    tls:
+      enabled: true
+      secretName: icebergsst-tls
+
+  # The api is IO-bound and mostly idle; these are a starting point, not a
+  # measurement.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+
+# ─── engine role ─────────────────────────────────────────────────────────────
+engine:
+  replicaCount: 2
+
+  # Concurrent scan tasks per process. Each holds a lease and an HTTP connection
+  # to the api, so this trades scan throughput against control-plane load; scale
+  # replicas as well.
+  workerThreads: 4
+
+  metricsPort: 9191
+
+  # Engines do the actual work: regex over documents, PDF extraction. Give them
+  # more than the api.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+
+  # Safe to autoscale precisely because engines are stateless: they hold leases,
+  # not state, and a lease that lapses when a replica goes away is reclaimed by
+  # the api (ADR 0009).
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+
+# ─── Migrations ──────────────────────────────────────────────────────────────
+# A pre-install/pre-upgrade Job, api role only — it owns the schema, and an image
+# that migrated on start would race its own replicas and surprise an operator
+# mid-rollback.
+migrations:
+  enabled: true
+  backoffLimit: 1
+  activeDeadlineSeconds: 600
+  annotations: {}
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+# ─── Pod hardening ───────────────────────────────────────────────────────────
+# The restricted Pod Security Standard. The images already run as uid 10001 and
+# need to write nothing, so none of this costs anything.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  privileged: false
+  capabilities:
+    drop:
+      - ALL
+
+# A NetworkPolicy pair that says out loud what the architecture already says:
+# only the api talks to Postgres. Off by default because it needs a CNI that
+# enforces policy and labels that match your cluster's conventions.
+networkPolicy:
+  enabled: false
+  # Selector for the ingress controller allowed to reach the api.
+  ingressControllerNamespace: ingress-nginx

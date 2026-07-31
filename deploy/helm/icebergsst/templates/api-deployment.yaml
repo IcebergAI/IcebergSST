@@ -1,0 +1,106 @@
+{{- $role := "api" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "icebergsst.componentName" (dict "context" . "role" $role) }}
+  labels:
+    {{- include "icebergsst.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  {{- if not .Values.api.autoscaling.enabled }}
+  replicas: {{ .Values.api.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "icebergsst.selectorLabels" (dict "context" . "role" $role) | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Roll the pods when configuration changes. Without this a `helm upgrade`
+        # that only edits the ConfigMap leaves every replica running the old
+        # values, and the release looks applied when it is not.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.api.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "icebergsst.labels" . | nindent 8 }}
+        {{- include "icebergsst.selectorLabels" (dict "context" . "role" $role) | nindent 8 }}
+        {{- with .Values.api.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "icebergsst.serviceAccountName" (dict "context" . "role" $role) }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: api
+          image: {{ include "icebergsst.image" (dict "context" . "role" $role) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            {{- include "icebergsst.commonEnv" . | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "icebergsst.configMapName" . }}
+            # The api role is the only one given this Secret — it is what holds
+            # the database URL and the master key (ADR 0002).
+            - secretRef:
+                name: {{ include "icebergsst.apiSecretName" . }}
+          # Same endpoint the image's HEALTHCHECK uses, so compose and Kubernetes
+          # agree about what "ready" means.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          # Generous: a rolling upgrade should not kill a pod that is slow to
+          # reach the database, it should wait and then report it.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 30
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          volumeMounts:
+            # readOnlyRootFilesystem is on, and Python wants a writable temp
+            # directory for uploads and multipart parsing.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

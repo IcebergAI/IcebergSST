@@ -15,6 +15,11 @@ repos:
       - id: check-merge-conflict
       - id: check-added-large-files
       - id: check-yaml
+        # Helm templates are Go templates that happen to produce YAML; a parser
+        # sees `{{- if ... }}` at the top level and gives up. `make helm-verify`
+        # is what checks these — it renders them and validates the result, which
+        # is the only form in which they are YAML at all.
+        exclude: ^deploy/helm/icebergsst/templates/
       - id: check-toml
 
   - repo: https://github.com/astral-sh/ruff-pre-commit

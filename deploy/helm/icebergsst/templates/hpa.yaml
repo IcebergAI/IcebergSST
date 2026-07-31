@@ -1,0 +1,60 @@
+{{/*
+Autoscaling. On for engines by default and off for the api, which is the
+asymmetry the architecture implies: engines are stateless workers that hold
+leases rather than state, so a replica that disappears has its work reclaimed by
+the api (ADR 0009) — while the api is the writer of record and its useful
+replica count is driven by availability, not by CPU.
+*/}}
+{{- if .Values.engine.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "icebergsst.componentName" (dict "context" . "role" "engine") }}
+  labels:
+    {{- include "icebergsst.labels" . | nindent 4 }}
+    app.kubernetes.io/component: engine
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "icebergsst.componentName" (dict "context" . "role" "engine") }}
+  minReplicas: {{ .Values.engine.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.engine.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.engine.autoscaling.targetCPUUtilizationPercentage }}
+  behavior:
+    scaleDown:
+      # Scanning is bursty — a scheduled sweep finishes and CPU drops. Scaling in
+      # immediately would kill engines holding leases that then have to lapse and
+      # be reclaimed, turning a quiet moment into re-done work.
+      stabilizationWindowSeconds: 300
+{{- end }}
+{{- if .Values.api.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "icebergsst.componentName" (dict "context" . "role" "api") }}
+  labels:
+    {{- include "icebergsst.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "icebergsst.componentName" (dict "context" . "role" "api") }}
+  minReplicas: {{ .Values.api.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.api.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.api.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

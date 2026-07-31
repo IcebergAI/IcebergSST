@@ -1,0 +1,125 @@
+{{/*
+The engine Deployment. What is *absent* here is the design (ADR 0002):
+
+  * no database URL, and no Secret that contains one — the api's Secret is not
+    referenced from this file at all;
+  * no master key — the fingerprint pepper arrives per task in the lease
+    response, never as engine configuration (ADR 0007/0009);
+  * no Service and no published port beyond metrics: nothing calls an engine,
+    engines call the api.
+
+tests/test_deploy_invariants.py reads this template and fails if a
+DATABASE/POSTGRES/MASTER_KEY variable ever appears in it.
+*/}}
+{{- $role := "engine" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "icebergsst.componentName" (dict "context" . "role" $role) }}
+  labels:
+    {{- include "icebergsst.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  {{- if not .Values.engine.autoscaling.enabled }}
+  replicas: {{ .Values.engine.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "icebergsst.selectorLabels" (dict "context" . "role" $role) | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.engine.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "icebergsst.labels" . | nindent 8 }}
+        {{- include "icebergsst.selectorLabels" (dict "context" . "role" $role) | nindent 8 }}
+        {{- with .Values.engine.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "icebergsst.serviceAccountName" (dict "context" . "role" $role) }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # A draining engine finishes the task it leased rather than dropping it and
+      # waiting for the lease to lapse. Longer than the longest fetch, shorter
+      # than the lease.
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: engine
+          image: {{ include "icebergsst.image" (dict "context" . "role" $role) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.engine.metricsPort }}
+              protocol: TCP
+          env:
+            {{- include "icebergsst.commonEnv" . | nindent 12 }}
+            - name: ICEBERG_API_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "icebergsst.configMapName" . }}
+                  key: ICEBERG_API_BASE_URL
+            - name: ICEBERG_WORKER_THREADS
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "icebergsst.configMapName" . }}
+                  key: ICEBERG_WORKER_THREADS
+            - name: ICEBERG_METRICS_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "icebergsst.configMapName" . }}
+                  key: ICEBERG_METRICS_PORT
+          envFrom:
+            # Named individually above rather than pulling the whole ConfigMap:
+            # the ConfigMap also carries api-role settings, and an engine that is
+            # handed them invites the next person to make one of them matter.
+            - secretRef:
+                name: {{ include "icebergsst.engineSecretName" . }}
+          # Engines have no HTTP API, so the metrics endpoint is the liveness
+          # signal: process up and serving means the worker is alive.
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.engine.resources | nindent 12 }}
+          volumeMounts:
+            # Extraction writes temporary files; the root filesystem is read-only.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.engine.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.engine.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.engine.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.engine.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

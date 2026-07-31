@@ -53,6 +53,19 @@ jobs:
       - name: Build both images and assert their deployment invariants
         run: make images-verify
 
+  helm:
+    name: lint + render helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # `helm lint` says the templates are well-formed. It cannot say the engine
+      # Deployment carries no database credentials, that only the api migrates,
+      # or that both roles run unprivileged — which is why this renders the chart
+      # and checks the manifests (#61, #62). Same idea as the images job.
+      - name: Lint the chart and assert its rendered manifests
+        run: make helm-verify
+
   secret-scan:
     name: secret scan (gitleaks)
     runs-on: ubuntu-latest
