@@ -43,9 +43,11 @@ def process_engine_fixture(db_engine: SAEngine) -> Iterator[None]:
 def run_round_fixture(secret_store: SecretStore) -> Callable[..., None]:
     """One maintenance round with settings supplied rather than read from the env.
 
-    A round delivers queued notifications (#60), so it needs settings and a secret
-    store. Injecting them keeps these tests from depending on a configured
-    deployment — and from needing an SMTP relay to prove the scheduler fires.
+    A round delivers queued notifications (#60) and applies retention (#73), so
+    it needs settings and a secret store. Injecting them keeps these tests from
+    depending on a configured deployment — no SMTP relay is needed to prove the
+    scheduler fires, and the retention windows default to off, so none of these
+    rounds can delete anything.
     """
     settings = ApiSettings(
         database_url="postgresql+psycopg://unused/unused",
@@ -94,7 +96,9 @@ def test_a_round_launches_due_scans_and_advances_the_schedule(
 
 
 def test_a_round_reclaims_expired_leases(
-    session: Session, dispatcher: RecordingDispatcher, run_round: Callable[..., None]
+    session: Session,
+    dispatcher: RecordingDispatcher,
+    run_round: Callable[..., None],
 ) -> None:
     source = _source(session)
     scan = service.launch_scan(session, source, trigger=ScanTrigger.MANUAL, dispatcher=dispatcher)

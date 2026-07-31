@@ -39,6 +39,9 @@ AUDIT_CHANNEL_CREATED = "channel.created"
 AUDIT_CHANNEL_UPDATED = "channel.updated"
 AUDIT_CHANNEL_DELETED = "channel.deleted"
 AUDIT_CHANNEL_SECRET_SET = "channel.secret_set"  # noqa: S105  # an audit action name
+#: Retention purges (#73). Deleting evidence is itself an administrative action,
+#: so it is recorded — with counts, and with the window that justified it.
+AUDIT_RETENTION_PURGED = "retention.purged"
 
 #: Values for ``target_type``.
 AUDIT_TARGET_USER = "user"
@@ -47,6 +50,8 @@ AUDIT_TARGET_SCHEDULE = "schedule"
 AUDIT_TARGET_SUPPRESSION = "suppression"
 AUDIT_TARGET_ENGINE = "engine"
 AUDIT_TARGET_CHANNEL = "channel"
+#: A purge is about the deployment, not about one row, so it has no target id.
+AUDIT_TARGET_RETENTION = "retention"
 
 
 class AuditEvent(IcebergModel, table=True):

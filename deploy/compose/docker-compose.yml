@@ -104,6 +104,11 @@ services:
       # 0 for the compose stack: nothing proxies the api here, so the peer
       # address is the client. Behind an ingress this must match the hop count.
       ICEBERG_TRUSTED_PROXY_HOPS: ${ICEBERG_TRUSTED_PROXY_HOPS:-0}
+      # Retention (#73). Off by default — deleting evidence is opt-in, and the
+      # api role is the only one that touches the database anyway.
+      ICEBERG_RETENTION_RESOLVED_FINDINGS_DAYS: ${ICEBERG_RETENTION_RESOLVED_FINDINGS_DAYS:-0}
+      ICEBERG_RETENTION_FINDING_EVENTS_DAYS: ${ICEBERG_RETENTION_FINDING_EVENTS_DAYS:-0}
+      ICEBERG_RETENTION_AUDIT_EVENTS_DAYS: ${ICEBERG_RETENTION_AUDIT_EVENTS_DAYS:-0}
     ports:
       - "${ICEBERG_API_PORT:-8000}:8000"
     depends_on:
