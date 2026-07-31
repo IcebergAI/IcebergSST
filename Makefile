@@ -4,7 +4,7 @@ N ?= 2
 
 .PHONY: help sync hooks lint format type test check images images-verify \
         helm-verify helm-template up down destroy \
-        migrate seed logs ps scale init-env secrets
+        migrate seed logs ps scale init-env secrets engine-token
 
 help: ## List the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -63,7 +63,7 @@ helm-template: ## Render the chart with the example values, to stdout
 # `up` waits for every healthcheck before migrating, so what it hands back is a
 # stack that is ready rather than one that is merely started.
 
-up: | .env ## Build and start the stack, then migrate
+up: | .env ## Build and start the control plane, then migrate
 	$(COMPOSE) up -d --build --wait
 	$(MAKE) migrate
 
@@ -78,6 +78,12 @@ migrate: ## Apply migrations (api role only — it owns the schema)
 
 seed: ## Load development fixtures (refuses to run in prod)
 	$(COMPOSE) run --rm api python -m iceberg_api.seed
+
+# An engine refuses to boot without a credential, and only a migrated API can mint
+# one — so the engine cannot come up in the same step as the stack it registers
+# with. `up` starts the control plane; this starts an engine against it.
+engine-token: ## Mint an engine credential into .env and start an engine
+	./deploy/compose/engine-token.sh
 
 scale: ## Run N engine replicas (make scale N=4)
 	$(COMPOSE) up -d --no-recreate --scale engine=$(N) engine

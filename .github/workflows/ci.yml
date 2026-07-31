@@ -11,18 +11,24 @@ on:
 permissions:
   contents: read
 
+# Actions are pinned to a commit, not to a tag: a tag is a mutable pointer the
+# action's owner can move, and this repository pins everything else it consumes
+# (the uv version in both Dockerfiles, the gitleaks image, `uv sync --locked`).
+# The trailing comment is the human-readable half — keep the two in step when
+# bumping, since only the SHA decides what runs.
+
 jobs:
   checks:
     name: lint + type + test (py3.14)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
 
       # Single version by design. The workspace pins requires-python = ">=3.14"
       # (#82), so a 3.13 leg could not resolve the environment even to report a
       # compatibility signal — the floor and the matrix have to agree. 3.14 is
       # also what both role images run, so CI and production share an interpreter.
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
         with:
           enable-cache: true
           python-version: "3.14"
@@ -39,11 +45,70 @@ jobs:
       - name: Test
         run: make test
 
+  migrations:
+    name: migrate against postgres
+    runs-on: ubuntu-latest
+
+    # apps/api/tests/test_migrations.py runs on SQLite, where alembic takes the
+    # batch-copy path for an ALTER, JSONB is ordinary JSON and a partial index is
+    # spelled differently. That is enough to prove the ops execute and the shape
+    # matches the models — it cannot prove the Postgres DDL is valid. Without
+    # this job the first machine to execute a `postgresql_where` index or a JSONB
+    # server_default is the pre-upgrade Job in production (#126).
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: iceberg
+          POSTGRES_DB: iceberg
+          # Trust rather than a password: this container is job-local, reachable
+          # only from this runner, and destroyed with the job — so there is no
+          # credential to commit and none to leak.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U iceberg -d iceberg"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+
+    env:
+      # The only setting `migrate` needs. Everything else on ApiSettings has a
+      # default and none of it reaches the DDL.
+      ICEBERG_DATABASE_URL: postgresql+psycopg://iceberg@localhost:5432/iceberg
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
+        with:
+          enable-cache: true
+          python-version: "3.14"
+
+      - name: Sync workspace (locked)
+        run: uv sync --locked
+
+      # The entry point compose, the Helm hook Job and the tests all use, so what
+      # is exercised here is what production runs.
+      - name: Apply every revision
+        run: uv run python -m iceberg_api migrate
+
+      # Reversibility is what makes a rollback possible, and re-applying is the
+      # assertion: a downgrade that leaves a table, an index or a type behind
+      # fails the second upgrade on a name that already exists. `downgrade` goes
+      # through alembic directly because the operator CLI deliberately only ever
+      # moves forward.
+      - name: Reverse to base, then re-apply
+        run: |
+          uv run alembic -c apps/api/src/iceberg_api/alembic.ini downgrade base
+          uv run python -m iceberg_api migrate
+
   images:
     name: build + verify role images
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
 
       # Reading a Dockerfile cannot tell you an image builds, that its entrypoint
       # serves, or that sqlalchemy is genuinely absent from the engine rather than
@@ -57,7 +122,7 @@ jobs:
     name: lint + render helm chart
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
 
       # `helm lint` says the templates are well-formed. It cannot say the engine
       # Deployment carries no database credentials, that only the api migrates,
@@ -70,7 +135,7 @@ jobs:
     name: secret scan (gitleaks)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           # Full history so previously committed-then-removed secrets are caught.
           fetch-depth: 0

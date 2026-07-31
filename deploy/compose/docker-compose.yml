@@ -124,6 +124,15 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/engine.Dockerfile
+    # Behind a profile because of an ordering the stack cannot resolve on its
+    # own: an engine refuses to start without a token, and a token can only be
+    # minted by the api against a migrated database — which does not exist until
+    # `make up` has finished. So the first `up` brings up the control plane, and
+    # `deploy/compose/engine-token.sh` mints a token, records it in .env
+    # (`COMPOSE_PROFILES=engine`, so every later up/ps/logs includes engines) and
+    # starts the engine. Naming the service still works either way, which is what
+    # keeps `make scale N=3` unchanged.
+    profiles: ["engine"]
     # Deliberately absent, and asserted by tests/test_deploy_invariants.py:
     #   * any DATABASE/POSTGRES variable — engines reach the DB through the API
     #     or not at all (ADR 0002);
@@ -138,6 +147,12 @@ services:
       ICEBERG_ENGINE_ID: ${ICEBERG_ENGINE_ID:-}
       ICEBERG_ENGINE_TOKEN: ${ICEBERG_ENGINE_TOKEN:-}
       ICEBERG_WORKER_THREADS: ${ICEBERG_WORKER_THREADS:-4}
+    # Matches terminationGracePeriodSeconds in the chart, and for the same
+    # reason: worker.py catches SIGTERM and finishes the task it has leased.
+    # Docker's default of 10s would SIGKILL a fetch in progress and leave the
+    # scan waiting out its 300s lease before anything reclaims it — so `make
+    # down` is only the clean shutdown the worker promises with this set.
+    stop_grace_period: 120s
     depends_on:
       redis:
         condition: service_healthy

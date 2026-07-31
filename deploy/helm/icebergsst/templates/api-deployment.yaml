@@ -20,6 +20,15 @@ spec:
         # that only edits the ConfigMap leaves every replica running the old
         # values, and the release looks applied when it is not.
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if not .Values.secrets.existingApiSecret }}
+        # And the same for the Secret this role reads, because the values that
+        # move most are in it: rotating `sessionSecret`, or opening a
+        # pepper-rotation window with `previousFingerprintPepperRef`, changes
+        # nothing else in the release. Omitted when the Secret is managed out of
+        # band — the chart does not render it, so this would be a constant that
+        # never moves when the Secret behind it does.
+        checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.api.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

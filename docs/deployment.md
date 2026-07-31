@@ -14,7 +14,7 @@ Plus **PostgreSQL** and **Redis**.
 `deploy/compose/docker-compose.yml` brings up:
 ```
 api        →  FastAPI + UI            (depends on postgres, redis)
-engine     →  Dramatiq worker         (depends on redis, api)
+engine     →  Dramatiq worker         (depends on redis, api; profile `engine`)
 postgres   →  system of record
 redis      →  Dramatiq broker
 ```
@@ -36,6 +36,31 @@ redis      →  Dramatiq broker
 Postgres publishes no host port by default, and Redis requires a password even in dev — the broker
 is a shared trust surface (`docs/security.md`).
 
+### Bringing up an engine
+
+```bash
+make init-env                      # .env, with generated secrets
+make up                            # postgres, redis, api — and migrate
+./deploy/compose/engine-token.sh   # mint a token, record it, start the engine
+```
+
+The third line is a step of its own because of an ordering nothing in the stack can resolve for
+itself. An engine **refuses to start without a token** — a worker that boots without credentials
+consumes messages it cannot process, and failing at boot is the honest version of that. Only the
+api can mint one (`mint-engine-token` stores the hash, never the token), and only against a schema
+that does not exist until `make up` has migrated. A value invented in `.env` beforehand would
+authenticate with something the API never issued, which is why `make init-env` deliberately leaves
+it blank.
+
+So the engine service sits behind a compose **profile**. Until a token exists it is simply not part
+of the stack, and `make up` succeeds rather than waiting on a container that cannot start.
+`engine-token.sh` writes `ICEBERG_ENGINE_ID`, `ICEBERG_ENGINE_TOKEN` and `COMPOSE_PROFILES=engine`
+into `.env`, so every later `make up`, `make ps` and `make logs` includes engines. `make scale N=3`
+names the service explicitly and works either way.
+
+Re-running the script rotates the token; the previous one stops working immediately. Pass a name
+(`./deploy/compose/engine-token.sh engine-2`) to register a second engine.
+
 ## Production — Helm
 
 `deploy/helm/icebergsst/`. What it renders:
@@ -44,9 +69,9 @@ is a shared trust surface (`docs/security.md`).
 |---|---|
 | api `Deployment` + `Service` + `Ingress` | The only role with a Service — engines are consumers, nothing calls them. |
 | engine `Deployment` + **HPA** | Autoscaling is on by default and safe: engines hold leases, not state, and a lapsed lease is reclaimed by the api (ADR 0009). |
-| migration `Job` | `pre-install,pre-upgrade` hook, api image, `python -m iceberg_api migrate`. |
-| `ConfigMap` | Everything non-secret. |
-| **Two** `Secret`s | See below. |
+| migration `Job` | `pre-install,pre-upgrade` hook (weight `-5`), api image, `python -m iceberg_api migrate`. |
+| `ConfigMap` | Everything non-secret. Also a hook at weight `-10` — see below. |
+| **Two** `Secret`s | See below. The api's is a hook at weight `-10`; the engine's is not. |
 | Two `ServiceAccount`s | One per role, neither with a mounted token. |
 | `NetworkPolicy` pair | Off by default; needs a policy-enforcing CNI. |
 
@@ -86,6 +111,30 @@ kubectl exec deploy/icebergsst-api -- python -m iceberg_api mint-engine-token --
 
 `deploy/helm/example-values.yaml` is a complete, working values file with placeholder credentials.
 
+### Why the ConfigMap and the api Secret are hooks
+
+Helm creates every hook resource before any ordinary manifest. The migration Job is a hook, and it
+reads its database URL and the rest of its configuration through `envFrom` — so on a fresh install
+the things it reads have to be hooks too, at a lower weight (`-10` against the Job's `-5`), or the
+Job starts before they exist and sits in `CreateContainerConfigError` until the deadline. The same
+annotation is what makes an upgrade migrate the database the *new* values name rather than the
+previous release's.
+
+Their delete policy is `before-hook-creation` and nothing else: both Deployments read them for the
+life of the release, so `hook-succeeded` would delete them the moment the migration finished. The
+engine's Secret is not a hook — nothing reads it before its Deployment exists.
+
+The cost is ownership. A hook resource is not part of the release manifest, so:
+
+```bash
+helm uninstall icebergsst
+kubectl delete configmap/icebergsst-config secret/icebergsst-api   # left behind
+```
+
+Keeping them is usually what you want between a reinstall against the same database — the master
+key in that Secret is the only thing that can open your stored credential refs — but it is a
+deliberate deletion, not something `helm uninstall` does for you.
+
 ### Two settings that are wrong by default for your cluster
 
 - **`config.rateLimit.trustedProxyHops`** must match the number of proxies in front of the api.
@@ -103,8 +152,10 @@ make helm-verify
 
 Lints, renders with the example values, and then asserts things about the **rendered manifests**
 that `helm lint` cannot see: the engine carries no database configuration and mounts only its own
-Secret, migrations are a pre-upgrade hook running the api image, every workload is non-root,
-unprivileged, read-only-rootfs and has resource requests, the engine has an HPA and no Service.
+Secret, migrations are a pre-upgrade hook running the api image, everything that hook reads is
+itself a hook at a lower weight (and none of it is deleted when the hook finishes), every workload
+is non-root, unprivileged, read-only-rootfs and has resource requests, the engine has an HPA and no
+Service.
 CI runs it on every PR. The cheap half — reading the templates — runs in the ordinary test suite
 (`tests/test_deploy_invariants.py`).
 
@@ -117,6 +168,14 @@ Only the **api** role runs migrations (it owns the schema); engines never touch 
 stack, the pre-upgrade `Job` in Helm, and `uv run python -m iceberg_api migrate` locally. All of
 them read `ICEBERG_DATABASE_URL`.
 
+Two CI legs cover them. `apps/api/tests/test_migrations.py` runs in the ordinary suite on SQLite
+and is the drift check: every table in the metadata exists, no column has wandered, the downgrade
+is complete. The `migrations` job runs the same revisions against a **Postgres** service container
+— upgrade to head, `alembic downgrade base`, upgrade again — because SQLite says nothing about
+JSONB, `postgresql_where` partial indexes, or an `ALTER` that SQLite only survives by copying the
+table. A revision that is valid in one dialect and not the other fails there rather than in the
+pre-upgrade `Job`.
+
 ## Scaling model
 - Throughput scales by adding **engine** replicas — more Dramatiq consumers pulling scan tasks
   from Redis.
@@ -128,5 +187,10 @@ them read `ICEBERG_DATABASE_URL`.
   returns immediately instead of queuing a redundant tick. Note that on SQLite (tests, local runs)
   there is nothing to serialise and the tick always reports leadership, so the lock itself is only
   exercised against Postgres.
-- Redis runs with auth + TLS; engines reach only Redis and the api (no DB route).
+- Redis runs with **auth** (`requirepass` in compose, credentials in the broker URL under Helm);
+  engines reach only Redis and the api (no DB route). **Transport security to the broker is the
+  operator's**: nothing here provisions or terminates TLS. The URL is passed through to the client
+  unchanged, so a broker that terminates TLS is addressed by setting `secrets.api.redisUrl` and
+  `secrets.engine.redisUrl` to `rediss://…`; a service mesh or a managed Redis is the other way.
+  The compose stack is plaintext on a private bridge network and is not a production posture.
 - Redis and Postgres sized to the org's content volume.

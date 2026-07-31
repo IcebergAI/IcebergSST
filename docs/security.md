@@ -21,7 +21,11 @@ system itself a high-value target. This document states the trust boundaries and
    tested.
 3. **Engine ↔ Redis** — a shared trust surface: any engine can read/enqueue broker messages.
    Mitigations: payloads are task-id hints only (no secrets, no specs), everything is validated
-   at lease time, and Redis runs with auth + TLS.
+   at lease time, and Redis requires a password. **Transport to the broker is not encrypted by
+   anything shipped here** — neither compose nor the chart provisions TLS, so the broker URL (which
+   carries the password) and the task-id hints cross the network in clear unless the operator
+   arranges otherwise: a `rediss://` endpoint, a service mesh, or a managed Redis. Treat the broker
+   network as in-scope until then.
 4. **Engine ↔ scanned content** — attachments and pages are **attacker-editable input**
    attacking the extraction parsers. Mitigations: size caps, extraction timeouts,
    decompression-ratio limits, per-unit failure isolation; consider sandboxing extraction.
@@ -170,7 +174,8 @@ They are a developer tool, not part of the product surface.
 - **No self-service role changes:** nobody may change their own role or disable their own account,
   admins included. That blocks self-promotion and removes any path to locking the last admin out.
 - **First engine token:** minted at deploy time with
-  `python -m iceberg_api mint-engine-token --name engine-1` (compose) or a provisioning Job (Helm) —
+  `python -m iceberg_api mint-engine-token --name engine-1` (`./deploy/compose/engine-token.sh`
+  wraps that for the dev stack) or a provisioning Job (Helm) —
   never a default credential baked into an image. Only the token's SHA-256 hash is stored, so it
   cannot be shown twice; re-running the command **rotates** it, which is also how an operator
   replaces a token they believe has leaked — rotation keeps the engine's id, so only the token has
@@ -181,7 +186,10 @@ They are a developer tool, not part of the product surface.
   (`ICEBERG_ENGINE_ID`, `ICEBERG_ENGINE_TOKEN`). An engine names itself in its heartbeat path and
   the API checks the two agree, so a token on its own can lease and report but never renew a lease —
   a degraded mode the worker warns about at startup rather than refusing to run, since scans still
-  complete, just less efficiently.
+  complete, just less efficiently. **No token at all is different:** the worker refuses to start,
+  because an engine that connects to the broker without a credential consumes tasks it can only
+  fail, and every one of them then sits until its lease lapses. That is why the compose engine waits
+  behind a profile until a token exists (`docs/deployment.md` § Bringing up an engine).
 
 ## Secret store in practice (`EnvKeyBackend`)
 The default backend (ADR 0007) is AES-256-GCM with a master key injected as
@@ -218,7 +226,9 @@ With the default `EnvKeyBackend`, the operator owns:
 - Protecting and rotating the master encryption key (via env/k8s secret).
 - Protecting the fingerprint pepper — rotating it invalidates all finding identities and
   requires the documented re-key procedure (ADR 0007).
-- Restricting network access to Postgres and Redis to the API/engine roles; Redis auth + TLS.
+- Restricting network access to Postgres and Redis to the API/engine roles. Redis auth is
+  configured; **TLS to the broker is not** — arrange it yourself (`rediss://` URLs, a mesh, or a
+  managed Redis) and see boundary 3 for what is exposed until you do.
 - Moving to the Vault backend for production-grade key separation (ADR 0007).
 
 ## Out of scope (MVP)
