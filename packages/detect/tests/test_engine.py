@@ -6,6 +6,7 @@ to break them. The shipped pack has its own tests in `test_seed_rulepack.py`.
 """
 
 import textwrap
+import time
 
 import pytest
 from iceberg_core.redaction import Span
@@ -118,6 +119,35 @@ def test_a_match_past_the_report_cap_is_still_masked_in_a_neighbours_snippet() -
     assert len(result.secrets) == 1
     assert "TKN0123456789ABCDEF" not in result.secrets[0].redacted_snippet
     assert "TKNFFFFFFFFFFFFFFFF" not in result.secrets[0].redacted_snippet
+
+
+def test_a_match_beginning_far_before_the_window_is_still_masked() -> None:
+    """Neighbours are the matches that *overlap* a snippet's window, not the ones
+    that start inside it: a long generic match can begin hundreds of characters
+    earlier and still reach in (ADR 0004)."""
+    pack = load_pack(
+        textwrap.dedent("""
+            version: "test.wide"
+            rules:
+              - id: narrow
+                description: Narrow
+                severity: high
+                regex: 'TKN[0-9A-Z]{16}'
+                base_confidence: 0.9
+              - id: wide
+                description: A long generic run
+                severity: low
+                regex: '[A-Za-z0-9]{100,}'
+                base_confidence: 0.6
+        """)
+    )
+    run = "Qw7" * 70  # a 210-character run ending where the token begins
+    text = f"{run}TKN0123456789ABCDEF end"
+
+    result = detect(text, pack)
+
+    assert [found.rule_id for found in result.secrets] == ["narrow"]
+    assert "Qw7Qw7Qw7Qw7" not in result.secrets[0].redacted_snippet
 
 
 def test_a_detected_secret_never_reprs_its_plaintext() -> None:
@@ -262,6 +292,59 @@ def test_a_pathological_unit_is_truncated_rather_than_unbounded() -> None:
 
     assert result.truncated is True
     assert len(result.secrets) == 10
+
+
+def test_the_report_cap_keeps_the_strongest_matches_not_the_first_in_pack_order() -> None:
+    """Rules run in pack order, so filling the cap first-come let one noisy rule
+    listed early starve a later rule's critical finding out of the report entirely —
+    which made what an analyst sees depend on how the pack happens to be written."""
+    pack = load_pack(
+        textwrap.dedent("""
+            version: "test.cap"
+            rules:
+              - id: noisy
+                description: The noisy rule, listed first
+                severity: low
+                regex: 'TKN[0-9A-Z]{16}'
+                base_confidence: 0.7
+              - id: aws-key
+                description: AWS access key id
+                severity: critical
+                regex: 'AKIA[0-9A-Z]{16}'
+                base_confidence: 0.9
+        """)
+    )
+    text = " ".join(f"TKN{index:016X}" for index in range(20)) + " AKIAIOSFODNN7EXAMPLE"
+
+    result = detect(text, pack, max_matches=5)
+
+    assert result.truncated is True
+    assert len(result.secrets) == 5
+    assert "aws-key" in {found.rule_id for found in result.secrets}
+
+
+def test_a_capped_unit_still_reports_its_findings_in_document_order() -> None:
+    text = " ".join(f"TKN{index:016X}" for index in range(20))
+
+    result = detect(text, TOKEN_PACK, max_matches=5)
+
+    starts = [found.span.start for found in result.secrets]
+    assert starts == sorted(starts)
+
+
+def test_a_unit_full_of_matches_does_not_cost_the_whole_match_set_per_finding() -> None:
+    """Redaction only has to mask the matches that reach a snippet's own window.
+    Passing it every match in the unit was O(reported x all matches) — 17 s on this
+    input — and an attachment full of token-shaped runs is attacker-supplied."""
+    text = " ".join(f"TKN{index:016X}" for index in range(8000))
+
+    started = time.perf_counter()
+    result = detect(text, TOKEN_PACK)
+    elapsed = time.perf_counter() - started
+
+    assert result.truncated is True
+    assert len(result.secrets) == 500
+    assert elapsed < 5, f"{len(text) / 1024:.0f} KB of matches took {elapsed:.1f}s"
 
 
 def test_an_empty_unit_finds_nothing() -> None:

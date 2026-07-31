@@ -23,8 +23,19 @@ SCAN_TASK_QUEUE: Final = "iceberg.scan_tasks"
 #: Dramatiq actor name the engine registers and the API addresses.
 SCAN_TASK_ACTOR: Final = "run_scan_task"
 
+#: A week, in the milliseconds Dramatiq's TimeLimit middleware counts. Past any
+#: scan that could still be making progress, which is the point: see below.
+_NO_BROKER_TIME_LIMIT: Final = 7 * 24 * 60 * 60 * 1000
+
 #: Options attached to every dispatched message.
 SCAN_TASK_OPTIONS: Final[dict[str, Any]] = {
     # See the module docstring: the API's lease is the only re-delivery authority.
     "max_retries": 0,
+    # Which is also why the broker gets no say in when a task dies. Dramatiq's
+    # default is ten minutes, and a fetch of a large space — or one throttled into
+    # backoff — legitimately runs longer; the kill arrives as an exception derived
+    # from `BaseException`, so the task ends without reporting and the API has
+    # nothing to act on but the expired lease. Set past any real scan rather than
+    # tuned: the lease is what notices work that stopped progressing.
+    "time_limit": _NO_BROKER_TIME_LIMIT,
 }

@@ -181,6 +181,36 @@ def test_repeat_straddling_the_left_edge_does_not_leak_a_suffix() -> None:
     assert not any(secret[len(secret) - k :] in snippet for k in range(2, len(secret) + 1))
 
 
+def test_a_copy_overlapping_the_target_cannot_be_bisected_by_the_right_edge() -> None:
+    """A copy that shares a character with the target still straddles the window
+    edge. Clipping past its start would eat into the match, so the edge stops at the
+    target instead — the alternative was emitting the copy's in-window half, and
+    forty-eight contiguous characters of a token are plaintext however they got out.
+    """
+    other = "OTHR" + string.ascii_lowercase * 3  # 82 chars, no whitespace to collapse
+    text = "context-x " + "k" * 8 + other + " and a far copy: " + other
+    target = Span(10, 20)  # the last two characters of which begin the copy
+    far = text.rindex(other)
+
+    snippet = redact_snippet(text, target, other_spans=(Span(far, far + len(other)),))
+
+    assert other[2:50] not in snippet
+    assert not any(other[index : index + 12] in snippet for index in range(len(other) - 12))
+
+
+def test_a_copy_overlapping_the_target_cannot_be_bisected_by_the_left_edge() -> None:
+    other = "OTHR" + string.ascii_lowercase * 3
+    text = "z" * 20 + other + "sequel and a far copy: " + other
+    target_start = 20 + len(other) - 2  # the target begins inside the copy's tail
+    target = Span(target_start, target_start + 10)
+    far = text.rindex(other)
+
+    snippet = redact_snippet(text, target, other_spans=(Span(far, far + len(other)),))
+
+    assert other[32:80] not in snippet
+    assert not any(other[index : index + 12] in snippet for index in range(len(other) - 12))
+
+
 def test_a_match_found_elsewhere_in_the_unit_is_scrubbed_not_dropped() -> None:
     """A stray copy of a match whose own span is far outside the window is scrubbed
     from the context; the finding is redacted, not discarded by the assert."""

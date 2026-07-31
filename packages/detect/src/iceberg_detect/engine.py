@@ -17,11 +17,13 @@ Two properties this module owns:
 """
 
 import re
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 import structlog
-from iceberg_core.redaction import RedactionError, Span, redact_snippet
+from iceberg_core.enums import Severity
+from iceberg_core.redaction import RedactionError, Span, context_window, redact_snippet
 
 from iceberg_detect.rules import Rule, RulePack
 from iceberg_detect.signals import Signals, confidence, keyword_near, shannon_entropy
@@ -34,8 +36,13 @@ DEFAULT_CONFIDENCE_THRESHOLD = 0.5
 
 #: A single content unit yielding more than this is a pathological input — a
 #: generated key file, a base64 blob — not a page an analyst will triage. Cutting
-#: it off bounds both the work and the size of one results submission.
+#: it off bounds the size of one results submission and the redaction behind it.
 MAX_MATCHES_PER_UNIT = 500
+
+#: Report-cap ranking. `Severity` is a `StrEnum`, so sorting it directly would
+#: order by spelling; its members are declared weakest first, and enumerating them
+#: keeps a level added there ranked without a second list to update here.
+_SEVERITY_RANK = {member: rank for rank, member in enumerate(Severity)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,34 +106,43 @@ def detect(
     exist before the first snippet can be built.
     """
     result = DetectionResult()
-    found: list[_Candidate] = []
-
-    for candidate in _candidates(text, pack, result):
-        if len(found) >= max_matches:
-            result.truncated = True
-            logger.warning(
-                "detection_truncated",
-                rulepack_version=pack.version,
-                max_matches=max_matches,
-                reason="content unit produced more matches than one finding set should carry",
-            )
-            break
-        found.append(candidate)
+    found = list(_candidates(text, pack, result))
 
     above = [candidate for candidate in found if candidate.score >= threshold]
     result.dropped_below_threshold = len(found) - len(above)
 
+    if len(above) > max_matches:
+        result.truncated = True
+        logger.warning(
+            "detection_truncated",
+            rulepack_version=pack.version,
+            max_matches=max_matches,
+            reason="content unit produced more matches than one finding set should carry",
+        )
+        above = _strongest(above, max_matches)
+
     reportable = _strongest_of_each_overlap(above)
     result.dropped_overlapping = len(above) - len(reportable)
+    if not reportable:
+        # The common case for a scanner is a clean page, and the mask set below is
+        # a second regex pass over the whole unit that nothing would read.
+        return result
 
-    # Neighbours are every regex match in the unit — not just the reported ones,
-    # and not just the ones that survived gating or the max_matches cap. A match
-    # that lost its rule's entropy/keyword gate, was collapsed as a duplicate, or
-    # fell past the cap is still secret material, and it must not survive in
-    # someone else's context window (ADR 0004). Reporting is capped; masking is not.
-    all_spans = _match_spans(text, pack)
+    # Neighbours are every regex match reaching a snippet's window — not just the
+    # reported ones, and not just the ones that survived gating or the max_matches
+    # cap. A match that lost its rule's entropy/keyword gate, was collapsed as a
+    # duplicate, or fell past the cap is still secret material, and it must not
+    # survive in someone else's context window (ADR 0004). Reporting is capped;
+    # masking is not. Matches too far away to reach the window are left out because
+    # passing all of them is a walk over the unit's whole match set per finding —
+    # what turns an attachment full of token-shaped runs into a denial of service.
+    all_spans = sorted(_match_spans(text, pack), key=lambda span: span.start)
+    starts = [span.start for span in all_spans]
+    widest = max((span.end - span.start for span in all_spans), default=0)
     for candidate in reportable:
-        neighbours = tuple(span for span in all_spans if span != candidate.span)
+        window = context_window(len(text), candidate.span, candidate.rule.redaction)
+        near = _spans_reaching(all_spans, starts, widest, window)
+        neighbours = tuple(span for span in near if span != candidate.span)
         try:
             snippet = redact_snippet(
                 text, candidate.span, policy=candidate.rule.redaction, other_spans=neighbours
@@ -155,6 +171,35 @@ def detect(
         )
 
     return result
+
+
+def _strongest(candidates: list[_Candidate], limit: int) -> list[_Candidate]:
+    """The ``limit`` candidates most worth reporting, back in document order.
+
+    Severity first, then confidence. Rules are tried in pack order, so keeping the
+    first ``limit`` matches instead would let one noisy rule listed early fill the
+    whole report and starve a later rule's critical finding out of it — making what
+    an analyst sees depend on how the pack happens to be written (#116).
+    """
+    ranked = sorted(
+        candidates,
+        key=lambda c: (-_SEVERITY_RANK[c.rule.severity], -c.score, c.span.start),
+    )
+    return sorted(ranked[:limit], key=lambda c: c.span.start)
+
+
+def _spans_reaching(
+    spans: list[Span], starts: list[int], widest: int, window: Span
+) -> tuple[Span, ...]:
+    """The matches that overlap one snippet's context window.
+
+    ``spans`` is start-ordered, so a match reaching the window starts no earlier
+    than the widest match in the unit does before it — which is what bounds the
+    slice searched to the window's own neighbourhood.
+    """
+    first = bisect_left(starts, window.start - widest)
+    last = bisect_right(starts, window.end)
+    return tuple(span for span in spans[first:last] if span.overlaps(window))
 
 
 def _strongest_of_each_overlap(candidates: list[_Candidate]) -> list[_Candidate]:
