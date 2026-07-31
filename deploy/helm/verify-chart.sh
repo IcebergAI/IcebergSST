@@ -152,6 +152,50 @@ for job in jobs:
     else:
         bad(f"migration Job does not run the api image: {container['image']}")
 
+# ── The migration Job's configuration exists by the time it runs ──────────────
+# Helm creates every hook resource before any ordinary manifest, so a hook Job
+# whose `envFrom` names a plain ConfigMap or Secret has nothing to read on a
+# fresh install and waits out its deadline in CreateContainerConfigError. The
+# annotations are visible in the template; only comparing weights across the
+# rendered manifests shows the ordering, which is why this check lives here.
+def hook_weight(doc: dict) -> int | None:
+    """The doc's weight as a pre-install hook, or None if it is not one."""
+    annotations = doc.get("metadata", {}).get("annotations") or {}
+    if "pre-install" not in annotations.get("helm.sh/hook", ""):
+        return None
+    return int(annotations.get("helm.sh/hook-weight", "0"))
+
+
+by_name = {(d["kind"], d["metadata"]["name"]): d for d in docs}
+REF_KINDS = (("configMapRef", "ConfigMap"), ("secretRef", "Secret"))
+
+for job in jobs:
+    job_weight = hook_weight(job)
+    if job_weight is None:
+        continue
+    container = job["spec"]["template"]["spec"]["containers"][0]
+    for source in container.get("envFrom", []):
+        for key, kind in REF_KINDS:
+            if key not in source:
+                continue
+            name = source[key]["name"]
+            referenced = by_name.get((kind, name))
+            if referenced is None:
+                bad(f"migration Job reads {kind}/{name}, which the chart does not render")
+                continue
+            weight = hook_weight(referenced)
+            if weight is None:
+                bad(f"{kind}/{name} is not a hook; the migration Job runs before it exists")
+            elif weight >= job_weight:
+                bad(f"{kind}/{name} has hook-weight {weight}, not below the Job's {job_weight}")
+            else:
+                ok(f"{kind}/{name} is created before the migration Job")
+            # The Deployments read these for the life of the release. A hook
+            # deleted on success would be deleted out from under them.
+            policy = referenced["metadata"]["annotations"].get("helm.sh/hook-delete-policy", "")
+            if "hook-succeeded" in policy or "hook-failed" in policy:
+                bad(f"{kind}/{name} is deleted with the hook, but the Deployments still read it")
+
 # Nothing else may migrate. An engine that ran migrations would need a database
 # URL, which is the invariant above stated a second way.
 for deployment in by_kind.get("Deployment", []):

@@ -468,6 +468,91 @@ def test_giving_up_is_recorded_rather_than_silent(
     assert delivery.last_error == "receiver is down"
 
 
+def test_a_row_whose_payload_cannot_be_built_fails_alone(
+    session: Session,
+    scan: Scan,
+    dispatch_settings: ApiSettings,
+    secret_store: SecretStore,
+    make_open_finding: Callable[..., Finding],
+    make_channel: Callable[..., NotificationChannel],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One unformattable finding must not wedge the queue behind it.
+
+    Built outside the error guard, a payload that raises aborted the round before
+    its commit — undoing the marks and counters of every row already sent, and
+    re-sending all of them on the next beat, forever, because nothing about them
+    had changed.
+    """
+    make_channel()
+    poisoned = make_open_finding()
+    healthy = make_open_finding()
+    dispatch.enqueue_for_scan(session, scan)
+    session.commit()
+    transport = RecordingTransport()
+
+    def refuse_the_poisoned_one(finding: Finding, **kwargs: Any) -> dict[str, Any]:
+        if finding.id == poisoned.id:
+            raise ValueError("locator is not a mapping")
+        return finding_opened(finding, **kwargs)
+
+    monkeypatch.setattr(dispatch, "finding_opened", refuse_the_poisoned_one)
+
+    outcome = dispatch.deliver_pending(
+        session, dispatch_settings, secret_store, transports=_transports(transport)
+    )
+
+    assert outcome.delivered == 1
+    assert [sent[1]["finding"]["id"] for sent in transport.sent] == [str(healthy.id)]
+    poisoned_row = session.exec(
+        select(NotificationDelivery).where(col(NotificationDelivery.finding_id) == poisoned.id)
+    ).one()
+    assert poisoned_row.attempts == 1
+    assert poisoned_row.last_error == "delivery error: ValueError"
+
+
+def test_a_crash_mid_round_keeps_what_was_already_sent(
+    session: Session,
+    scan: Scan,
+    dispatch_settings: ApiSettings,
+    secret_store: SecretStore,
+    make_open_finding: Callable[..., Finding],
+    make_channel: Callable[..., NotificationChannel],
+) -> None:
+    """Committed per delivery, not per batch.
+
+    The outbox is at-least-once by design, but a restart or an OOM between the
+    first send and a batch-wide commit would leave every already-sent row pending
+    with a past due time — turning one duplicate into a whole batch of them.
+    """
+    make_channel()
+    make_open_finding()
+    make_open_finding()
+    dispatch.enqueue_for_scan(session, scan)
+    session.commit()
+
+    class DiesOnTheSecondSend(RecordingTransport):
+        def send(
+            self, channel: NotificationChannel, payload: dict[str, Any], *, subject: str
+        ) -> None:
+            if self.sent:
+                # Not an Exception: the point is a process that stops, not an
+                # error the dispatcher is meant to handle.
+                raise KeyboardInterrupt("the pod went away")
+            super().send(channel, payload, subject=subject)
+
+    with pytest.raises(KeyboardInterrupt):
+        dispatch.deliver_pending(
+            session, dispatch_settings, secret_store, transports=_transports(DiesOnTheSecondSend())
+        )
+    session.rollback()
+
+    # Which of the two went first is the delivery loop's business; that exactly one
+    # survived the rollback is the property under test.
+    statuses = [row.status.value for row in session.exec(select(NotificationDelivery)).all()]
+    assert sorted(statuses) == ["delivered", "pending"]
+
+
 def test_a_permanent_failure_is_not_retried(
     session: Session,
     scan: Scan,

@@ -17,6 +17,7 @@ import httpx2
 import pytest
 from iceberg_engine.api_client import EngineClient
 from iceberg_engine.heartbeat import Heartbeat, TaskRegistry
+from prometheus_client import REGISTRY
 
 TASK_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
 TASK_B = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -190,6 +191,17 @@ def test_a_failed_beat_is_swallowed_rather_than_killing_the_thread() -> None:
     heartbeat = Heartbeat(_client(api), TaskRegistry())
 
     assert heartbeat.beat_once() == []
+
+
+def test_a_failed_beat_is_counted() -> None:
+    """Swallowed beats are exactly the failure an engine cannot report any other
+    way: four in a row and its leases start lapsing (#132)."""
+    before = REGISTRY.get_sample_value("iceberg_engine_heartbeat_failures_total") or 0.0
+    heartbeat = Heartbeat(_client(Api(status=503)), TaskRegistry())
+
+    heartbeat.beat_once()
+
+    assert REGISTRY.get_sample_value("iceberg_engine_heartbeat_failures_total") == before + 1
 
 
 def test_a_malformed_cancelled_id_is_skipped_not_fatal() -> None:

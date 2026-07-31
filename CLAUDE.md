@@ -8,13 +8,14 @@ IcebergSST — a secret-scanning platform for non-git enterprise sources (Conflu
 shares). See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the design spec and [`docs/adr/`](./docs/adr/)
 for decision rationale.
 
-**Where the code is:** M0–M3 are built. `packages/core` (config, DB session, secret store,
+**Where the code is:** M0–M4 are built. `packages/core` (config, DB session, secret store,
 redaction, fingerprinting, the SQLModel schema), `packages/detect` (rule packs, the detection
 engine), `packages/connectors` (Confluence, extraction, the sandbox), `apps/api` (auth, sources,
-scans, findings, notification channels, engine-facing routes, scheduler/maintenance, and the
-server-rendered web console under `apps/api/src/iceberg_api/web/`), `apps/engine` (the Dramatiq
-worker), Alembic, and the docker-compose stack all exist and are tested. Notification *dispatch*
-and Helm (M4) are still to come — `docs/backlog.md` tracks those.
+scans, findings, notification channels *and* dispatch via the `notification_delivery` outbox,
+engine-facing routes, scheduler/maintenance, retention, and the server-rendered web console under
+`apps/api/src/iceberg_api/web/`), `apps/engine` (the Dramatiq worker), Alembic, the docker-compose
+stack and the Helm chart under `deploy/helm/` all exist and are tested. `docs/backlog.md` tracks
+what is left.
 
 ## Non-negotiable invariants
 

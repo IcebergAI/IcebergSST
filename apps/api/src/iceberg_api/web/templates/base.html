@@ -108,6 +108,11 @@
     {% endif %}
       <main class="canvas" id="canvas">
         <div class="canvas-inner {% block page_class %}{% endblock %}">
+          {#- Where a failed hx- request lands. htmx never swaps the body of a
+              4xx, so web/errors.py answers one with a fragment retargeted here
+              rather than with the error page — without it a 403 on a stale token
+              or a 409 on a source somebody just disabled is a silent no-op. -#}
+          <div id="hx-error" aria-live="polite"></div>
           {% block content %}{% endblock %}
         </div>
       </main>

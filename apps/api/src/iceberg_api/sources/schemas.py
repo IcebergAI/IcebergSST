@@ -42,7 +42,11 @@ class ConfluenceConnection(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    #: Instance base URL, e.g. ``https://example.atlassian.net/wiki``.
+    #: Site root, e.g. ``https://example.atlassian.net`` — **without** ``/wiki``.
+    #: The connector appends ``api_prefix`` (Cloud's default is ``/wiki/api/v2``)
+    #: and builds UI links as ``base_url`` + ``/wiki`` + the relative link, so a
+    #: base that already carries the context path yields ``/wiki/wiki/api/v2`` and
+    #: every request from a source configured that way fails.
     base_url: str
     #: The Cloud account email. Its presence is what selects Basic ``email:token``
     #: auth; absent means the credential is a Server/DC PAT sent as a Bearer

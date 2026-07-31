@@ -121,9 +121,14 @@ serves iceberg-verify-api "$API_IMAGE" 8000 /healthz "api serves /healthz" \
   -e ICEBERG_SESSION_SECRET="verification-only-session-secret-not-a-real-one" \
   -e ICEBERG_FINGERPRINT_PEPPER_REF="env:ICEBERG_VERIFY_PEPPER"
 
+# The engine refuses to boot without a credential (#131), so a token is part of
+# the minimum configuration now — an unusable one, since nothing here registers
+# with an API. No engine id: without one the engine skips heartbeats, which is
+# what keeps this a check of the entrypoint rather than of the control plane.
 serves iceberg-verify-engine "$ENGINE_IMAGE" 9191 /metrics "engine serves /metrics" \
   -e ICEBERG_REDIS_URL="redis://127.0.0.1:6379/0" \
-  -e ICEBERG_API_BASE_URL="http://127.0.0.1:8000"
+  -e ICEBERG_API_BASE_URL="http://127.0.0.1:8000" \
+  -e ICEBERG_ENGINE_TOKEN="verification-only-engine-token-not-a-real-one"
 
 # ── The api can find its migrations ───────────────────────────────────────────
 # The runtime stage copies only the venv, so alembic.ini and the revision scripts

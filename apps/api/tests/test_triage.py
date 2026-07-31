@@ -9,6 +9,7 @@ from collections.abc import Callable
 
 import pytest
 from fastapi.testclient import TestClient
+from iceberg_api.scans import reconcile
 from iceberg_api.scans.reconcile import reconcile_scan
 from iceberg_core.enums import (
     FindingResolution,
@@ -313,3 +314,54 @@ def test_triage_survives_a_rescan(
     # The one still open was fair game, and its resolution says a scan did it.
     assert untouched.state is FindingState.RESOLVED
     assert untouched.resolution is FindingResolution.AUTO
+
+
+def test_a_triage_decision_landing_mid_reconciliation_is_not_overwritten(
+    session: Session,
+    make_source: Callable[..., Source],
+    make_finding: Callable[..., Finding],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same asymmetry, in the gap between the read and the write.
+
+    Auto-resolve selects open findings and then writes them; an analyst's PATCH
+    landing in between used to be overwritten to resolved/auto — a transition the
+    state machine forbids, recorded with a `from_value` that was never true. Each
+    write is conditional on the finding still being open, so a row that moved is
+    left alone, event included.
+    """
+    source = make_source()
+    judged = make_finding(source)
+    untouched = make_finding(source)
+    later = Scan(source_id=source.id, trigger=ScanTrigger.MANUAL, status=ScanStatus.COMPLETED)
+    session.add(later)
+    session.commit()
+    session.add(
+        ScanTask(
+            scan_id=later.id, kind=ScanTaskKind.FETCH, status=ScanTaskStatus.COMPLETED, spec={}
+        )
+    )
+    session.commit()
+    saw_content = reconcile._saw_any_content
+
+    def triage_between_the_read_and_the_write(db: Session, scan: Scan) -> bool:
+        # Called once the open findings have been read, which is exactly where a
+        # concurrent PATCH would commit.
+        judged.state = FindingState.FALSE_POSITIVE
+        db.add(judged)
+        db.flush()
+        return saw_content(db, scan)
+
+    monkeypatch.setattr(reconcile, "_saw_any_content", triage_between_the_read_and_the_write)
+
+    result = reconcile.reconcile_scan(session, later)
+
+    assert result is not None
+    assert result.resolved == 1
+    session.refresh(judged)
+    assert judged.state is FindingState.FALSE_POSITIVE
+    assert judged.resolution is None
+    # No event either: a trail claiming it moved from open would be a lie.
+    assert [event.kind for event in _events(session, judged)] == []
+    session.refresh(untouched)
+    assert untouched.state is FindingState.RESOLVED

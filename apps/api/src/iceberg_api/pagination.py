@@ -14,12 +14,16 @@ import base64
 import binascii
 import json
 import uuid
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
+from fastapi import HTTPException, status
 from sqlalchemy import ColumnElement, and_, or_
 from sqlmodel.sql.expression import SelectOfScalar
+
+from iceberg_api.schemas import Page
 
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
@@ -86,3 +90,46 @@ def after[RowT](
 
 def resolve_cursor(raw: str | None) -> Cursor | None:
     return None if raw is None else Cursor.decode(raw)
+
+
+class Keyed(Protocol):
+    """A row the cursor can address: it has the two columns the order is built on."""
+
+    created_at: datetime
+    id: uuid.UUID
+
+
+def position(raw: str | None) -> Cursor | None:
+    """Resolve a client's cursor, or refuse the request.
+
+    Every list endpoint answers a malformed cursor the same way, so it is answered
+    once here — nothing about a cursor is trusted, and a bad one is a 400 rather
+    than a silently wrong page.
+    """
+    try:
+        return resolve_cursor(raw)
+    except CursorError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "cursor is not valid") from exc
+
+
+def build_page[RowT: Keyed, ItemT](
+    rows: Sequence[RowT],
+    *,
+    limit: int,
+    read: Callable[[RowT], ItemT],
+) -> Page[ItemT]:
+    """Turn a ``limit + 1`` probe query into a page and its continuation cursor.
+
+    Endpoints fetch one row more than they asked for; that extra row answers "is
+    there another page?" without a second count query, and it is dropped here so
+    no caller has to remember to.
+    """
+    page, has_more = list(rows[:limit]), len(rows) > limit
+    return Page(
+        items=[read(row) for row in page],
+        next_cursor=(
+            Cursor(created_at=page[-1].created_at, row_id=page[-1].id).encode()
+            if has_more and page
+            else None
+        ),
+    )

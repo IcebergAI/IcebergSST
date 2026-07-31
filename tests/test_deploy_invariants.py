@@ -156,6 +156,64 @@ def test_only_the_api_chart_template_runs_migrations() -> None:
     assert "migrate" not in engine
 
 
+#: ``"helm.sh/hook-weight": "-10"`` and friends, as written in the templates.
+HOOK_WEIGHT_RE = re.compile(r'"helm\.sh/hook-weight":\s*"(-?\d+)"')
+
+
+def _hook_weight(template: Path) -> int:
+    text = template.read_text()
+    assert "pre-install,pre-upgrade" in text, f"{template.name} is not a pre-install hook"
+    match = HOOK_WEIGHT_RE.search(text)
+    assert match is not None, f"{template.name} declares no hook weight"
+    return int(match.group(1))
+
+
+def test_the_migration_jobs_configuration_is_created_before_it_runs() -> None:
+    """Helm creates every hook before any ordinary manifest.
+
+    So a hook Job whose ``envFrom`` names a plain ConfigMap or Secret has nothing
+    to read on a fresh install and sits in ``CreateContainerConfigError`` until
+    the deadline — and on an upgrade it migrates using the *previous* release's
+    configuration. The ordering is the weights, so the weights are the assertion.
+    The rendered form is in ``deploy/helm/verify-chart.sh``.
+    """
+    templates = CHART_DIR / "templates"
+    job_weight = _hook_weight(templates / "migration-job.yaml")
+
+    assert _hook_weight(templates / "configmap.yaml") < job_weight
+    assert _hook_weight(templates / "secrets.yaml") < job_weight
+
+
+def test_the_hook_configuration_outlives_the_job_that_needed_it() -> None:
+    """Both Deployments read them for the life of the release.
+
+    ``hook-succeeded`` on either would delete the ConfigMap or the api Secret the
+    moment migrations finished, which is the same outage as never creating them.
+    """
+    for name in ("configmap.yaml", "secrets.yaml"):
+        instructions = _template_instructions(CHART_DIR / "templates" / name)
+        policy = re.search(r'"helm\.sh/hook-delete-policy":\s*(.+)', instructions)
+        assert policy is not None, name
+        assert policy.group(1).strip() == "before-hook-creation", name
+
+
+def test_both_pod_templates_checksum_the_secret_they_read() -> None:
+    """A Secret-only ``helm upgrade`` must roll pods, exactly as a ConfigMap one does.
+
+    Rotating ``sessionSecret``, opening a pepper-rotation window or reissuing an
+    engine token changes nothing but the Secret, and a replica keeps the
+    environment it started with — so without this the release looks applied when
+    it is not. Guarded on the existingSecret toggles: when the Secret is managed
+    out of band the chart does not render it, and a checksum over the template
+    would be a constant.
+    """
+    for role, toggle in (("api", "existingApiSecret"), ("engine", "existingEngineSecret")):
+        template = _template_instructions(CHART_DIR / "templates" / f"{role}-deployment.yaml")
+
+        assert "checksum/secret" in template, role
+        assert f"if not .Values.secrets.{toggle}" in template, role
+
+
 def test_the_chart_separates_the_two_roles_secrets() -> None:
     """One Secret per role is what makes "engines cannot read the api's" a rule a
     cluster can enforce, rather than only a property of these templates."""
@@ -195,6 +253,57 @@ def test_the_image_verification_runs_in_ci() -> None:
 
     makefile = (REPO_ROOT / "Makefile").read_text()
     assert "images-verify:" in makefile
+
+
+def test_migrations_are_exercised_against_postgres_in_ci() -> None:
+    """SQLite standing in for Postgres proves the ops execute, not that they are valid.
+
+    ``apps/api/tests/test_migrations.py`` runs on SQLite, where alembic takes the
+    batch-copy path for an ALTER, JSONB is ordinary JSON and a partial index is
+    spelled differently. Without a leg that applies the same revisions to a real
+    Postgres, the first machine to execute the Postgres DDL is the pre-upgrade
+    Job in production (#126).
+    """
+    workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+
+    assert "image: postgres:" in workflow, "no Postgres service container in CI"
+    assert "python -m iceberg_api migrate" in workflow
+    # Reversibility is what makes a rollback possible, so the leg goes both ways.
+    assert "downgrade base" in workflow
+
+
+def test_ci_actions_are_pinned_to_a_commit() -> None:
+    """A tag is a pointer its owner can move; a SHA is the artefact.
+
+    This repository pins everything else it consumes — the uv version in both
+    Dockerfiles, the gitleaks image, ``uv sync --locked`` — and a step that runs
+    in a secret scanner's CI is not the place to float on a mutable major tag.
+    """
+    workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    floating = re.findall(r"uses:\s*(\S+@(?!\w{40}\b)\S+)", workflow)
+
+    assert floating == [], f"actions pinned to a tag rather than a commit: {floating}"
+
+
+def test_the_chart_does_not_advertise_an_unimplemented_secret_backend() -> None:
+    """``secretStoreBackend: vault`` CrashLoops every api pod after a clean upgrade.
+
+    ``build_secret_store`` raises for it — a documented seam, not a backend. The
+    values file is where an operator decides, so it has to say so; .env.example
+    already does.
+    """
+    lines = (CHART_DIR / "values.yaml").read_text().splitlines()
+    setting = next(
+        i for i, line in enumerate(lines) if line.strip().startswith("secretStoreBackend")
+    )
+    comment: list[str] = []
+    while setting and lines[setting - 1].strip().startswith("#"):
+        setting -= 1
+        comment.insert(0, lines[setting])
+    block = " ".join(comment)
+
+    assert "`vault`" in block, "the values file no longer mentions the vault backend"
+    assert "not yet implemented" in block
 
 
 def test_neither_image_runs_as_root() -> None:
@@ -288,6 +397,42 @@ def test_the_engine_service_can_be_scaled(compose: dict[str, Any]) -> None:
     assert "ports" not in engine
 
 
+def test_the_engine_service_is_given_time_to_finish_its_task(compose: dict[str, Any]) -> None:
+    """worker.py catches SIGTERM and finishes the task it leased.
+
+    Docker's default 10s would SIGKILL a fetch in progress, and the scan then
+    waits out its 300s lease before anything reclaims it — so the shutdown the
+    worker documents is only clean with this set. Matches
+    ``terminationGracePeriodSeconds`` in the chart, deliberately.
+    """
+    chart_grace = re.search(
+        r"terminationGracePeriodSeconds:\s*(\d+)",
+        (CHART_DIR / "templates" / "engine-deployment.yaml").read_text(),
+    )
+
+    assert chart_grace is not None
+    assert _service(compose, "engine")["stop_grace_period"] == f"{chart_grace.group(1)}s"
+
+
+def test_the_engine_service_waits_for_a_token_that_only_the_api_can_mint(
+    compose: dict[str, Any],
+) -> None:
+    """The dev stack's one unresolvable ordering, made explicit.
+
+    An engine refuses to start without a token; only the api can mint one, and
+    only against a schema that does not exist until ``make up`` has migrated. The
+    profile is what lets that first ``up`` succeed — without it the stack waits on
+    a container that cannot start, and the answer is never to hand the engine a
+    token the API never issued.
+    """
+    assert _service(compose, "engine")["profiles"] == ["engine"]
+
+    script = REPO_ROOT / "deploy" / "compose" / "engine-token.sh"
+    assert script.is_file()
+    assert script.stat().st_mode & 0o111, "engine-token.sh must be executable"
+    assert "mint-engine-token" in script.read_text()
+
+
 def test_infrastructure_services_report_health_and_the_apps_wait_for_it(
     compose: dict[str, Any],
 ) -> None:
@@ -329,6 +474,13 @@ def _documented_variables() -> set[str]:
     }
 
 
+#: Variables Compose reads itself rather than interpolating into a service, so
+#: they appear in .env with no ``${…}`` anywhere in the compose file to match.
+#: COMPOSE_PROFILES is what keeps the engine out of the stack until it has a
+#: token; engine-token.sh sets it.
+COMPOSE_OWN_VARIABLES = {"COMPOSE_PROFILES"}
+
+
 def test_env_example_and_the_compose_file_agree_on_the_variables() -> None:
     """A variable compose reads but .env.example omits is a stack that will not
     start; one .env.example documents but compose never delivers is a tunable an
@@ -338,7 +490,7 @@ def test_env_example_and_the_compose_file_agree_on_the_variables() -> None:
         line for line in COMPOSE_FILE.read_text().splitlines() if not line.strip().startswith("#")
     )
     interpolated = set(INTERPOLATION_RE.findall(directives))
-    documented = _documented_variables()
+    documented = _documented_variables() - COMPOSE_OWN_VARIABLES
 
     assert interpolated <= documented, sorted(interpolated - documented)
     assert documented <= interpolated, sorted(documented - interpolated)

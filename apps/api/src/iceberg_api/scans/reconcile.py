@@ -32,7 +32,7 @@ from iceberg_core.enums import (
     ScanTaskKind,
 )
 from iceberg_core.models import Finding, FindingEvent, Scan, ScanTask
-from sqlmodel import Session, col, func, select
+from sqlmodel import Session, col, func, select, update
 
 logger = structlog.get_logger()
 
@@ -61,6 +61,9 @@ def reconcile_scan(
 
     Refusing to run for a non-``completed`` scan is the whole safety property, so it
     is checked here rather than trusted to callers.
+
+    Does not commit: the caller owns the transaction, so the scan's status and the
+    resolutions it justifies land together.
     """
     if scan.status is not ScanStatus.COMPLETED:
         logger.info(
@@ -101,10 +104,22 @@ def reconcile_scan(
         )
         missing = []
 
+    # Conditional per finding rather than read-then-write. An analyst triaging
+    # ``open`` → ``false_positive`` between the select above and this write would
+    # otherwise be silently overwritten to resolved/auto — a transition the state
+    # machine forbids, and a scan overruling a person, which ingest's whole
+    # asymmetry exists to prevent. A row that moved is skipped, event included, so
+    # the trail never records a `from_value` that was not true.
+    resolved = 0
     for finding in missing:
-        finding.state = FindingState.RESOLVED
-        finding.resolution = FindingResolution.AUTO
-        db.add(finding)
+        outcome = db.exec(
+            update(Finding)
+            .where(col(Finding.id) == finding.id, col(Finding.state) == FindingState.OPEN)
+            .values(state=FindingState.RESOLVED, resolution=FindingResolution.AUTO)
+        )
+        if outcome.rowcount != 1:
+            logger.info("auto_resolve_skipped_triaged", finding_id=str(finding.id))
+            continue
         db.add(
             FindingEvent(
                 finding_id=finding.id,
@@ -116,11 +131,12 @@ def reconcile_scan(
                 comment=f"not seen by scan {scan.id}",
             )
         )
+        resolved += 1
 
     result = ReconciliationResult(
         new=_count(db, scan.source_id, first_seen=scan.id),
         seen=_count(db, scan.source_id, last_seen=scan.id),
-        resolved=len(missing),
+        resolved=resolved,
         reopened=int(scan.counts.get("reopened", 0)),
     )
 
@@ -128,7 +144,6 @@ def reconcile_scan(
     scan.counts = {**scan.counts, **asdict(result)}
     scan.finished_at = scan.finished_at or at
     db.add(scan)
-    db.commit()
 
     logger.info("reconciliation_complete", scan_id=str(scan.id), **asdict(result))
     return result

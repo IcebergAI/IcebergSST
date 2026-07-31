@@ -104,6 +104,12 @@ class ApiSettings(SecretStoreSettings):
     #: replica runs them; a Postgres advisory lock decides which one acts.
     background_interval_seconds: int = Field(default=60, ge=5)
 
+    #: Silence after which the maintenance round marks an engine ``offline``. An
+    #: engine cannot report that it died, so the only evidence is a heartbeat that
+    #: stopped; this is how long to wait before believing it. Comfortably longer
+    #: than the lease window, so a busy engine mid-fetch is never called dead.
+    engine_offline_after_seconds: int = Field(default=900, ge=60)
+
     # ─── Detection (#70) ──────────────────────────────────────────────────────
     #: Matches scoring below this are noise and are dropped. Configured here and
     #: delivered to engines in their lease rather than set in engine config: one

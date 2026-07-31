@@ -30,6 +30,14 @@ import structlog
 
 logger = structlog.get_logger()
 
+#: Address space the extraction child may map. Size caps bound what goes *in* to a
+#: parser; nothing bounds what pypdf allocates decoding a crafted Flate stream, and
+#: gigabytes inside a 30 s timeout is comfortably reachable. Without this the pod's
+#: cgroup picks the OOM victim, and it may pick the worker rather than the child —
+#: turning one hostile attachment into a restart, a reclaimed task, and the same
+#: file downloaded again. With it the child raises and one unit fails.
+CHILD_ADDRESS_SPACE_BYTES = 2 * 1024 * 1024 * 1024
+
 
 class SandboxTimeout(Exception):
     """The parser did not finish in time. Assume it never will."""
@@ -47,8 +55,9 @@ class ExtractionSandbox:
     a hostile file in one task killing the extraction of another.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, address_space_bytes: int = CHILD_ADDRESS_SPACE_BYTES) -> None:
         self._pool: futures.ProcessPoolExecutor | None = None
+        self._address_space_bytes = address_space_bytes
 
     def run[ResultT](
         self,
@@ -91,7 +100,11 @@ class ExtractionSandbox:
         if self._pool is None:
             # max_workers=1: extraction is already parallel across engine replicas,
             # and one child per sandbox keeps "which file killed it" answerable.
-            self._pool = futures.ProcessPoolExecutor(max_workers=1)
+            self._pool = futures.ProcessPoolExecutor(
+                max_workers=1,
+                initializer=_limit_address_space,
+                initargs=(self._address_space_bytes,),
+            )
         return self._pool
 
     def _discard_pool(self) -> None:
@@ -105,3 +118,26 @@ class ExtractionSandbox:
             if process.is_alive():
                 process.kill()
         pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _limit_address_space(ceiling: int) -> None:
+    """Cap the child's address space, in the child.
+
+    A pool initializer rather than a setting on the parent: the limit has to apply
+    to the process that may be handed a bomb and to nothing else, and the parent
+    holding the same limit would defeat the isolation it exists for. Platforms
+    without ``resource`` (Windows) simply go without — the timeout and the crash
+    isolation still hold there.
+    """
+    try:
+        import resource
+    except ImportError:  # pragma: no cover — POSIX only
+        return
+
+    _, hard = resource.getrlimit(resource.RLIMIT_AS)
+    if hard != resource.RLIM_INFINITY:
+        ceiling = min(ceiling, hard)
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (ceiling, hard))
+    except OSError, ValueError:  # pragma: no cover — a sandbox that forbids it
+        logger.warning("extraction_address_space_limit_refused", ceiling=ceiling)

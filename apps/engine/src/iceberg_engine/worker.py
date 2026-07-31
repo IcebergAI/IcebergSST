@@ -48,6 +48,11 @@ logger = structlog.get_logger()
 #: heartbeat thread renewing their leases (#51).
 TASKS = TaskRegistry()
 
+#: The client every thread in this process reports through, and the lock that
+#: keeps a burst of first messages from building more than one.
+_CLIENT: EngineClient | None = None
+_CLIENT_LOCK = threading.Lock()
+
 
 @lru_cache(maxsize=1)
 def rulepack() -> RulePack:
@@ -60,8 +65,8 @@ def rulepack() -> RulePack:
     return load_named_pack()
 
 
-def build_client(settings: EngineSettings) -> EngineClient:
-    """The API client this engine reports through.
+def require_token(settings: EngineSettings) -> str:
+    """The engine token, or a refusal to go any further without one.
 
     The token is the only credential the process holds. It arrives as
     configuration because an engine cannot mint its own — enrolment is an operator
@@ -72,13 +77,42 @@ def build_client(settings: EngineSettings) -> EngineClient:
             "no engine token configured; mint one with "
             "`python -m iceberg_api mint-engine-token` and set ICEBERG_ENGINE_TOKEN"
         )
+    return settings.engine_token.get_secret_value()
+
+
+def build_client(settings: EngineSettings) -> EngineClient:
+    """The API client this engine reports through."""
     return EngineClient(
         base_url=settings.api_base_url,
-        token=settings.engine_token.get_secret_value(),
+        token=require_token(settings),
         # Without it this engine can lease and report but never renew: the
         # heartbeat route requires the path id to match the token.
         engine_id=settings.engine_id,
     )
+
+
+def api_client(settings: EngineSettings | None = None) -> EngineClient:
+    """The one client this process talks to the API through.
+
+    Built once and shared by every actor thread and the heartbeat, because a
+    client is a connection pool: one per message paid a TCP and TLS handshake for
+    every lease, submission and beat, which is the load `worker_threads`' own
+    documentation says it is trading against (#130).
+    """
+    global _CLIENT
+    with _CLIENT_LOCK:
+        if _CLIENT is None:
+            _CLIENT = build_client(settings or get_engine_settings())
+        return _CLIENT
+
+
+def close_api_client() -> None:
+    """Drop the shared client and its pool. Idempotent, for shutdown and tests."""
+    global _CLIENT
+    with _CLIENT_LOCK:
+        if _CLIENT is not None:
+            _CLIENT.close()
+            _CLIENT = None
 
 
 def register_connectors() -> tuple[str, ...]:
@@ -156,6 +190,11 @@ def bootstrap(settings: EngineSettings | None = None) -> tuple[HTTPServer, drama
     """
     resolved = settings or get_engine_settings()
     configure_logging(role="engine")
+    # Before anything is consumed, because a tokenless engine cannot process a
+    # single message: it boots, serves metrics, drops every task it is handed, and
+    # the API's reclaim hands each one straight back to it. The fleet reads as
+    # alive while its scans never move (#131).
+    require_token(resolved)
     server, _thread = start_http_server(resolved.metrics_port)
     broker = build_broker(resolved.redis_url)
     source_types = register_connectors()
@@ -179,7 +218,7 @@ def run_scan_task(task_id: str) -> None:
     """
     run_task(
         uuid.UUID(task_id),
-        client=build_client(get_engine_settings()),
+        client=api_client(),
         pack=rulepack(),
         tasks=TASKS,
     )
@@ -199,6 +238,7 @@ def main(settings: EngineSettings | None = None) -> None:
     """
     resolved = settings or get_engine_settings()
     server, broker = bootstrap(resolved)
+    client = api_client(resolved)
 
     consumer = dramatiq.Worker(
         broker, queues={SCAN_TASK_QUEUE}, worker_threads=resolved.worker_threads
@@ -206,7 +246,7 @@ def main(settings: EngineSettings | None = None) -> None:
     consumer.start()
     logger.info("engine_consuming", queue=SCAN_TASK_QUEUE, threads=resolved.worker_threads)
 
-    heartbeat = _start_heartbeat(resolved)
+    heartbeat = _start_heartbeat(resolved, client)
     shutdown = threading.Event()
 
     def request_shutdown(signum: int, _frame: object) -> None:
@@ -223,11 +263,14 @@ def main(settings: EngineSettings | None = None) -> None:
     consumer.stop()
     if heartbeat is not None:
         heartbeat.stop()
+    # Only once both are stopped: until then, threads are still reporting through
+    # this pool.
+    close_api_client()
     server.shutdown()
     logger.info("engine_stopped")
 
 
-def _start_heartbeat(settings: EngineSettings) -> Heartbeat | None:
+def _start_heartbeat(settings: EngineSettings, client: EngineClient) -> Heartbeat | None:
     """Begin renewing leases, if this engine knows which engine it is.
 
     An engine configured with a token but no id can still lease, scan, and report
@@ -244,7 +287,7 @@ def _start_heartbeat(settings: EngineSettings) -> Heartbeat | None:
 
     pack = rulepack()
     heartbeat = Heartbeat(
-        build_client(settings),
+        client,
         TASKS,
         version=__version__,
         # Reported every beat, so `GET /rules` reflects a rolling deploy as it

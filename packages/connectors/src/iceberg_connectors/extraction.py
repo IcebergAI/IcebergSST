@@ -25,6 +25,7 @@ recursing into archives inside archives, and the bomb defence has to be right at
 every level rather than the top one.
 """
 
+import codecs
 import zipfile
 from dataclasses import dataclass
 from enum import StrEnum
@@ -59,6 +60,19 @@ PDF_EXTENSIONS = frozenset({".pdf"})
 #: that most often carry credentials.
 BARE_TEXT_NAMES = frozenset(
     {"dockerfile", "makefile", "procfile", ".env", ".npmrc", ".netrc", ".pgpass"}
+)
+
+#: Byte-order marks that name their own encoding, checked before the NUL heuristic
+#: decides a file is binary. UTF-16 — Notepad's "Unicode", and what PowerShell's
+#: redirection writes — carries a NUL every other byte, so a `passwords.txt`
+#: exported from Windows would otherwise be skipped unread. UTF-32's marks come
+#: first because the UTF-16 LE mark is a prefix of the UTF-32 LE one.
+_BYTE_ORDER_MARKS = (
+    (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
 )
 
 
@@ -129,6 +143,21 @@ class BombError(Exception):
     """Raised inside the child when an archive's declared sizes are hostile."""
 
 
+@dataclass(frozen=True, slots=True)
+class _Parsed:
+    """What one extractor produced, and whether it stopped at the output budget.
+
+    A value rather than a bare string because only the extractor can tell the
+    difference between a document that ended and one that was cut off: markup
+    stripping shrinks the text, so the caller comparing lengths would call a
+    truncated spreadsheet complete. Crosses the sandbox boundary, hence a plain
+    module-level dataclass.
+    """
+
+    text: str
+    truncated: bool = False
+
+
 def extract_text(
     data: bytes,
     filename: str,
@@ -162,7 +191,7 @@ def extract_text(
 
     extractor = _EXTRACTORS[kind]
     try:
-        text = (
+        parsed = (
             extractor(data, bounds)
             if sandbox is None
             else sandbox.run(extractor, data, bounds, timeout=bounds.timeout_seconds)
@@ -182,13 +211,13 @@ def extract_text(
             ExtractionOutcome.FAILED_PARSE, detail=f"{type(exc).__name__}: {exc}"[:200]
         )
 
-    if not text.strip():
+    if not parsed.text.strip():
         return Extracted(ExtractionOutcome.SKIPPED_EMPTY)
 
-    truncated = len(text) > bounds.max_output_chars
+    truncated = parsed.truncated or len(parsed.text) > bounds.max_output_chars
     return Extracted(
         ExtractionOutcome.EXTRACTED,
-        text=text[: bounds.max_output_chars],
+        text=parsed.text[: bounds.max_output_chars],
         truncated=truncated,
         detail="output truncated" if truncated else "",
     )
@@ -219,19 +248,24 @@ class _BinaryContent(Exception):
 # child. A closure or a lambda would not survive the trip.
 
 
-def extract_plain_text(data: bytes, limits: ExtractionLimits) -> str:
+def extract_plain_text(data: bytes, limits: ExtractionLimits) -> _Parsed:
     """Decode a text file, refusing anything that is really binary.
 
     A NUL byte in the first few kilobytes is the standard tell, and the reason to
     check: decoding a binary with ``errors="replace"`` produces megabytes of
-    replacement characters that every entropy rule then chews through.
+    replacement characters that every entropy rule then chews through. A file that
+    declares its encoding with a byte-order mark is believed first, because the
+    NUL tell is exactly wrong for UTF-16.
     """
+    for mark, encoding in _BYTE_ORDER_MARKS:
+        if data.startswith(mark):
+            return _Parsed(data.decode(encoding, errors="replace"))
     if b"\x00" in data[:8192]:
         raise _BinaryContent
-    return data.decode("utf-8", errors="replace")
+    return _Parsed(data.decode("utf-8", errors="replace"))
 
 
-def extract_office_text(data: bytes, limits: ExtractionLimits) -> str:
+def extract_office_text(data: bytes, limits: ExtractionLimits) -> _Parsed:
     """Read the XML parts of a ZIP-backed office document.
 
     The archive's *declared* sizes are checked before anything is decompressed —
@@ -261,6 +295,7 @@ def extract_office_text(data: bytes, limits: ExtractionLimits) -> str:
 
         pieces: list[str] = []
         budget = limits.max_output_chars
+        truncated = False
         for member in members:
             if not member.filename.endswith(".xml") or member.is_dir():
                 continue
@@ -268,7 +303,15 @@ def extract_office_text(data: bytes, limits: ExtractionLimits) -> str:
             # attacker-controlled and may simply lie about file_size.
             raw = archive.open(member).read(budget + 1)
             if len(raw) > budget:
-                raise BombError("archive member exceeded the output cap while reading")
+                # Honest and simply larger than what is left of the budget — a
+                # 100k-row `sheet1.xml`, which passes every gate above and is the
+                # file class this whole module exists for. Cutting it off scans the
+                # start of a spreadsheet full of credentials; calling it a bomb
+                # scans none of one, while an equally large .txt is truncated and
+                # read. A member that understated itself cannot reach here: the
+                # archive caps the read at the declared size and then fails the
+                # CRC, which is a parse failure and already loud.
+                raw, truncated = raw[:budget], True
             # Tags stripped rather than parsed into a tree: an XML parser on
             # untrusted input is another entity-expansion surface, and detection
             # only needs the text between the tags.
@@ -276,12 +319,13 @@ def extract_office_text(data: bytes, limits: ExtractionLimits) -> str:
             pieces.append(text)
             budget -= len(text)
             if budget <= 0:
+                truncated = True
                 break
 
-    return " ".join(pieces)
+    return _Parsed(" ".join(pieces), truncated)
 
 
-def extract_pdf_text(data: bytes, limits: ExtractionLimits) -> str:
+def extract_pdf_text(data: bytes, limits: ExtractionLimits) -> _Parsed:
     """Read the text layer of a PDF. No OCR — a scanned page yields nothing."""
     import io
 
@@ -290,13 +334,15 @@ def extract_pdf_text(data: bytes, limits: ExtractionLimits) -> str:
     reader = PdfReader(io.BytesIO(data))
     pieces: list[str] = []
     budget = limits.max_output_chars
+    truncated = False
     for page in reader.pages:
         text = page.extract_text() or ""
         pieces.append(text)
         budget -= len(text)
         if budget <= 0:
+            truncated = True
             break
-    return "\n".join(pieces)
+    return _Parsed("\n".join(pieces), truncated)
 
 
 _EXTRACTORS = {

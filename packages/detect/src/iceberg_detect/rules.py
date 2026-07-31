@@ -200,8 +200,8 @@ def load_pack(source: Path | str) -> RulePack:
     _reject_duplicate_ids(rules)
 
     return RulePack(
-        version=str(document.get("version", "")),
-        description=str(document.get("description", "")),
+        version=_pack_string(document, "version", required=True),
+        description=_pack_string(document, "description", required=False),
         rules=rules,
     )
 
@@ -213,6 +213,23 @@ def load_named_pack(name: str = DEFAULT_RULEPACK) -> RulePack:
         available = ", ".join(sorted(p.stem for p in RULEPACK_DIR.glob("*.yaml"))) or "none"
         raise RulePackError(f"unknown rule pack {name!r}; available: {available}")
     return load_pack(path)
+
+
+def _pack_string(document: dict[object, object], name: str, *, required: bool) -> str:
+    """A pack-level string field, held to the same standard as a rule's.
+
+    Coercing with `str()` would turn a valueless `version:` key — the easy typo —
+    into the literal `"None"`, which passes every non-empty check downstream and is
+    then stamped on every finding the pack produces (ADR 0008).
+    """
+    if name not in document:
+        if required:
+            raise RulePackError(f"rule pack has no {name}")
+        return ""
+    value = document[name]
+    if not isinstance(value, str) or not value.strip():
+        raise RulePackError(f"rule pack: {name} must be a non-empty string")
+    return value
 
 
 def _build_rule(entry: object, index: int) -> Rule:
@@ -298,8 +315,15 @@ def assert_no_catastrophic_backtracking(pattern: str, where: str = "pattern") ->
     engine has exponentially many ways to split the same input before it can
     conclude the match failed.
 
+    The second shape is a repeated group whose branches can match the same text —
+    ``(a|a)+b``, ``(?:a|ab)+c`` — where the engine again has exponentially many ways
+    to reach the same position. Whether two branches overlap is not decidable by
+    inspection, so any alternation directly under an unbounded repetition is
+    refused: a rule that means it can spell the choice as a character class or move
+    the alternation outside the repetition.
+
     This is a static, deliberately conservative check, not a proof: it catches the
-    shape that causes the failure in practice and rejects it at load time, when a
+    shapes that cause the failure in practice and rejects them at load time, when a
     human is reading the diff. It does not make every accepted pattern fast, so
     content units stay size-capped as well.
     """
@@ -312,6 +336,13 @@ def assert_no_catastrophic_backtracking(pattern: str, where: str = "pattern") ->
                 f"{where}: nested unbounded quantifier at offset {open_index} "
                 f"({pattern[open_index : close_index + 2]!r}); rewrite it with a bounded "
                 f"repetition — this shape backtracks exponentially"
+            )
+        if _has_own_alternation(pattern, open_index, close_index):
+            raise RulePackError(
+                f"{where}: repeated alternation at offset {open_index} "
+                f"({pattern[open_index : close_index + 2]!r}); branches that can match the "
+                f"same text make the repetition backtrack exponentially — spell the choice "
+                f"as a character class, or repeat each branch separately"
             )
 
 
@@ -361,6 +392,24 @@ def _group_spans(pattern: str) -> list[tuple[int, int]]:
     return spans
 
 
+def _has_own_alternation(pattern: str, open_index: int, close_index: int) -> bool:
+    """Whether this group has a ``|`` at its own level rather than a nested one's.
+
+    A ``|`` inside a subgroup belongs to that subgroup; only the outer group's own
+    branches are what the outer repetition multiplies."""
+    depth = 0
+    for index, char in _scan(pattern):
+        if not open_index < index < close_index:
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "|" and depth == 0:
+            return True
+    return False
+
+
 def _unbounded_quantifier_positions(pattern: str) -> list[int]:
     """Indexes of variable-length quantifiers (``*``, ``+``, ``{n,}``, ``{n,m}``
     with ``m != n``) outside character classes.
@@ -389,7 +438,9 @@ def _is_variable_repetition(spec: str) -> bool:
     if high.strip() == "":
         return True
     try:
-        return int(low) != int(high)
+        # `{,n}` is Python's spelling of `{0,n}`: an empty low bound is a zero, not
+        # a malformed quantifier, and reading it as fixed lets `(?:x{,64})+` load.
+        return int(low.strip() or 0) != int(high)
     except ValueError:
         return False
 

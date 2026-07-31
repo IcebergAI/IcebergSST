@@ -40,8 +40,9 @@ config:
   environment: prod
   logLevel: INFO
 
-  # ADR 0007. `vault` selects the Vault backend; `env_key` uses the master key
-  # from the api Secret.
+  # ADR 0007. `env_key` uses the master key from the api Secret; `vault` is a
+  # documented seam, not yet implemented — selecting it fails every api pod at
+  # startup, so leave it until the backend lands.
   secretStoreBackend: env_key
 
   # Matches scoring below this are dropped (#70). Delivered to engines in their

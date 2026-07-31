@@ -6,10 +6,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from conftest import RecordingDispatcher
 from iceberg_api import maintenance
+from iceberg_api.engines.auth import record_heartbeat
 from iceberg_api.scans import service
 from iceberg_core.config import ApiSettings
 from iceberg_core.db import set_db_engine
 from iceberg_core.enums import (
+    EngineStatus,
     ScanStatus,
     ScanTaskStatus,
     ScanTrigger,
@@ -26,6 +28,8 @@ from iceberg_core.models import (
     Suppression,
 )
 from iceberg_core.secrets import SecretStore
+from iceberg_core.tasks import SCAN_TASK_QUEUE
+from prometheus_client import REGISTRY
 from pydantic import SecretStr
 from sqlalchemy import Engine as SAEngine
 from sqlmodel import Session, select
@@ -200,6 +204,66 @@ def test_a_round_finalizes_a_scan_stranded_by_a_crash(
     session.refresh(scan)
     assert scan.status is ScanStatus.FAILED
     assert scan.finished_at is not None
+
+
+def test_a_round_marks_an_engine_that_stopped_heartbeating_offline(
+    session: Session,
+    dispatcher: RecordingDispatcher,
+    run_round: Callable[..., None],
+) -> None:
+    """An engine cannot report that it died, so silence is the only evidence.
+
+    Without this every engine ever registered stays active forever: the fleet view
+    shows a worker that died months ago as live, and `GET /rules` counts its rule
+    pack as part of the detection surface currently in force (#58, #70).
+    """
+    now = datetime.now(UTC)
+    dead = Engine(name="dead", token_hash="dead", last_heartbeat_at=now - timedelta(hours=4))
+    live = Engine(name="live", token_hash="live", last_heartbeat_at=now - timedelta(seconds=30))
+    never_started = Engine(name="minted", token_hash="minted")
+    session.add_all([dead, live, never_started])
+    session.commit()
+
+    run_round(dispatcher, now=now)
+
+    for engine in (dead, live, never_started):
+        session.refresh(engine)
+    assert dead.status is EngineStatus.OFFLINE
+    assert live.status is EngineStatus.ACTIVE
+    # Minted but never run: an operator has not started it, which is not a death.
+    assert never_started.status is EngineStatus.ACTIVE
+
+
+def test_an_engine_that_comes_back_is_active_again(
+    session: Session,
+    dispatcher: RecordingDispatcher,
+    run_round: Callable[..., None],
+) -> None:
+    """The recovery branch in `record_heartbeat` only means something once
+    something marks an engine offline in the first place."""
+    now = datetime.now(UTC)
+    engine = Engine(name="flaky", token_hash="flaky", last_heartbeat_at=now - timedelta(hours=4))
+    session.add(engine)
+    session.commit()
+    run_round(dispatcher, now=now)
+
+    record_heartbeat(session, engine, now=now)
+
+    assert engine.status is EngineStatus.ACTIVE
+
+
+def test_a_round_publishes_the_broker_backlog(
+    session: Session,
+    dispatcher: RecordingDispatcher,
+    run_round: Callable[..., None],
+) -> None:
+    """`iceberg_queue_depth` is the one series an operator watches to tell "the
+    fleet is busy" from "the fleet is gone", so something has to set it."""
+    dispatcher.depth = 7
+
+    run_round(dispatcher)
+
+    assert REGISTRY.get_sample_value("iceberg_queue_depth", {"queue": SCAN_TASK_QUEUE}) == 7
 
 
 def test_a_round_releases_findings_whose_suppression_expired(

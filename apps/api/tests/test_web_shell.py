@@ -7,11 +7,14 @@ enough for a page which renders strings out of somebody else's Confluence.
 """
 
 import re
+import uuid
 from collections.abc import Callable
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
 from iceberg_api.web.assets import TEMPLATES_DIR
+from iceberg_api.web.errors import HX_ERROR_REGION
 from iceberg_api.web.security import DOCS_PATHS, build_csp, build_security_headers
 from iceberg_core.config import CoreSettings
 from iceberg_core.enums import UserRole
@@ -31,10 +34,59 @@ def test_an_anonymous_visitor_is_sent_to_the_login_page(client: TestClient) -> N
 
 
 def test_the_login_redirect_remembers_the_query_string(client: TestClient) -> None:
-    """A bookmarked filter must survive the round trip through the IdP."""
+    """A bookmarked filter must survive the round trip through the IdP.
+
+    Percent-encoded, or the target's own `?` ends the value: `next` would parse as
+    `/findings?state=open` with `severity` arriving as a stray parameter on /login,
+    and the visitor would land on a filter that is only half applied.
+    """
     response = client.get("/findings?state=open&severity=critical", follow_redirects=False)
 
-    assert response.headers["location"] == "/login?next=/findings?state=open&severity=critical"
+    location = response.headers["location"]
+    assert location == "/login?next=/findings%3Fstate%3Dopen%26severity%3Dcritical"
+    assert parse_qs(urlsplit(location).query)["next"] == ["/findings?state=open&severity=critical"]
+
+
+def test_the_login_page_hands_the_whole_filter_to_the_identity_provider(
+    client: TestClient,
+) -> None:
+    """The far end of the same round trip: /auth/login carries it intact."""
+    response = client.get("/findings?state=open&severity=critical")
+
+    href = re.search(r'href="(/api/v1/auth/login\?[^"]*)"', response.text)
+    assert href is not None, response.text[:400]
+    assert parse_qs(urlsplit(href.group(1)).query)["next"] == [
+        "/findings?state=open&severity=critical"
+    ]
+
+
+def test_an_expired_session_returns_to_a_page_rather_than_a_post_only_path(
+    client: TestClient,
+) -> None:
+    """Signing back in ends in a *GET*, and `POST .../triage` answers one with 405.
+
+    The Referer is the page the mutation was fired from, which is where the
+    analyst was — the common expiry path for every hx-post in the console.
+    """
+    finding_id = uuid.uuid4()
+
+    response = client.post(
+        f"/findings/{finding_id}/triage",
+        headers={"HX-Request": "true", "Referer": f"http://testserver/findings/{finding_id}"},
+        data={"state": "open"},
+        follow_redirects=False,
+    )
+
+    assert response.headers["HX-Redirect"] == f"/login?next=/findings/{finding_id}"
+
+
+def test_a_mutation_with_no_referer_falls_back_to_the_parent_page(client: TestClient) -> None:
+    """Nothing else is knowable, and the parent is at least navigable."""
+    source_id = uuid.uuid4()
+
+    response = client.post(f"/sources/{source_id}/scan", follow_redirects=False)
+
+    assert response.headers["location"] == f"/login?next=/sources/{source_id}"
 
 
 def test_an_htmx_request_without_a_session_gets_a_redirect_header_not_a_body(
@@ -198,6 +250,51 @@ def test_logout_without_a_csrf_token_is_refused(
     assert response.status_code == 403
 
 
+# ─── Failures on the HTMX surface ────────────────────────────────────────────
+
+
+def test_the_shell_carries_a_region_for_a_retargeted_failure(
+    client: TestClient, make_user: Callable[..., User], login_as: Callable[[User], dict[str, str]]
+) -> None:
+    login_as(make_user(UserRole.VIEWER))
+
+    assert f'id="{HX_ERROR_REGION}"' in client.get("/").text
+
+
+def test_a_failed_htmx_mutation_answers_with_a_fragment_htmx_will_swap(
+    client: TestClient, make_user: Callable[..., User], login_as: Callable[[User], dict[str, str]]
+) -> None:
+    """htmx discards the body of a 4xx, so the error *page* is a silent no-op.
+
+    Without this, an analyst clicking a control their role cannot use — or one
+    aimed at a record somebody else just deleted — sees nothing happen at all.
+    """
+    headers = login_as(make_user(UserRole.VIEWER))
+
+    response = client.post(
+        f"/sources/{uuid.uuid4()}/scan", headers=headers | {"HX-Request": "true"}
+    )
+
+    assert response.status_code == 200
+    assert response.headers["HX-Retarget"] == f"#{HX_ERROR_REGION}"
+    assert response.headers["HX-Reswap"] == "innerHTML"
+    assert "Your role does not allow this" in response.text
+    # A fragment, not the page: it is swapped into a live document.
+    assert "<html" not in response.text
+
+
+def test_the_same_failure_reaches_a_plain_browser_as_a_page_with_its_status(
+    client: TestClient, make_user: Callable[..., User], login_as: Callable[[User], dict[str, str]]
+) -> None:
+    """Only htmx trades the status away; a navigation still gets the real one."""
+    headers = login_as(make_user(UserRole.VIEWER))
+
+    response = client.post(f"/sources/{uuid.uuid4()}/scan", headers=headers)
+
+    assert response.status_code == 403
+    assert "<html" in response.text
+
+
 # ─── Security headers ────────────────────────────────────────────────────────
 
 
@@ -246,6 +343,28 @@ def test_the_api_surface_is_covered_by_the_same_policy(client: TestClient) -> No
     response = client.get("/healthz")
 
     assert "script-src 'self'" in response.headers["content-security-policy"]
+
+
+def test_a_console_page_is_never_stored_by_the_browser(
+    client: TestClient, make_user: Callable[..., User], login_as: Callable[[User], dict[str, str]]
+) -> None:
+    """Findings and the one-time engine token must not survive a sign-out.
+
+    Without a directive, heuristic caching and the bfcache make an authenticated
+    page restorable with the back button on a shared machine.
+    """
+    login_as(make_user(UserRole.ADMIN))
+
+    for path in ("/", "/findings", "/engines", "/login"):
+        assert client.get(path).headers["cache-control"] == "no-store", path
+
+
+def test_the_static_assets_stay_cacheable(client: TestClient) -> None:
+    """Version-pinned, session-free, and re-fetched on every single page load."""
+    response = client.get("/static/js/tags.js")
+
+    assert response.status_code == 200
+    assert "no-store" not in response.headers.get("cache-control", "")
 
 
 @pytest.mark.parametrize("path", sorted(DOCS_PATHS))

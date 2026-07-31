@@ -97,12 +97,16 @@ assignments — plus a generic high-entropy detector gated by mandatory proximit
 |---|---|
 | Rules with a positive fixture | 16 / 16 (a rule without one fails the suite) |
 | False positives on the benign corpus | 0 / 20 |
-| Throughput, ~30 KB page, one core | ~4 MB/s (test asserts a 100 KB/s floor) |
+| Throughput, ~35 KB clean page, one core | ~4 MB/s (test asserts a 250 KB/s floor) |
 
 The benign corpus is the shapes that get mistaken for secrets in real documentation: git shas,
 UUIDs, sha256 checksums, base64 of ordinary strings, Docker digests, ETags, and prose containing
 the word "password". The throughput floor is deliberately far below what a laptop manages — it
 catches a rule that turned quadratic, not a CI runner having a slow minute.
+
+The figure is for a page with no findings, which is the common case for a scanner: the masking
+pass that builds snippets only runs when there is something to report. A page dense with matches
+is slower, and bounded by the report cap rather than by the number of matches in the unit.
 
 ### Writing fixtures for a secret scanner
 A new rule needs a positive fixture, and a fixture realistic enough to match the rule is realistic

@@ -96,6 +96,19 @@ def ingest_findings(
                 .where(col(Finding.source_id) == scan.source_id)
                 .where(col(Finding.fingerprint) == payload.previous_fingerprint)
             ).first()
+            if existing is not None and not _same_secret(existing, payload):
+                # The old identity matched but the stored hash of the secret does
+                # not, so this is a different secret wearing a colliding
+                # fingerprint — or an engine that paired the two identities under
+                # mismatched peppers. Re-keying would move an analyst's decision
+                # onto a secret it was never about, which is the one thing a
+                # rotation must not do; treat it as a finding nobody has seen.
+                logger.warning(
+                    "finding_rekey_refused_hash_mismatch",
+                    finding_id=str(existing.id),
+                    scan_id=str(scan.id),
+                )
+                existing = None
             if existing is not None:
                 existing.fingerprint = payload.fingerprint
                 existing.secret_hash = payload.secret_hash
@@ -129,6 +142,20 @@ def ingest_findings(
         rekeyed=outcome.rekeyed,
     )
     return outcome
+
+
+def _same_secret(existing: Finding, payload: FindingPayload) -> bool:
+    """Whether the re-key candidate really is the secret already stored.
+
+    ``previous_secret_hash`` is the same value the stored row holds, recomputed
+    under the outgoing pepper, so comparing them is the one check available that
+    the two identities describe one secret. An engine too old to send it is
+    trusted on the fingerprint alone — that is the behaviour the field was added
+    to strengthen, not a precondition for re-keying at all.
+    """
+    return payload.previous_secret_hash is None or (
+        payload.previous_secret_hash == existing.secret_hash
+    )
 
 
 def _create(

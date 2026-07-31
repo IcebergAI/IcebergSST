@@ -265,8 +265,8 @@ def test_a_rotation_does_not_disturb_an_unrelated_finding(
     triaged_finding: Finding,
     make_scan: Callable[[], Scan],
 ) -> None:
-    """Re-keying matches on the reported previous fingerprint alone, so a finding
-    the scan did not see keeps its identity."""
+    """Re-keying looks up the reported previous fingerprint, so a finding the scan
+    did not see keeps its identity."""
     scan = make_scan()
     other = Finding(
         source_id=source.id,
@@ -289,6 +289,48 @@ def test_a_rotation_does_not_disturb_an_unrelated_finding(
 
     session.refresh(other)
     assert other.fingerprint == unchanged
+
+
+def test_a_rekey_whose_secret_hash_disagrees_is_refused(
+    session: Session,
+    triaged_finding: Finding,
+    make_scan: Callable[[], Scan],
+) -> None:
+    """``previous_secret_hash`` is the cross-check, not decoration.
+
+    It is the same value the stored row already holds, recomputed under the
+    outgoing pepper — so a disagreement means the two identities are not one
+    secret, and carrying an analyst's decision across would attach it to
+    something it was never about.
+    """
+    scan = make_scan()
+    payload = _payload(with_previous=True).model_copy(update={"previous_secret_hash": "d" * 64})
+
+    outcome = ingest_findings(session, scan, [payload])
+    session.commit()
+
+    assert outcome.rekeyed == 0
+    session.refresh(triaged_finding)
+    assert triaged_finding.state is FindingState.ACCEPTED_RISK
+    assert triaged_finding.notes == "rotating with the platform team in Q4"
+    # Stored as what it is: a finding nobody has seen before.
+    assert len(list(session.exec(select(Finding)))) == 2
+
+
+def test_an_engine_too_old_to_report_the_hash_still_rekeys(
+    session: Session,
+    triaged_finding: Finding,
+    make_scan: Callable[[], Scan],
+) -> None:
+    """The cross-check strengthens re-keying; it is not a precondition for it."""
+    scan = make_scan()
+    payload = _payload(with_previous=True).model_copy(update={"previous_secret_hash": None})
+
+    outcome = ingest_findings(session, scan, [payload])
+    session.commit()
+
+    assert outcome.rekeyed == 1
+    assert len(list(session.exec(select(Finding)))) == 1
 
 
 def test_a_second_scan_in_the_window_is_a_no_op(

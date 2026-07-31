@@ -7,9 +7,9 @@ Most secret-scanning tooling is git-centric. IcebergSST targets the *non-git* lo
 credentials quietly accumulate — **Confluence**, **Jira**, and **network file shares** — with an
 API-first management plane and horizontally scalable, isolated scanner engines.
 
-> ⚠️ **Status: M0–M3 built.** The core package, the control-plane API, the detection engine, the
-> Confluence connector, the engine worker, the local container stack, and the web console all exist
-> and are tested. Notification *dispatch* and the Helm chart (M4) do not yet. See
+> ⚠️ **Status: M0–M4 built.** The core package, the control-plane API, the detection engine, the
+> Confluence connector, the engine worker, notification dispatch, the local container stack, the web
+> console and the Helm chart all exist and are tested. See
 > [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`docs/`](./docs/) for the spec, and the GitHub
 > milestones/issues for what is left.
 
@@ -104,11 +104,17 @@ Needs [uv](https://docs.astral.sh/uv/) and Docker.
 ```bash
 make sync       # install the workspace, and the git hooks that keep secrets out of history
 make init-env   # .env from .env.example, with a master key and sealed pepper generated
-make up         # build, start api + engine + postgres + redis, wait for health, migrate
+make up         # build, start api + postgres + redis, wait for health, migrate
+./deploy/compose/engine-token.sh   # mint an engine token, then start the engine
 make seed       # optional: a disabled demo source to click around
 make scale N=3  # more engine replicas
 make down       # stop; `make destroy` also drops the data volume
 ```
+
+The engine is a separate step because only the api can mint its token, and only against a schema
+that does not exist until `make up` has migrated — so an engine, which refuses to start without
+one, waits behind a compose profile until the script has run (`docs/deployment.md` § Bringing up an
+engine).
 
 Run `make sync` in a fresh clone before anything else: git hooks live in `.git/hooks`, which is
 not part of a checkout, so until it runs the pre-commit gitleaks hook is not installed and a

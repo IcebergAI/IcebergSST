@@ -49,12 +49,14 @@ Confluence-scan-to-triaged-finding flow). M3–M4 complete the product.
 - Notification-channel **CRUD** landed here rather than in M4, because the M3 screen needs routes
   to drive. Dispatch remains M4.
 
-## M4 — Notifications & prod deploy
+## M4 — Notifications & prod deploy *(shipped)*
 - **Epic: Notifications** — email/SMTP + webhook **dispatch**, new-finding events. The channel model
   and its CRUD API shipped with M3. Dispatch is a transactional outbox
   (`notification_delivery`): reconciliation queues, the maintenance loop delivers and retries.
   See [`notifications.md`](./notifications.md).
-- **Epic: Helm chart** — api Deploy, engine Deploy + HPA, pg/redis, secrets, ingress, values.
+- **Epic: Helm chart** — api Deploy + Service + Ingress, engine Deploy + HPA, a migration hook Job,
+  two Secrets, a NetworkPolicy pair. Postgres and Redis are deliberately **not** in the chart; point
+  it at a managed instance ([`deployment.md`](./deployment.md) § Helm chart).
 - **Epic: Hardening** — security review, rate limiting, audit logging, data-retention policy,
   key + pepper rotation runbook, docs polish.
 

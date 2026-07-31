@@ -212,6 +212,71 @@ def test_a_recently_resolved_finding_is_inside_the_window(
     assert result.findings == 0
 
 
+def test_a_finding_reopened_mid_purge_is_not_deleted(
+    session: Session,
+    make_finding: Callable[..., Finding],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The eligibility predicates are repeated on the DELETE, not only the SELECT.
+
+    The purge runs on the maintenance beat while ingest runs in the request path,
+    so under READ COMMITTED a submission can re-open one of the ids just read. A
+    delete by id alone would take a live secret finding and cascade its whole
+    trail away, with nothing to recover it from.
+    """
+    finding = make_finding()
+    original = session.exec
+
+    def reopen_between_the_two_statements(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        if not str(statement).startswith("SELECT finding.id"):
+            return original(statement, *args, **kwargs)
+        eligible = list(original(statement, *args, **kwargs))
+        # Stands in for the commit an engine's result submission would land here.
+        original(
+            update(Finding)
+            .where(col(Finding.id) == finding.id)
+            .values(state=FindingState.OPEN, resolution=None)
+        )
+        return eligible
+
+    monkeypatch.setattr(session, "exec", reopen_between_the_two_statements)
+
+    result = retention.purge(session, _settings(retention_resolved_findings_days=90), now=NOW)
+
+    assert result.findings == 0
+    assert session.get(Finding, finding.id) is not None
+
+
+def test_an_event_whose_finding_reopened_mid_purge_is_kept(
+    session: Session,
+    make_finding: Callable[..., Finding],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same race, on the trail: an open finding keeps its whole history."""
+    finding = make_finding(state=FindingState.ACCEPTED_RISK, resolution=None)
+    event = FindingEvent(finding_id=finding.id, kind=FindingEventKind.COMMENT, comment="old")
+    session.add(event)
+    session.commit()
+    _age_event(session, event, LONG_AGO)
+    original = session.exec
+
+    def reopen_between_the_two_statements(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        if not str(statement).startswith("SELECT finding_event.id"):
+            return original(statement, *args, **kwargs)
+        eligible = list(original(statement, *args, **kwargs))
+        original(
+            update(Finding).where(col(Finding.id) == finding.id).values(state=FindingState.OPEN)
+        )
+        return eligible
+
+    monkeypatch.setattr(session, "exec", reopen_between_the_two_statements)
+
+    result = retention.purge(session, _settings(retention_finding_events_days=30), now=NOW)
+
+    assert result.finding_events == 0
+    assert len(list(session.exec(select(FindingEvent)))) == 1
+
+
 def test_a_purged_finding_takes_its_trail_with_it(
     session: Session, make_finding: Callable[..., Finding]
 ) -> None:

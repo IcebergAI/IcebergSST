@@ -11,9 +11,12 @@ rule an API client can walk straight past.
 """
 
 from typing import Any
+from urllib.parse import quote
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from pydantic import ValidationError
+
+from iceberg_api.web.templating import hx_redirect
 
 #: What a checked box posts. An unchecked one posts nothing, so absence is False.
 CHECKED = frozenset({"on", "true", "1", "yes"})
@@ -62,7 +65,25 @@ def error_text(exc: Exception) -> str:
             f"{_field(error.get('loc', ()))}: {error.get('msg', 'is not valid')}"
             for error in exc.errors()
         )
+    if isinstance(exc, ValueError):
+        # Checked after ValidationError, which subclasses it. A route raising a
+        # bare ValueError ("choose a source") is writing the sentence it wants the
+        # analyst to read; discarding it for a generic one would lose the only
+        # copy anybody authored.
+        return str(exc)
     return "The request could not be completed."  # pragma: no cover — defensive
+
+
+def redirect_with_error(path: str, exc: Exception) -> Response:
+    """Send the browser to ``path`` carrying the reason the request failed.
+
+    The message rides in the query string rather than a swapped fragment because
+    these forms sit on a listing: a full reload is what shows the analyst the rows
+    their change did — or did not — affect. Encoded with no safe characters, since
+    an API message is free text and a ``&`` in one would otherwise split it into
+    parameters the page never reads.
+    """
+    return hx_redirect(f"{path}?error={quote(error_text(exc), safe='')}")
 
 
 def _one_error(entry: Any) -> str:

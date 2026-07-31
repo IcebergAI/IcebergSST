@@ -33,14 +33,7 @@ from iceberg_api import audit, suppressions
 from iceberg_api.auth.dependencies import CsrfProtected, SessionDep
 from iceberg_api.auth.rbac import AnalystUser, ViewerUser
 from iceberg_api.findings.schemas import SuppressionCreate, SuppressionRead
-from iceberg_api.pagination import (
-    DEFAULT_LIMIT,
-    MAX_LIMIT,
-    Cursor,
-    CursorError,
-    after,
-    resolve_cursor,
-)
+from iceberg_api.pagination import DEFAULT_LIMIT, MAX_LIMIT, after, build_page, position
 from iceberg_api.schemas import Page
 
 router = APIRouter(prefix="/suppressions", tags=["suppressions"])
@@ -70,11 +63,6 @@ async def list_suppressions(
     included — "what is being hidden from this source" is the question asked, and
     an answer that omitted the global rules would be wrong.
     """
-    try:
-        position = resolve_cursor(cursor)
-    except CursorError as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "cursor is not valid") from exc
-
     statement = select(Suppression)
     if source_id is not None:
         statement = statement.where(
@@ -91,19 +79,10 @@ async def list_suppressions(
         statement,
         created_at=Suppression.created_at,  # type: ignore[arg-type]  # instrumented attribute
         row_id=Suppression.id,  # type: ignore[arg-type]
-        cursor=position,
+        cursor=position(cursor),
     )
     rows = list(db.exec(statement.limit(limit + 1)))
-    page, has_more = rows[:limit], len(rows) > limit
-
-    return Page(
-        items=[SuppressionRead.model_validate(row) for row in page],
-        next_cursor=(
-            Cursor(created_at=page[-1].created_at, row_id=page[-1].id).encode()
-            if has_more and page
-            else None
-        ),
-    )
+    return build_page(rows, limit=limit, read=SuppressionRead.model_validate)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED, dependencies=[CsrfProtected])

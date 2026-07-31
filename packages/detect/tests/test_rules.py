@@ -29,6 +29,9 @@ rules:
 """
 
 
+#: The `rules:` half of a valid pack, for tests about the pack-level fields.
+_ONE_RULE = "rules: [{id: a, description: d, severity: low, regex: x}]"
+
 #: A valid one-rule pack, per field. Tests override one field at a time, so the
 #: failure under test is the only thing wrong with the document.
 _DEFAULTS = {
@@ -138,7 +141,27 @@ def test_a_malformed_pack_fails_at_load(document: str, message: str) -> None:
 def test_a_pack_without_a_version_is_refused() -> None:
     """The version is stamped on every finding; without it nothing is reproducible."""
     with pytest.raises(RulePackError, match="no version"):
-        load_pack('version: "  "\nrules: [{id: a, description: d, severity: low, regex: x}]')
+        load_pack(_ONE_RULE)
+
+
+@pytest.mark.parametrize("version", ['"  "', "", "null", "true", "2026.1"])
+def test_a_pack_version_must_be_a_non_empty_yaml_string(version: str) -> None:
+    """Coercing with `str()` turned a valueless `version:` key into the literal
+    "None", which passes every non-empty check and is then stamped on every finding
+    the pack produces."""
+    with pytest.raises(RulePackError, match="version must be a non-empty string"):
+        load_pack(f"version: {version}\n{_ONE_RULE}")
+
+
+@pytest.mark.parametrize("description", ["", "null", "false", "3"])
+def test_a_pack_description_is_held_to_the_same_standard(description: str) -> None:
+    with pytest.raises(RulePackError, match="description must be a non-empty string"):
+        load_pack(f'version: "1"\ndescription: {description}\n{_ONE_RULE}')
+
+
+def test_a_pack_may_omit_its_description_entirely() -> None:
+    """Absent is a choice; present-but-valueless is a typo."""
+    assert load_pack(f'version: "1"\n{_ONE_RULE}').description == ""
 
 
 def test_duplicate_rule_ids_are_refused() -> None:
@@ -205,6 +228,9 @@ def test_an_unknown_rule_id_is_a_key_error() -> None:
         # A variable-width bounded range is as exponential as an unbounded one when
         # a group repeats it: the engine has many ways to divide the same input.
         r"(?:[a-z]{2,64})+X",
+        # `{,n}` is Python's own spelling of `{0,n}`; reading the empty low bound as
+        # a parse failure classified this as fixed and let it through.
+        r"(?:x{,64})+X",
         r"(?:\w{1,8})+$",
         r"([a-z]{3,5})*z",
     ],
@@ -212,6 +238,15 @@ def test_an_unknown_rule_id_is_a_key_error() -> None:
 def test_exponential_patterns_are_refused_at_load(pattern: str) -> None:
     """`re` has no timeout, and rules run over attacker-supplied attachment text."""
     with pytest.raises(RulePackError, match="nested unbounded quantifier"):
+        assert_no_catastrophic_backtracking(pattern)
+
+
+@pytest.mark.parametrize("pattern", [r"(a|a)+b", r"(?:a|ab)+c", r"(a|a|b)*x", r"(?:ab|a){2,64}"])
+def test_repeated_alternations_are_refused_at_load(pattern: str) -> None:
+    """Branches that can match the same text give the engine exponentially many ways
+    to reach one position — `(a|a)+b` quadruples per two characters of input. Which
+    branches overlap is not decidable here, so the whole shape is refused."""
+    with pytest.raises(RulePackError, match="repeated alternation"):
         assert_no_catastrophic_backtracking(pattern)
 
 
@@ -229,6 +264,9 @@ def test_exponential_patterns_are_refused_at_load(pattern: str) -> None:
         r"([]*]x)*y",  # a literal leading ] is a class member, not the close
         r"(?:[a-z]{4})+X",  # a fixed count adds no ambiguity to divide
         r"(?:[a-z]{3,3})+X",  # an equal-bound range is fixed too
+        r"(?:AKIA|ASIA)x*",  # an alternation nothing repeats
+        r"(?:RSA |EC )?PRIVATE",  # at most one repetition, so no way to divide
+        r"(?:(?:a|b)x)+",  # the `|` belongs to the inner group, which is not repeated
     ],
 )
 def test_safe_patterns_are_accepted(pattern: str) -> None:

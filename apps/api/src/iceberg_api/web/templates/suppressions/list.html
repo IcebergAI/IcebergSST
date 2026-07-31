@@ -163,7 +163,8 @@
 {% if next_cursor %}
 <div class="pager">
   <span class="pager-count">Showing one page</span>
-  <a class="btn btn--ghost btn--sm" href="/suppressions?cursor={{ next_cursor | urlencode }}">
+  <a class="btn btn--ghost btn--sm"
+     href="/suppressions?cursor={{ next_cursor | urlencode }}{% for key, value in selected.items() %}{% if value %}&amp;{{ key }}={{ value | urlencode }}{% endif %}{% endfor %}">
     Next page
     <svg class="btn-ic" aria-hidden="true"><use href="#ic-arrow"/></svg>
   </a>

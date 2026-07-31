@@ -18,10 +18,13 @@ from typing import Any
 
 import httpx2
 import pytest
-from iceberg_connectors import FakeConnector, FakePage, registry
+from dramatiq.middleware import TimeLimitExceeded
+from iceberg_connectors import ConnectorError, FakeConnector, FakePage, registry
 from iceberg_detect import load_named_pack
 from iceberg_engine.api_client import EngineClient
 from iceberg_engine.runner import run_task
+from prometheus_client import REGISTRY
+from structlog.testing import capture_logs
 
 PACK = load_named_pack()
 PEPPER = b"0123456789abcdef0123456789abcdef"
@@ -343,6 +346,101 @@ def test_an_uncancelled_task_reports_normally_with_a_registry() -> None:
 
     assert report is not None and report.status == "completed"
     assert len(api.submission["findings"]) == 1
+
+
+def test_findings_from_before_a_mid_fetch_failure_are_still_reported() -> None:
+    """A source that gives out halfway — a pagination cap, retries exhausted
+    against a blipping Confluence — used to take every unit before it down with
+    it. `complete_task(FAILED)` is terminal, so a secret found on page one would
+    surface only if an operator re-ran the whole scan (#115)."""
+
+    class GivingUp(FakeConnector):
+        def fetch(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
+            yield from super().fetch(*args, **kwargs)
+            raise ConnectorError("pagination cap reached")
+
+    registry.clear()
+    registry.register(GivingUp(spaces={"DOCS": [FakePage("page-1", LEAKY)]}))
+    api = Api()
+
+    report = run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    assert report is not None and report.status == "failed"
+    assert [f["rule_id"] for f in api.submission["findings"]] == ["aws-access-key-id"]
+    assert api.submission["counts"]["units"] == 1
+
+
+def test_an_interrupted_task_reports_what_it_had_before_it_dies() -> None:
+    """Dramatiq's time limit raises a `BaseException`, so neither the connector nor
+    the catch-all handler sees it and the task would end without reporting — the
+    API waits out the lease and redelivers a task that dies at the same point every
+    time (#106). The interrupt still kills the thread; it just says so first."""
+
+    class OutOfTime(FakeConnector):
+        def fetch(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
+            yield from super().fetch(*args, **kwargs)
+            raise TimeLimitExceeded
+
+    registry.clear()
+    registry.register(OutOfTime(spaces={"DOCS": [FakePage("page-1", LEAKY)]}))
+    api = Api()
+
+    with pytest.raises(TimeLimitExceeded):
+        run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    assert api.submission["status"] == "failed"
+    assert api.submission["error"] == "TimeLimitExceeded"
+    assert len(api.submission["findings"]) == 1
+
+
+def test_a_token_rejected_at_report_time_is_a_warning_not_a_routine_lease_loss() -> None:
+    """A 403 says the lease moved on, which is routine. A 401 says this engine's
+    token was rotated out from under a task that ran for minutes — re-registering
+    an engine does exactly that — and every in-flight result is being discarded. An
+    engine with no id has no heartbeat to fail either, so this is the only place an
+    operator can see it (#131)."""
+    api = Api(results_status=401)
+
+    with capture_logs() as events:
+        report = run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    assert report is None
+    rejected = [event for event in events if event["event"] == "scan_task_token_rejected"]
+    assert [event["log_level"] for event in rejected] == ["warning"]
+
+
+# ─── The engine's own metrics ─────────────────────────────────────────────────
+
+
+def _counter(name: str, **labels: str) -> float:
+    """A counter's current value, or zero before its first observation."""
+    return REGISTRY.get_sample_value(name, labels) or 0.0
+
+
+def test_a_reported_task_moves_the_engines_own_counters() -> None:
+    """An engine's metrics endpoint serves the API's series too, and those sit at
+    zero there however busy the engine is — a dashboard keyed to them reads a
+    healthy engine as a dead one (#132)."""
+    before = _counter("iceberg_engine_tasks_run_total", kind="fetch", outcome="completed")
+    findings_before = _counter("iceberg_engine_findings_reported_total")
+    api = Api()
+
+    run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    assert _counter("iceberg_engine_tasks_run_total", kind="fetch", outcome="completed") == (
+        before + 1
+    )
+    assert _counter("iceberg_engine_findings_reported_total") == findings_before + 1
+
+
+def test_a_source_failure_is_counted_apart_from_an_engine_one() -> None:
+    """Which of the two is failing a scan is the first question an operator asks."""
+    before = _counter("iceberg_engine_connector_failures_total", source_type="fake")
+    api = Api(_lease(kind="reindex"))
+
+    run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    assert _counter("iceberg_engine_connector_failures_total", source_type="fake") == before + 1
 
 
 def test_a_running_task_is_registered_so_the_heartbeat_can_renew_it() -> None:

@@ -29,13 +29,21 @@ Three properties are worth stating because they are easy to get wrong:
 """
 
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
 import structlog
-from iceberg_core.enums import FindingEventKind, SuppressionScope
+from iceberg_core.enums import FindingEventKind, FindingState, SuppressionScope
 from iceberg_core.models import Finding, FindingEvent, Suppression
 from iceberg_core.suppression import SuppressionRule, first_match, matches
 from sqlmodel import Session, col, or_, select
+from sqlmodel.sql.expression import SelectOfScalar
+
+from iceberg_api.pagination import Cursor, after
+
+#: Findings read per query when sweeping the table. Bounds how much one statement
+#: pulls into memory; the sweep itself continues across as many as it needs.
+SWEEP_BATCH = 500
 
 __all__ = [
     "SuppressionRule",
@@ -160,10 +168,15 @@ def apply_to_existing(
         case SuppressionScope.RULE:
             statement = statement.where(col(Finding.rule_id) == rule.pattern)
         case SuppressionScope.PATH_GLOB:
-            pass
+            # Nothing narrows this one, so without a bound it walks every finding
+            # ever recorded — inside `POST /suppressions`, holding a write
+            # transaction. Open findings are the ones a suppression is *for*: a
+            # resolved or triaged finding is already out of the analyst's queue,
+            # and if the secret comes back, ingest applies this rule to it then.
+            statement = statement.where(col(Finding.state) == FindingState.OPEN)
 
     covered = 0
-    for finding in db.exec(statement):
+    for finding in _in_batches(db, statement):
         if matches(
             rule,
             fingerprint=finding.fingerprint,
@@ -244,9 +257,9 @@ def release_lapsed(db: Session, *, now: datetime | None = None) -> int:
     a property of the clock rather than of the scan schedule.
     """
     at = now or datetime.now(UTC)
-    hidden = db.exec(select(Finding).where(col(Finding.suppressed_at).is_not(None))).all()
-    if not hidden:
-        return 0
+    # Batched rather than loaded whole: this runs every maintenance beat, and the
+    # hidden set is unbounded on a deployment with a broad glob in force.
+    hidden = _in_batches(db, select(Finding).where(col(Finding.suppressed_at).is_not(None)))
     # Suppressions are analyst-managed and few; reading them once beats a lookup
     # per hidden finding.
     by_id = {row.id: row for row in db.exec(select(Suppression))}
@@ -301,6 +314,36 @@ def release_lapsed(db: Session, *, now: datetime | None = None) -> int:
     if released:
         logger.info("suppressions_lapsed", findings_released=released)
     return released
+
+
+def _in_batches(db: Session, statement: SelectOfScalar[Finding]) -> Iterator[Finding]:
+    """Walk a findings query in keyset batches instead of loading it whole.
+
+    The same ``(created_at, id)`` order the list endpoints paginate on, so a
+    caller that suppresses or releases rows as it goes — which takes them out of
+    the statement's own filter — still advances rather than looping or skipping.
+    """
+    cursor: Cursor | None = None
+    while True:
+        batch = list(
+            db.exec(
+                after(
+                    statement,
+                    created_at=Finding.created_at,  # type: ignore[arg-type]  # instrumented attribute
+                    row_id=Finding.id,  # type: ignore[arg-type]
+                    cursor=cursor,
+                ).limit(SWEEP_BATCH)
+            )
+        )
+        if not batch:
+            return
+        # Read before yielding: the caller mutates these rows, and an expired
+        # attribute would have to be re-read from a row it has already changed.
+        next_cursor = Cursor(created_at=batch[-1].created_at, row_id=batch[-1].id)
+        yield from batch
+        if len(batch) < SWEEP_BATCH:
+            return
+        cursor = next_cursor
 
 
 def _as_utc(value: datetime) -> datetime:

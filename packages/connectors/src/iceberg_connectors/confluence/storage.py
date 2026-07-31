@@ -39,6 +39,11 @@ _DROPPED_ELEMENTS = re.compile(
 #: CDATA wrappers around macro bodies. The delimiters go; the content is the point.
 _CDATA = re.compile(r"<!\[CDATA\[(.*?)]]>", re.DOTALL)
 
+#: Stand-in for a CDATA body while the tag stripper runs over everything around it.
+#: NUL is not a legal XML character and is removed from the input before any of
+#: these are issued, so nothing a page author can write forges one.
+_HELD = re.compile(r"\x00(\d+)\x00")
+
 #: Any remaining tag. Bounded so a crafted unterminated `<` cannot make the regex
 #: scan the rest of a large document looking for a `>` that never comes.
 _TAG = re.compile(r"<[^>]{0,4096}>")
@@ -65,21 +70,34 @@ _SPACE_RUN = re.compile(r"[ \t\f\v]{2,}")
 def storage_to_text(storage: str) -> str:
     """Flatten one storage-format body into text for detection.
 
-    Order matters and is not arbitrary: drop the elements that are pure metadata
-    first (while their tags still identify them), unwrap CDATA before the tag
-    stripper can mangle the ``]]>``, turn block elements into newlines while they
-    are still recognisable, and only then remove what is left.
+    Order matters and is not arbitrary: set CDATA bodies aside before anything can
+    read them as markup, drop the elements that are pure metadata (while their tags
+    still identify them), turn block elements into newlines while they are still
+    recognisable, remove what is left, and put the CDATA back.
     """
     if not storage:
         return ""
 
-    text = _DROPPED_ELEMENTS.sub(" ", storage)
-    text = _CDATA.sub(r"\1", text)
+    held: list[str] = []
+
+    def hold(match: re.Match[str]) -> str:
+        # A CDATA body is text someone pasted, so a `<...>` inside it is not markup.
+        # Stripping it deletes a pasted `<password>hunter2</password>` down to
+        # `hunter2` — losing the keyword the proximity signal is scored on (ADR
+        # 0003) — and removes a value written as `token=<AKIA...>` outright.
+        held.append(match[1])
+        return f"\x00{len(held) - 1}\x00"
+
+    text = _CDATA.sub(hold, storage.replace("\x00", ""))
+    text = _DROPPED_ELEMENTS.sub(" ", text)
     text = _BREAKS.sub("\n", text)
     text = _TAG.sub(" ", text)
     # Last, and only once: unescaping before tag-stripping would turn a written
     # `&lt;script&gt;` in someone's documentation into a tag and delete it.
     text = html.unescape(text)
+    # After unescaping, because CDATA is literal by definition — an `&amp;` in a
+    # code block is an ampersand-a-m-p, and the page said so.
+    text = _HELD.sub(lambda match: held[int(match[1])], text)
 
     text = _SPACE_RUN.sub(" ", text)
     text = "\n".join(line.strip() for line in text.splitlines())

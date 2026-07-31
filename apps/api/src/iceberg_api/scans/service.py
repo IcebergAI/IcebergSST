@@ -81,6 +81,12 @@ def launch_scan(
     Raises :class:`ScanConflict` if the source already has an active scan — the
     partial unique index is what detects it, so the answer is the same however many
     replicas try at once.
+
+    The conflicting insert is wrapped in a SAVEPOINT so that a refusal costs the
+    caller nothing else. The session is shared: the scheduler's round has other
+    schedules' bookkeeping pending on it, and a plain rollback here would discard
+    it — leaving those schedules due again next beat and launching duplicate scans
+    (#33).
     """
     started_at = now or datetime.now(UTC)
     scan = Scan(
@@ -89,11 +95,11 @@ def launch_scan(
         status=ScanStatus.QUEUED,
         started_at=started_at,
     )
-    db.add(scan)
     try:
-        db.flush()
+        with db.begin_nested():
+            db.add(scan)
+            db.flush()
     except IntegrityError as exc:
-        db.rollback()
         raise ScanConflict(f"source {source.name!r} already has an active scan") from exc
 
     task = ScanTask(
@@ -309,13 +315,24 @@ def finalize_scan_if_done(
 ) -> ScanStatus | None:
     """Finish the scan if every task is terminal. Returns the status this call set.
 
+    Does not commit: the caller owns the transaction, so that the status flip and
+    the reconciliation it justifies land together (see
+    :func:`finalize_and_reconcile`).
+
     Returns ``None`` when work remains **or when another caller finished it first** —
     which is the point. Two tasks completing at the same instant both land here, and
     the conditional UPDATE means exactly one of them gets a status back and
     therefore exactly one reconciliation happens (ADR 0009 §3).
     """
     at = now or datetime.now(UTC)
-    statuses = list(db.exec(select(col(ScanTask.status)).where(col(ScanTask.scan_id) == scan_id)))
+    tasks = list(
+        db.exec(
+            select(col(ScanTask.status), col(ScanTask.error))
+            .where(col(ScanTask.scan_id) == scan_id)
+            .order_by(col(ScanTask.created_at), col(ScanTask.id))
+        )
+    )
+    statuses = [status for status, _ in tasks]
     if not statuses or any(status not in TERMINAL_TASK_STATUSES for status in statuses):
         return None
 
@@ -326,14 +343,14 @@ def finalize_scan_if_done(
             col(Scan.id) == scan_id,
             col(Scan.status).in_(list(ACTIVE_SCAN_STATUSES)),
         )
-        .values(status=final, finished_at=at)
+        # The scan carries the first failed task's error, so `GET /scans/{id}` can
+        # say *why* a run ended as it did rather than reporting a bare status and
+        # a null the caller has to chase through the task list.
+        .values(status=final, finished_at=at, error=_first_error(tasks))
     )
     if result.rowcount != 1:
         # Someone else finished it (or it was cancelled). Not our reconciliation.
         return None
-
-    db.commit()
-    logger.info("scan_finished", scan_id=str(scan_id), status=final.value)
     return final
 
 
@@ -343,26 +360,35 @@ def finalize_and_reconcile(
     *,
     now: datetime | None = None,
 ) -> ScanStatus | None:
-    """Finish the scan if its tasks are done, and reconcile if it completed.
+    """Finish the scan if its tasks are done, and reconcile if it completed. Commits.
 
-    The two halves stay together because a ``completed`` scan that never
-    reconciled is exactly the stalled state the safety sweeps exist to repair.
+    All of it in **one** transaction. Split across commits, a crash between the
+    status flip and the reconciliation left a ``completed`` scan that never
+    reconciled — and no repair path reaches that state, because every sweep and
+    the engine-replay path are gated on the scan still being *active*. Remediated
+    findings would stay open until some later scan of the source happened to
+    resolve them, and the run's announcements would never be queued at all.
+
     Safe to call from anywhere: :func:`finalize_scan_if_done` is conditional, so
     concurrent callers agree on a single winner.
     """
     final = finalize_scan_if_done(db, scan_id, now=now)
+    if final is None:
+        return None
+
     if final is ScanStatus.COMPLETED:
         scan = db.get(Scan, scan_id)
         if scan is not None:  # pragma: no branch — the UPDATE just matched it
             db.refresh(scan)
             reconcile_scan(db, scan, now=now)
-            # Queue announcements for what this scan opened (#60). Writing the
-            # outbox rows here — after reconciliation, so a finding auto-resolved
-            # in the same pass is not announced — keeps "the scan finished" and
-            # "somebody will be told" in one transaction. Sending happens in the
-            # maintenance loop; nothing here talks to SMTP or a webhook.
-            if notification_dispatch.enqueue_for_scan(db, scan, now=now):
-                db.commit()
+            # Queue announcements for what this scan opened (#60). Written after
+            # reconciliation, so a finding auto-resolved in the same pass is not
+            # announced. Sending happens in the maintenance loop; nothing here
+            # talks to SMTP or a webhook.
+            notification_dispatch.enqueue_for_scan(db, scan, now=now)
+
+    db.commit()
+    logger.info("scan_finished", scan_id=str(scan_id), status=final.value)
     return final
 
 
@@ -437,6 +463,18 @@ def _final_status(task_statuses: list[ScanTaskStatus]) -> ScanStatus:
     if completed == len(task_statuses):
         return ScanStatus.COMPLETED
     return ScanStatus.PARTIAL if completed else ScanStatus.FAILED
+
+
+def _first_error(tasks: list[tuple[ScanTaskStatus, str | None]]) -> str | None:
+    """The earliest failed task's error, or None if nothing failed.
+
+    The first rather than the last: a connector that loses its credential fails
+    every task after the first, and the one that says what went wrong is the one
+    that failed first.
+    """
+    return next(
+        (error for status, error in tasks if status is ScanTaskStatus.FAILED and error), None
+    )
 
 
 def reclaim_expired_leases(

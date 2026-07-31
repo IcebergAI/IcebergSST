@@ -30,6 +30,12 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if not .Values.secrets.existingEngineSecret }}
+        # Rotating an engine token is a Secret-only change, so without this the
+        # fleet keeps authenticating with the token it started with. Same guard
+        # and same reasoning as the api Deployment.
+        checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.engine.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

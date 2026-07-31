@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
+from dramatiq.middleware import Interrupt
 from iceberg_connectors import (
     ConnectorError,
     ContentUnit,
@@ -39,6 +40,11 @@ from iceberg_connectors import (
 )
 from iceberg_connectors.protocol import Connector
 from iceberg_core.fingerprint import fingerprint, secret_hash
+from iceberg_core.metrics import (
+    ENGINE_CONNECTOR_FAILURES,
+    ENGINE_FINDINGS_REPORTED,
+    ENGINE_TASKS_RUN,
+)
 from iceberg_detect import DetectionResult, RulePack, detect
 
 from iceberg_engine.api_client import (
@@ -46,6 +52,7 @@ from iceberg_engine.api_client import (
     EngineApiError,
     EngineClient,
     Lease,
+    LeaseNotHeld,
     LeaseRefused,
 )
 from iceberg_engine.heartbeat import TaskRegistry
@@ -117,7 +124,9 @@ def run_task(
     Returns None when there is nothing to report: the lease was refused, or the
     task was cancelled underneath us. Otherwise never raises for anything the API
     should hear about — a connector failure becomes a ``failed`` submission naming
-    the reason, so the scan settles promptly instead of waiting out a lease.
+    the reason, so the scan settles promptly instead of waiting out a lease. A
+    dramatiq interrupt is the one thing that leaves this frame, and only after it
+    has been reported: the thread it was raised in is being killed either way.
 
     ``tasks`` is the registry the heartbeat thread reports from and writes
     cancellations into. Without one the task still runs; it just cannot renew its
@@ -149,6 +158,7 @@ def run_task(
     except TaskCancelled:
         # The API is not waiting for this, and submitting would be a 409.
         log.info("scan_task_abandoned_after_cancellation")
+        ENGINE_TASKS_RUN.labels(kind=lease.kind, outcome="cancelled").inc()
         return None
     except ConnectorError as exc:
         # The source said no — bad credential, unreachable, unsupported type. The
@@ -157,6 +167,19 @@ def run_task(
         report.status = "failed"
         report.error = f"{type(exc).__name__}: {exc}"[:2000]
         log.warning("scan_task_connector_failed", error=report.error)
+        ENGINE_CONNECTOR_FAILURES.labels(source_type=lease.source_type).inc()
+    except Interrupt as exc:
+        # Dramatiq's time limit and its shutdown both raise a `BaseException`, so
+        # neither handler here sees one and the task would end without reporting —
+        # leaving the API to wait out the lease and redeliver a task that will be
+        # interrupted at exactly the same point (#106). Report what the fetch got
+        # through, then let the interrupt go on killing the thread it was raised in.
+        report.status = "failed"
+        report.error = type(exc).__name__
+        log.warning("scan_task_interrupted", error=report.error)
+        _submit(client, lease, report, pack, log)
+        ENGINE_TASKS_RUN.labels(kind=lease.kind, outcome="interrupted").inc()
+        raise
     except Exception as exc:
         # A bug, or something nobody anticipated. The message may have been produced
         # by a third-party library quoting its input, which could be page content or
@@ -167,7 +190,10 @@ def run_task(
         log.exception("scan_task_failed")
 
     if not _submit(client, lease, report, pack, log):
+        ENGINE_TASKS_RUN.labels(kind=lease.kind, outcome="unreported").inc()
         return None
+    ENGINE_TASKS_RUN.labels(kind=lease.kind, outcome=report.status).inc()
+    ENGINE_FINDINGS_REPORTED.inc(len(report.findings))
     log.info(
         "scan_task_reported",
         status=report.status,
@@ -198,10 +224,18 @@ def _submit(
             lease.task_id, report.as_submission(lease.idempotency_key, pack.version)
         )
         return True
-    except LeaseRefused, AuthenticationFailed:
-        # On the results route a 403/409 means the lease is gone, not a bad token:
-        # it worked at lease time moments ago. The task is no longer ours to report.
+    except LeaseRefused, LeaseNotHeld:
+        # The lease is gone, not the token: it worked at lease time and the task
+        # has been reclaimed or cancelled since. Nothing of ours to report.
         log.info("scan_task_lease_lost_before_report", status=report.status)
+        return False
+    except AuthenticationFailed as exc:
+        # The token, and a task runs for long enough that it can be rotated
+        # underneath one: re-registering an engine invalidates the old token
+        # immediately, and every in-flight task then discards its results. On an
+        # engine running without an id there is no heartbeat to fail either, so
+        # this line is the only signal an operator gets (#131).
+        log.warning("scan_task_token_rejected", status=report.status, error=str(exc))
         return False
     except EngineApiError as exc:
         # Unreachable through all retries; reclaim will redeliver the task.
@@ -244,29 +278,35 @@ def _fetch(
     candidates: list[Candidate] = []
     tallies = {"units_truncated": 0, "dropped_below_threshold": 0}
 
-    for unit in connector.fetch(lease.connection, spec, lease.credential, outcome):
-        # Between units, not mid-unit: a content unit is small and finishing one
-        # is cheaper than the bookkeeping to abandon it half-scanned.
-        if tasks is not None and task_id is not None and tasks.is_cancelled(task_id):
-            raise TaskCancelled(str(task_id))
-        result = detect(unit.text, pack, threshold=lease.confidence_threshold)
-        tallies["dropped_below_threshold"] += result.dropped_below_threshold
-        tallies["units_truncated"] += int(result.truncated)
-        candidates.extend(
-            _candidates(unit, result, pepper=pepper, previous_pepper=previous_pepper, pack=pack)
-        )
+    try:
+        for unit in connector.fetch(lease.connection, spec, lease.credential, outcome):
+            # Between units, not mid-unit: a content unit is small and finishing one
+            # is cheaper than the bookkeeping to abandon it half-scanned.
+            if tasks is not None and task_id is not None and tasks.is_cancelled(task_id):
+                raise TaskCancelled(str(task_id))
+            result = detect(unit.text, pack, threshold=lease.confidence_threshold)
+            tallies["dropped_below_threshold"] += result.dropped_below_threshold
+            tallies["units_truncated"] += int(result.truncated)
+            candidates.extend(
+                _candidates(unit, result, pepper=pepper, previous_pepper=previous_pepper, pack=pack)
+            )
+    finally:
+        # In a `finally` because a source that gives out halfway — a pagination cap,
+        # retries exhausted against a blipping Confluence — must not discard the
+        # units before it. `complete_task(FAILED)` is terminal, so anything left
+        # here surfaces only if an operator re-runs the whole scan (#115).
+        #
+        # Pre-filter locally to save bandwidth. The API applies the same
+        # suppressions again at ingest, authoritatively, so this can only ever be
+        # the more permissive of the two (#44).
+        filtered = prefilter(candidates, rules_from_lease(lease.suppressions))
 
-    # Pre-filter locally to save bandwidth. The API applies the same suppressions
-    # again at ingest, authoritatively, so this can only ever be the more
-    # permissive of the two (#44).
-    filtered = prefilter(candidates, rules_from_lease(lease.suppressions))
-
-    report.findings = [candidate.payload for candidate in filtered.kept]
-    report.counts = {
-        **outcome.as_counts(),
-        **tallies,
-        "prefiltered": filtered.suppressed_count,
-    }
+        report.findings = [candidate.payload for candidate in filtered.kept]
+        report.counts = {
+            **outcome.as_counts(),
+            **tallies,
+            "prefiltered": filtered.suppressed_count,
+        }
 
 
 def _candidates(

@@ -121,6 +121,11 @@ Registered worker.
 - `status`: enum `active | draining | offline`, `last_heartbeat_at`
 - registration time is the base `created_at`; a separate `registered_at` would have been the same
   column twice.
+- `offline` is decided by the maintenance round, not reported: an engine that died cannot say so, so
+  the only evidence is a heartbeat that stopped. `ICEBERG_ENGINE_OFFLINE_AFTER_SECONDS` (default 900)
+  is how long that silence has to last, set comfortably above the lease window so an engine busy
+  mid-fetch is never called dead. Without the sweep every engine ever registered stays `active`
+  forever, which is what `GET /rules` reads to decide whose rule pack is current.
 
 ### NotificationChannel
 - `id`, `name` (unique — channels need a label in the UI), `type`: enum `email | webhook`

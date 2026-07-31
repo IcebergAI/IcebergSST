@@ -28,9 +28,11 @@ logger = structlog.get_logger()
 
 
 class Dispatcher(Protocol):
-    """Something that can put a scan-task id on the queue."""
+    """Something that can put a scan-task id on the queue, and say how deep it is."""
 
     def enqueue(self, task_id: uuid.UUID) -> None: ...
+
+    def queue_depth(self) -> int | None: ...
 
 
 class BrokerDispatcher:
@@ -51,6 +53,23 @@ class BrokerDispatcher:
         )
         self._broker.enqueue(message)
         logger.info("scan_task_dispatched", task_id=str(task_id))
+
+    def queue_depth(self) -> int | None:
+        """Messages waiting on the scan-task queue, or None if unanswerable.
+
+        ``do_qsize`` is the Redis broker's own accessor, dispatched to a Lua
+        script; a stub broker has no equivalent and no depth worth reporting. This
+        feeds a gauge, so it is best-effort by construction — an unreachable Redis
+        must cost a sample, not a maintenance round.
+        """
+        qsize = getattr(self._broker, "do_qsize", None)
+        if qsize is None:
+            return None
+        try:
+            return int(qsize(SCAN_TASK_QUEUE))
+        except Exception:
+            logger.warning("queue_depth_unavailable", exc_info=True)
+            return None
 
 
 @lru_cache(maxsize=1)

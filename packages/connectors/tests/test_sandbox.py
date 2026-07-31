@@ -13,7 +13,7 @@ import time
 from collections.abc import Iterator
 
 import pytest
-from hostile import crashes, hangs, raises, succeeds
+from hostile import allocates, crashes, hangs, raises, succeeds
 from iceberg_connectors.extraction import ExtractionLimits
 from iceberg_connectors.sandbox import ExtractionSandbox, SandboxCrashed, SandboxTimeout
 
@@ -72,6 +72,20 @@ def test_the_sandbox_recovers_after_a_crash(sandbox: ExtractionSandbox) -> None:
         sandbox.run(crashes, b"", LIMITS, timeout=10)
 
     assert sandbox.run(succeeds, b"after the crash", LIMITS, timeout=10) == "after the crash"
+
+
+def test_a_child_that_allocates_without_bound_fails_alone() -> None:
+    """Size caps bound what goes *into* a parser; nothing bounds what pypdf
+    allocates decoding a crafted Flate stream, and gigabytes inside a 30 s timeout is
+    reachable. Unlimited, the pod's cgroup picks the OOM victim and may pick the
+    worker — one hostile attachment becoming a restart, a reclaimed task, and the
+    same file downloaded again (#133)."""
+    with ExtractionSandbox(address_space_bytes=1024 * 1024 * 1024) as sandbox:
+        with pytest.raises((MemoryError, OSError)):
+            sandbox.run(allocates, b"", LIMITS, timeout=10)
+
+        # ...and the child that refused is still the worker's to use.
+        assert sandbox.run(succeeds, b"ok after it", LIMITS, timeout=10) == "ok after it"
 
 
 def test_the_child_is_reused_across_extractions(sandbox: ExtractionSandbox) -> None:

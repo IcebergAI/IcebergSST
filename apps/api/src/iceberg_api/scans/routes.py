@@ -22,14 +22,7 @@ from iceberg_api.auth.dependencies import CsrfProtected, SessionDep
 from iceberg_api.auth.rbac import AnalystUser, ViewerUser
 from iceberg_api.dispatch import DispatcherDep
 from iceberg_api.engines.schemas import ScanTaskRead
-from iceberg_api.pagination import (
-    DEFAULT_LIMIT,
-    MAX_LIMIT,
-    Cursor,
-    CursorError,
-    after,
-    resolve_cursor,
-)
+from iceberg_api.pagination import DEFAULT_LIMIT, MAX_LIMIT, after, build_page, position
 from iceberg_api.scans import service
 from iceberg_api.scans.schemas import ScanRead
 from iceberg_api.schemas import Page
@@ -93,11 +86,6 @@ async def list_scans(
     cursor: Annotated[str | None, Query()] = None,
 ) -> Page[ScanRead]:
     """List scans, filterable by source, status, or just "still running"."""
-    try:
-        position = resolve_cursor(cursor)
-    except CursorError as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "cursor is not valid") from exc
-
     statement = select(Scan)
     if source_id is not None:
         statement = statement.where(col(Scan.source_id) == source_id)
@@ -111,19 +99,10 @@ async def list_scans(
         statement,
         created_at=Scan.created_at,  # type: ignore[arg-type]
         row_id=Scan.id,  # type: ignore[arg-type]
-        cursor=position,
+        cursor=position(cursor),
     )
     rows = list(db.exec(statement.limit(limit + 1)))
-    page, has_more = rows[:limit], len(rows) > limit
-
-    return Page(
-        items=[ScanRead.model_validate(scan) for scan in page],
-        next_cursor=(
-            Cursor(created_at=page[-1].created_at, row_id=page[-1].id).encode()
-            if has_more and page
-            else None
-        ),
-    )
+    return build_page(rows, limit=limit, read=ScanRead.model_validate)
 
 
 @router.get("/scans/{scan_id}")

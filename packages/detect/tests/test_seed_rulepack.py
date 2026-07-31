@@ -190,11 +190,14 @@ def test_severities_are_assigned_where_they_belong() -> None:
     assert by_id["generic-high-entropy"] == "medium"
 
 
-def test_throughput_over_a_representative_page() -> None:
+def test_throughput_over_a_representative_clean_page() -> None:
     """Benchmark for #43. The recorded figure lives in `docs/rules.md`.
 
     The floor is deliberately far below what a laptop manages: this catches a rule
-    that turned quadratic, not a CI runner having a slow minute.
+    that turned quadratic, not a CI runner having a slow minute. It sits well above
+    the original 100 KB/s because a page with no findings no longer pays for the
+    masking pass — the second regex pass over the unit only runs when there is a
+    snippet to build, and a clean page is the common case for a scanner.
     """
     page = ("\n".join(BENIGN_CORPUS) + "\n") * 20  # ~35 KB, a large wiki page
     size_kb = len(page) / 1024
@@ -204,4 +207,4 @@ def test_throughput_over_a_representative_page() -> None:
     elapsed = time.perf_counter() - started
 
     throughput = size_kb / elapsed
-    assert throughput > 100, f"detection managed only {throughput:.0f} KB/s over {size_kb:.0f} KB"
+    assert throughput > 250, f"detection managed only {throughput:.0f} KB/s over {size_kb:.0f} KB"

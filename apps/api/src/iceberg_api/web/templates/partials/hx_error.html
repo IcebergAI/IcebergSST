@@ -1,0 +1,16 @@
+{#- A failure on an hx- request, retargeted into the shell's #hx-error region.
+
+    Not the error page: htmx discards the body of a 4xx, so answering a failed
+    mutation with error.html would leave the click looking like it did nothing.
+    The status line is kept because "403" and "409" are what an operator reads
+    back to whoever they ask for help.
+-#}
+<div class="notice notice--crit" role="alert" style="margin-bottom:16px">
+  <div>
+    <strong>{{ title }}.</strong> {{ explanation }}
+    {% if detail %}
+    <span class="mono" style="font-size:12.5px">{{ detail }}</span>
+    {% endif %}
+  </div>
+  <div class="mono" style="font-size:12px">Error {{ status_code }}</div>
+</div>

@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from iceberg_core.enums import UserRole
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict
 
 
 def _assume_utc(value: datetime) -> datetime:
@@ -70,10 +70,3 @@ class Page[ItemT](BaseModel):
     items: list[ItemT]
     #: Pass back as ``?cursor=`` to continue. ``None`` means this is the last page.
     next_cursor: str | None = None
-
-
-class PageParams(BaseModel):
-    """Shared list-endpoint query parameters."""
-
-    limit: int = Field(default=50, ge=1, le=200)
-    cursor: str | None = None

@@ -6,7 +6,9 @@ hand each one to `extract_text` and get an answer, so that one hostile file cost
 a unit rather than the task.
 """
 
+import codecs
 import io
+import struct
 import zipfile
 
 import pytest
@@ -28,6 +30,24 @@ def _docx(body: str, *, member: str = "word/document.xml") -> bytes:
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(member, f'<?xml version="1.0"?><w:document><w:t>{body}</w:t></w:document>')
     return buffer.getvalue()
+
+
+def _lying_docx(body: str, *, declared: int) -> bytes:
+    """A .docx whose headers understate how much its member really expands to.
+
+    `zipfile` always writes the truth, so the archive is built honestly and the two
+    uncompressed-size fields — one in the local header, one in the central directory
+    — are rewritten afterwards. That is what a hostile uploader with a hex editor
+    does, and there is no other way to reach the branch: every size the writer
+    produces is consistent by construction.
+    """
+    raw = bytearray(_docx(body))
+    size = struct.pack("<I", declared)
+    local = raw.index(b"PK\x03\x04") + 22
+    central = raw.index(b"PK\x01\x02") + 24
+    raw[local : local + 4] = size
+    raw[central : central + 4] = size
+    return bytes(raw)
 
 
 def _blank_pdf() -> bytes:
@@ -128,6 +148,29 @@ def test_a_binary_masquerading_as_text_is_skipped() -> None:
     assert result.outcome is ExtractionOutcome.SKIPPED_BINARY
 
 
+@pytest.mark.parametrize(
+    "data",
+    [
+        SECRET_TEXT.encode("utf-16"),
+        codecs.BOM_UTF16_BE + SECRET_TEXT.encode("utf-16-be"),
+        SECRET_TEXT.encode("utf-32"),
+        SECRET_TEXT.encode("utf-8-sig"),
+    ],
+    ids=["utf-16-le", "utf-16-be", "utf-32", "utf-8-bom"],
+)
+def test_text_that_declares_its_encoding_is_decoded_rather_than_called_binary(
+    data: bytes,
+) -> None:
+    """UTF-16 is Notepad's "Unicode" and what PowerShell's redirection writes, and it
+    carries a NUL every other byte — so the binary tell is exactly wrong for it. A
+    `passwords.txt` exported from Windows was skipped unread (#123)."""
+    result = extract_text(data, "passwords.txt")
+
+    assert result.outcome is ExtractionOutcome.EXTRACTED
+    assert "AKIAIOSFODNN7EXAMPLE" in result.text
+    assert "﻿" not in result.text  # ...and the mark itself is not scanned as text
+
+
 def test_an_empty_file_is_skipped() -> None:
     assert extract_text(b"", "notes.txt").outcome is ExtractionOutcome.SKIPPED_EMPTY
     assert extract_text(b"   \n\t ", "notes.txt").outcome is ExtractionOutcome.SKIPPED_EMPTY
@@ -181,13 +224,34 @@ def test_an_archive_with_too_many_members_is_rejected() -> None:
     assert "members" in result.detail
 
 
-def test_a_lying_zip_header_does_not_get_past_the_reader() -> None:
-    """Declared sizes are attacker-controlled, so the read is bounded as well."""
+def test_a_lying_zip_header_is_refused_loudly_rather_than_trusted() -> None:
+    """The declared sizes every gate above is computed from are attacker-controlled.
+    A member that understates itself cannot over-deliver — the archive caps the read
+    at the declared size and fails the CRC — but the file must still be refused with
+    an outcome an operator hears about, not read as far as the header allowed."""
     limits = ExtractionLimits(max_output_chars=64, max_expansion_ratio=10_000)
 
-    result = extract_text(_docx("A" * 10_000), "liar.docx", limits=limits)
+    result = extract_text(_lying_docx("A" * 200, declared=32), "liar.docx", limits=limits)
 
-    assert result.outcome is ExtractionOutcome.REJECTED_BOMB
+    assert result.outcome is ExtractionOutcome.FAILED_PARSE
+    assert result.outcome.is_hostile
+    assert result.text == ""
+
+
+def test_an_honest_document_over_the_output_budget_is_truncated_not_called_a_bomb() -> None:
+    """The distinction #121 turns on. A 100k-row `sheet1.xml` passes every
+    declared-size gate and is simply larger than what is left of the budget;
+    rejecting it scans none of a spreadsheet full of credentials, while an equally
+    large .txt is truncated and scanned. The proportions here are the real ones: the
+    archive total stays under the `max_output_chars * 4` gate, and the one member
+    does not."""
+    limits = ExtractionLimits(max_output_chars=64, max_expansion_ratio=10_000)
+
+    result = extract_text(_docx("A" * 150), "big.docx", limits=limits)
+
+    assert result.outcome is ExtractionOutcome.EXTRACTED
+    assert result.truncated is True
+    assert "A" in result.text
 
 
 def test_extracted_text_is_truncated_at_the_output_cap() -> None:

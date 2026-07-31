@@ -19,26 +19,16 @@ from iceberg_api.auth.dependencies import CsrfProtected, SecretStoreDep, Session
 from iceberg_api.engines.routes import list_engines, register_engine
 from iceberg_api.engines.schemas import EngineRegister
 from iceberg_api.notifications import routes as channels_api
-from iceberg_api.notifications.schemas import (
-    EventFilter,
-    NotificationChannelCreate,
-    NotificationChannelUpdate,
-)
+from iceberg_api.notifications.schemas import EventFilter, NotificationChannelCreate
 from iceberg_api.pagination import DEFAULT_LIMIT
 from iceberg_api.rules import list_rules
 from iceberg_api.schemas import UserUpdate
 from iceberg_api.users.routes import list_users, update_user
 from iceberg_api.web.dependencies import CurrentViewer, WebAdmin, WebViewer
-from iceberg_api.web.forms import checkbox, error_text, optional, string_list
+from iceberg_api.web.forms import checkbox, optional, redirect_with_error, string_list
 from iceberg_api.web.templating import hx_redirect, id_or_none, render_page
 
 router = APIRouter(include_in_schema=False)
-
-
-def _quote(text: str) -> str:
-    from urllib.parse import quote
-
-    return quote(text, safe="")
 
 
 # ─── Engines ─────────────────────────────────────────────────────────────────
@@ -93,7 +83,7 @@ async def register_engine_form(
             body=EngineRegister(name=name.strip()), admin=admin, db=db
         )
     except (HTTPException, ValidationError, ValueError) as exc:
-        return hx_redirect(f"/engines?error={_quote(error_text(exc))}")
+        return redirect_with_error("/engines", exc)
 
     engines = await list_engines(admin=admin, db=db)
     rules = await list_rules(user=admin, db=db, settings=settings)
@@ -146,7 +136,7 @@ async def channels_page(
         {
             "channels": channels,
             "types": list(NotificationChannelType),
-            "island": {"type": "webhook", "hasSecret": False},
+            "island": {"type": "webhook"},
             "error": error,
         },
     )
@@ -179,43 +169,15 @@ async def create_channel(  # one parameter per form field
         )
         await channels_api.create_channel(body=body, admin=admin, db=db, store=store)
     except (HTTPException, ValidationError, ValueError) as exc:
-        return hx_redirect(f"/channels?error={_quote(error_text(exc))}")
+        return redirect_with_error("/channels", exc)
     return hx_redirect("/channels")
 
 
-@router.post("/channels/{channel_id}", dependencies=[CsrfProtected])
-async def update_channel(  # one parameter per form field
-    channel_id: uuid.UUID,
-    admin: WebAdmin,
-    db: SessionDep,
-    store: SecretStoreDep,
-    name: Annotated[str, Form()],
-    channel_type: Annotated[str, Form(alias="type")],
-    url: Annotated[str, Form()] = "",
-    recipients: Annotated[list[str], Form()] = [],  # noqa: B006  # see create_channel
-    secret: Annotated[str, Form()] = "",
-    min_severity: Annotated[str, Form()] = "",
-    enabled: Annotated[str | None, Form()] = None,
-    csrf_token: Annotated[str, Form()] = "",
-) -> Response:
-    """Edit a channel. A blank secret field keeps the sealed one in place."""
-    try:
-        kind = NotificationChannelType(channel_type)
-        changes = NotificationChannelUpdate(
-            name=name.strip(),
-            config=_channel_config(kind, url=url, recipients=recipients),
-            event_filter=EventFilter(min_severity=optional(min_severity)),  # type: ignore[arg-type]
-            secret=SecretStr(secret) if secret else None,
-            enabled=checkbox(enabled),
-        )
-        await channels_api.update_channel(
-            channel_id=channel_id, changes=changes, admin=admin, db=db, store=store
-        )
-    except (HTTPException, ValidationError, ValueError) as exc:
-        return hx_redirect(f"/channels?error={_quote(error_text(exc))}")
-    return hx_redirect("/channels")
-
-
+#: A channel is created and deleted, never edited. ``PATCH`` exists on the API,
+#: but no screen drives it: a channel is a handful of fields, and replacing one
+#: leaves a create and a delete in the audit trail where an edit would leave a
+#: diff nobody can read back. Adding the form later means adding the route back
+#: — an unreachable one only rots.
 @router.delete("/channels/{channel_id}", dependencies=[CsrfProtected])
 async def delete_channel(
     channel_id: uuid.UUID,
@@ -287,7 +249,7 @@ async def change_user(
         changes = UserUpdate(role=UserRole(role), disabled=checkbox(disabled))
         await update_user(user_id=user_id, changes=changes, admin=admin, db=db)
     except (HTTPException, ValidationError, ValueError) as exc:
-        return hx_redirect(f"/users?error={_quote(error_text(exc))}")
+        return redirect_with_error("/users", exc)
     return hx_redirect("/users")
 
 

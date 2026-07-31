@@ -169,6 +169,33 @@ def test_fan_out_refuses_to_resurrect_a_cancelled_scan(
     assert scan.status is ScanStatus.CANCELLED
 
 
+def test_a_refused_launch_leaves_the_callers_pending_work_alone(
+    session: Session, dispatcher: RecordingDispatcher
+) -> None:
+    """The refusal is scoped to a SAVEPOINT, not a rollback of the transaction.
+
+    `launch_scan` is handed somebody else's session — the scheduler's round has
+    other schedules' bookkeeping pending on it — and taking that down along with
+    the scan it refused would be a much larger blast radius than the caller asked
+    for.
+    """
+    source = _source(session)
+    service.launch_scan(session, source, trigger=ScanTrigger.MANUAL, dispatcher=dispatcher)
+    pending = Source(
+        name="written-before-the-refusal",
+        type=SourceType.CONFLUENCE,
+        connection={"base_url": "https://example.atlassian.net"},
+    )
+    session.add(pending)
+
+    with pytest.raises(service.ScanConflict):
+        service.launch_scan(session, source, trigger=ScanTrigger.SCHEDULED, dispatcher=dispatcher)
+
+    session.commit()
+    assert session.get(Source, pending.id) is not None
+    assert len(session.exec(select(Scan)).all()) == 1
+
+
 @pytest.mark.parametrize(
     ("task_statuses", "expected"),
     [

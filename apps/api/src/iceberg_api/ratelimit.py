@@ -31,7 +31,6 @@ replica it is exact, and with several each enforces the limit independently
 
 import threading
 import time
-from collections import defaultdict
 from dataclasses import dataclass
 from typing import Annotated, Protocol
 
@@ -74,10 +73,21 @@ class RateLimitStore(Protocol):
 
 
 class InMemoryStore:
-    """Per-process counters. Exact for one replica, per-replica for several."""
+    """Per-process counters. Exact for one replica, per-replica for several.
+
+    Entries carry their expiry and lapsed ones are swept, because the unauthenticated
+    buckets are keyed by client address: an attacker rotating source addresses —
+    trivial over IPv6 — would otherwise grow this map for the life of the process.
+    What is left after a sweep is one entry per address seen *within the current
+    window*, which is the smallest a fixed-window counter can be.
+    """
+
+    #: Entries tolerated before a sweep. High enough that a normal deployment never
+    #: pays for one, low enough that a flood cannot get far before it does.
+    SWEEP_THRESHOLD = 10_000
 
     def __init__(self) -> None:
-        self._windows: dict[str, tuple[int, int]] = defaultdict(lambda: (0, 0))
+        self._windows: dict[str, tuple[int, int]] = {}
         # Uvicorn serves sync endpoints from a thread pool, so two requests really
         # can land here at once.
         self._lock = threading.Lock()
@@ -85,18 +95,22 @@ class InMemoryStore:
     def hit(self, key: str, *, limit: int, window_seconds: int) -> Decision:
         now = int(time.monotonic())
         window_start = now - (now % window_seconds)
+        # Stored as the expiry rather than the start: buckets have different window
+        # lengths, so an entry can only say for itself when it stopped counting.
+        expires_at = window_start + window_seconds
         with self._lock:
-            started, count = self._windows[key]
-            if started != window_start:
-                started, count = window_start, 0
-            count += 1
-            self._windows[key] = (started, count)
-        reset_after = window_start + window_seconds - now
+            if len(self._windows) >= self.SWEEP_THRESHOLD:
+                self._windows = {
+                    stale: entry for stale, entry in self._windows.items() if entry[0] > now
+                }
+            expiry, count = self._windows.get(key, (0, 0))
+            count = count + 1 if expiry > now else 1
+            self._windows[key] = (expires_at, count)
         return Decision(
             allowed=count <= limit,
             limit=limit,
             remaining=max(0, limit - count),
-            reset_after=max(1, reset_after),
+            reset_after=max(1, expires_at - now),
         )
 
     def clear(self) -> None:
