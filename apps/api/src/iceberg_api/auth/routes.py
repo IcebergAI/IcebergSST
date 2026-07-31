@@ -39,6 +39,7 @@ from iceberg_api.auth.session import (
     set_login_cookie,
     set_session_cookie,
 )
+from iceberg_api.ratelimit import AuthRateLimited
 from iceberg_api.schemas import MeRead, UserRead
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -93,7 +94,13 @@ def get_oidc_client(settings: SettingsDep) -> OidcClient:
 OidcClientDep = Depends(get_oidc_client)
 
 
-@router.get("/login", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+@router.get(
+    "/login",
+    status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+    # Rate-limited per client address (#63): unlimited, this is a way to make the
+    # API hammer the identity provider on somebody else's behalf.
+    dependencies=[AuthRateLimited],
+)
 async def login(
     settings: SettingsDep,
     client: OidcClient = OidcClientDep,
@@ -128,7 +135,13 @@ async def login(
     return response
 
 
-@router.get("/callback")
+@router.get(
+    "/callback",
+    # The cheapest way for an anonymous caller to make the API verify a JWT
+    # against the provider's JWKS, which means asymmetric crypto and an outbound
+    # request per call (#63).
+    dependencies=[AuthRateLimited],
+)
 async def callback(
     request: Request,
     settings: SettingsDep,

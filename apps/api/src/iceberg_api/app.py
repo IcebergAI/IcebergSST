@@ -24,6 +24,7 @@ from iceberg_core.config import ApiSettings
 from iceberg_core.logging import configure_logging
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from iceberg_api import ratelimit
 from iceberg_api.auth.routes import router as auth_router
 from iceberg_api.engines.routes import router as engines_router
 from iceberg_api.findings.routes import router as findings_router
@@ -94,6 +95,10 @@ def create_app(settings: ApiSettings | None = None, *, background: bool = True) 
         finally:
             structlog.contextvars.unbind_contextvars("request_id")
         response.headers[REQUEST_ID_HEADER] = request_id
+        # Advisory RateLimit-* headers for requests that were allowed (#63); a
+        # refused one carries them on the 429 itself. Here rather than in each
+        # route so no rate-limited endpoint can forget them.
+        ratelimit.attach_headers(request, response)
         return response
 
     @app.get("/healthz")
