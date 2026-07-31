@@ -91,6 +91,18 @@ class DownloadTooLarge(ConnectorError):
 
 
 @dataclass(frozen=True, slots=True)
+class _Redirect:
+    """Where a download hop was told to go next.
+
+    A value rather than a branch inside the transport loop, so a download gets the
+    same retry and throttle handling as every other request while the redirect
+    chain stays where it is legible.
+    """
+
+    target: str
+
+
+@dataclass(frozen=True, slots=True)
 class Credential:
     """A Confluence credential that will not appear in a log line.
 
@@ -145,6 +157,12 @@ class ConfluenceClient:
     ``transport`` and ``sleep`` are injectable for the same reason they are on the
     engine's API client: tests drive the real request-building and backoff logic
     against a scripted server without waiting for any of it (#71).
+
+    One instance is one connection pool, and it lives for one discovery or one
+    fetch. Constructing a client per request would pay a TCP and TLS handshake on
+    every page, comment, and attachment — hundreds of thousands of them on a
+    fifty-thousand-page space, inflating the very load that trips the site's rate
+    limiter. :meth:`close` releases it; the connector closes it with the fetch.
     """
 
     base_url: str
@@ -156,9 +174,14 @@ class ConfluenceClient:
     sleep: Callable[[float], None] = time.sleep
     timeout_seconds: float = 60.0
     max_json_bytes: int = DEFAULT_MAX_JSON_BYTES
+    #: The context base the site reports in ``_links.base``, learned from the first
+    #: response that carries one. Seedable for a deployment that reports none.
+    link_base: str = ""
+    _http: httpx2.Client | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip("/")
+        self.link_base = self.link_base.rstrip("/")
 
     # ─── Collections ──────────────────────────────────────────────────────────
 
@@ -185,14 +208,14 @@ class ConfluenceClient:
                 return
             # The cursor link already carries limit and every filter; passing the
             # original params again would override the cursor on some deployments.
-            url, query = self._resolve(following), None
+            url, query = self.resolve(following), None
 
         raise ConnectorError(f"pagination did not terminate after {MAX_PAGES} pages of {path}")
 
     # ─── Single resources ─────────────────────────────────────────────────────
 
     def get_json(self, url: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        resolved = self._resolve(url)
+        resolved = self.resolve(url)
         self._require_same_origin(resolved, _path_of(url))
         raw = self._request("GET", resolved, params=params)
         try:
@@ -205,6 +228,7 @@ class ConfluenceClient:
             raise ConnectorError(
                 f"confluence returned an unexpected body shape for {_path_of(url)}"
             )
+        self._learn_link_base(body)
         return body
 
     def get_bytes(self, url: str, *, max_bytes: int) -> bytes:
@@ -223,41 +247,34 @@ class ConfluenceClient:
         be handed this engine's Confluence token — the same reasoning that makes
         ``POST /sources/{id}/test`` refuse redirects outright (docs/security.md).
         The signed URL carries its own authorisation and needs none from us.
+
+        Every hop runs through the same retry and throttle loop the JSON path uses.
+        A download that failed on a single 429 or a dropped connection would drop
+        the attachment silently during exactly the throttling a scan provokes, and
+        "could not read it" reads in a findings list as "no secrets here".
         """
-        target = self._resolve(url)
+        path = _path_of(url)
+        target = self.resolve(url)
         # The first hop carries the credential, so it must be on the site. The
         # download itself may then redirect to an off-origin signed media URL, which
         # the loop below follows with auth stripped.
-        self._require_same_origin(target, _path_of(url))
+        self._require_same_origin(target, path)
         headers = self._headers(target)
 
         for _hop in range(MAX_REDIRECTS + 1):
-            with (
-                self._client() as client,
-                client.stream("GET", target, headers=headers) as response,
-            ):
-                if response.is_redirect and response.headers.get("location"):
-                    # Resolved against the current target so a relative Location
-                    # works, then stripped of everything that authenticates us.
-                    target = str(response.next_request.url) if response.next_request else ""
-                    if not target:
-                        raise ConnectorError(f"redirect without a target for {_path_of(url)}")
-                    headers = {"Accept": "*/*"}
-                    continue
+            hop = self._stream(
+                "GET",
+                target,
+                params=None,
+                headers=headers,
+                consume=lambda response: self._download_body(response, path, max_bytes),
+            )
+            if not isinstance(hop, _Redirect):
+                return hop
+            # Stripped of everything that authenticates us before following.
+            target, headers = hop.target, {"Accept": "*/*"}
 
-                self._raise_for_status(response, _path_of(url))
-                chunks: list[bytes] = []
-                total = 0
-                for chunk in response.iter_bytes():
-                    total += len(chunk)
-                    if total > max_bytes:
-                        # One byte over is enough to know; reading the rest only
-                        # costs bandwidth the scan does not need to spend.
-                        raise DownloadTooLarge(total)
-                    chunks.append(chunk)
-                return b"".join(chunks)
-
-        raise ConnectorError(f"more than {MAX_REDIRECTS} redirects for {_path_of(url)}")
+        raise ConnectorError(f"more than {MAX_REDIRECTS} redirects for {path}")
 
     # ─── Transport ────────────────────────────────────────────────────────────
 
@@ -268,6 +285,31 @@ class ConfluenceClient:
         buffered whole — the same protection ``get_bytes`` gives attachments, since
         a page fetch's JSON is just as attacker-influenced. Error and throttle
         responses have their (small) bodies left unread and the connection closed.
+        """
+        path = _path_of(url)
+
+        def read(response: httpx2.Response) -> bytes:
+            self._raise_for_status(response, path)
+            return self._read_capped(response, path)
+
+        return self._stream(method, url, params=params, headers=self._headers(url), consume=read)
+
+    def _stream[ResultT](
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None,
+        headers: dict[str, str],
+        consume: Callable[[httpx2.Response], ResultT],
+    ) -> ResultT:
+        """Retry, throttle, and hand ``consume`` the one response worth reading.
+
+        ``consume`` runs while the stream is still open, so a body is read against a
+        cap rather than buffered whole. Anything it raises is the caller's answer;
+        anything the transport raises is wrapped as a :class:`ConnectorError`, since
+        a raw ``httpx`` error escaping here would sail past the per-page handler in
+        the connector and fail a whole space over one dropped connection.
         """
         path = _path_of(url)
         waited = 0.0
@@ -282,18 +324,10 @@ class ConfluenceClient:
         throttles = 0
         while attempt < self.rate_limit.attempts:
             try:
-                with (
-                    self._client() as client,
-                    client.stream(
-                        method, url, params=params, headers=self._headers(url)
-                    ) as response,
-                ):
+                with self._client().stream(method, url, params=params, headers=headers) as response:
                     status = response.status_code
                     if status != 429 and status not in RETRYABLE_STATUSES:
-                        # Success or a terminal 4xx: raise for the latter, else read
-                        # the body against the cap while the stream is still open.
-                        self._raise_for_status(response, path)
-                        return self._read_capped(response, path)
+                        return consume(response)
                     retry_after = (
                         _retry_after(response, fallback=self.rate_limit.delay_for(throttles))
                         if status == 429
@@ -301,8 +335,7 @@ class ConfluenceClient:
                     )
             except httpx2.HTTPError as exc:
                 last_error = ConnectorError(f"{type(exc).__name__} reaching {path}")
-                self.sleep(self.rate_limit.delay_for(attempt))
-                attempt += 1
+                attempt = self._back_off(attempt)
                 continue
 
             if retry_after is not None:  # 429
@@ -318,12 +351,45 @@ class ConfluenceClient:
                 continue
 
             last_error = ConnectorError(f"confluence returned {status} for {path}")
-            self.sleep(self.rate_limit.delay_for(attempt))
-            attempt += 1
+            attempt = self._back_off(attempt)
 
         raise ConnectorError(
             f"{method} {path} failed after {self.rate_limit.attempts} attempts"
         ) from last_error
+
+    def _back_off(self, attempt: int) -> int:
+        """Wait before the next attempt, and only if there is one.
+
+        Sleeping after the last attempt is dead time before an error that was
+        already decided — 16 s at the defaults, per unreadable resource, across
+        every failing page in a space.
+        """
+        if attempt + 1 < self.rate_limit.attempts:
+            self.sleep(self.rate_limit.delay_for(attempt))
+        return attempt + 1
+
+    def _download_body(
+        self, response: httpx2.Response, path: str, max_bytes: int
+    ) -> bytes | _Redirect:
+        """One download hop: the bytes, or where to go for them."""
+        if response.is_redirect and response.headers.get("location"):
+            # Resolved against the current target so a relative Location works.
+            target = str(response.next_request.url) if response.next_request else ""
+            if not target:
+                raise ConnectorError(f"redirect without a target for {path}")
+            return _Redirect(target)
+
+        self._raise_for_status(response, path)
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in response.iter_bytes():
+            total += len(chunk)
+            if total > max_bytes:
+                # One byte over is enough to know; reading the rest only costs
+                # bandwidth the scan does not need to spend.
+                raise DownloadTooLarge(total)
+            chunks.append(chunk)
+        return b"".join(chunks)
 
     def _read_capped(self, response: httpx2.Response, path: str) -> bytes:
         """Read a streamed body, refusing to buffer more than ``max_json_bytes``."""
@@ -348,8 +414,16 @@ class ConfluenceClient:
         if response.status_code >= 400:
             raise ConnectorError(f"confluence returned {response.status_code} for {path}")
 
+    def close(self) -> None:
+        """Release the connection pool. Safe to call more than once."""
+        pool, self._http = self._http, None
+        if pool is not None:
+            pool.close()
+
     def _client(self) -> httpx2.Client:
-        return httpx2.Client(transport=self.transport, timeout=self.timeout_seconds)
+        if self._http is None:
+            self._http = httpx2.Client(transport=self.transport, timeout=self.timeout_seconds)
+        return self._http
 
     def _headers(self, url: str) -> dict[str, str]:
         headers = {"Accept": "application/json"}
@@ -371,15 +445,31 @@ class ConfluenceClient:
         """An API path (``/pages/123``) as an absolute URL."""
         return f"{self.base_url}{self.api_prefix}{path}"
 
-    def _resolve(self, url: str) -> str:
-        """Absolute URLs pass through; server-relative links get the base back.
+    def resolve(self, url: str) -> str:
+        """A link the site named, as an absolute URL.
 
-        v2's ``next`` and ``downloadLink`` are relative to the site root, not to
-        the API prefix — so this deliberately does not reuse :meth:`_url`.
+        Absolute links pass through. A relative one is resolved against the context
+        base the site reports in ``_links.base`` — Cloud's is
+        ``https://site.atlassian.net/wiki``, and ``downloadLink`` and ``webui`` are
+        relative to *that* rather than to the site root. Resolving them against the
+        root 404s every attachment while the UI links beside them work, which is the
+        inconsistency this exists to remove; the API prefix is deliberately not
+        involved, since none of these links sit under it.
         """
-        if url.startswith(("http://", "https://")):
-            return url
-        return f"{self.base_url}/{url.lstrip('/')}"
+        return _join(self.link_base or self.base_url, url)
+
+    def _learn_link_base(self, body: dict[str, Any]) -> None:
+        """Adopt the context base a response reports, if the site is entitled to.
+
+        An off-origin ``base`` is ignored rather than adopted: it is named by the
+        response, and honouring one would aim the first (credentialed) download hop
+        at a host the source chose — the same harvesting the ``next`` cursor and
+        redirect rules refuse.
+        """
+        links = body.get("_links")
+        base = links.get("base") if isinstance(links, dict) else None
+        if isinstance(base, str) and base and self._same_origin(base):
+            self.link_base = base.rstrip("/")
 
     def _require_same_origin(self, url: str, path: str) -> None:
         """Refuse an API call to a host other than the configured site.
@@ -389,6 +479,29 @@ class ConfluenceClient:
         SSRF attempt), which has no legitimate meaning on the JSON API path."""
         if not self._same_origin(url):
             raise ConnectorError(f"refusing to follow an off-site URL for {path}")
+
+
+def _join(base: str, link: str) -> str:
+    """A site-named relative link resolved against a base that may carry a context.
+
+    v2 is not consistent about what its links are relative to: a ``next`` cursor
+    arrives carrying the context path already (``/wiki/api/v2/...``) while ``webui``
+    and ``downloadLink`` do not (``/spaces/...``, ``/download/...``). Both are
+    root-relative strings, so neither plain concatenation nor ``urljoin`` is right
+    for both, and guessing wrong means either every attachment 404s or every cursor
+    does. The context is therefore added only where it is not already present, which
+    needs no live site to be sure of and degrades to the site root for a deployment
+    that reports no base at all.
+    """
+    if link.startswith(("http://", "https://")):
+        return link
+
+    split = urlsplit(base)
+    context = split.path.rstrip("/")
+    path = f"/{link.lstrip('/')}"
+    if context and path != context and not path.startswith(f"{context}/"):
+        path = f"{context}{path}"
+    return f"{split.scheme}://{split.netloc}{path}"
 
 
 def _next_link(payload: dict[str, Any]) -> str | None:

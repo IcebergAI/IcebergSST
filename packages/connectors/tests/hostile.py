@@ -30,6 +30,19 @@ def crashes(data: bytes, limits: ExtractionLimits) -> str:
     os._exit(1)
 
 
+def allocates(data: bytes, limits: ExtractionLimits) -> str:
+    """Asks for more address space than the sandbox allows, as a Flate bomb does.
+
+    `mmap` rather than a real buffer on purpose: a child that is *not* limited
+    reserves address space and touches no pages, so the test can fail by returning
+    rather than by taking the machine down with it.
+    """
+    import mmap
+
+    with mmap.mmap(-1, 4 * 1024 * 1024 * 1024):
+        return "allocated"
+
+
 def raises(data: bytes, limits: ExtractionLimits) -> str:
     """Fails in the ordinary way — a malformed file a parser rejects politely."""
     raise ValueError("malformed document structure")

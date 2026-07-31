@@ -83,11 +83,21 @@ fastest part of a scan into a serial prologue and produce a task table with a ro
 would skip or repeat results whenever content changes mid-scan — on a large space, missing secrets
 with no sign it happened.
 
+**The context path comes from the server, not from us.** Cloud serves the API under `/wiki` and
+returns `webui`/`downloadLink` relative to it, while Server/DC has no context path at all. The
+client learns `_links.base` from responses and resolves relative links through it rather than
+splicing a hardcoded `/wiki` — a guess that is wrong on one deployment shape either way, and whose
+symptom is every attachment 404ing against a site that a fixture server happily serves.
+
 **429 is a normal answer.** A scan is exactly the workload that trips a rate limit. `Retry-After` is
 honoured when the server sends a delta-seconds value (an HTTP date is not: it means trusting the
-server's clock against ours, and skew gives either a busy loop or a stall). Waiting is bounded by
-`RateLimitPolicy.max_wait_seconds` — past it the task fails and says to reduce engine concurrency,
-because an engine cannot sit on a lease indefinitely.
+server's clock against ours, and skew gives either a busy loop or a stall). Attachment downloads go
+through the same retry path as the JSON calls: a download that failed while page fetches waited
+politely would drop the attachment corpus, and "could not read" reads as "no secrets here". Waiting
+is bounded by `RateLimitPolicy.max_wait_seconds` — past it the task fails and says to reduce engine
+concurrency, because an engine cannot sit on a lease indefinitely. That failure propagates out of
+per-page work rather than being counted as one skipped page, or the budget would be spent again on
+every remaining page in the space.
 
 ### Content
 
@@ -170,7 +180,7 @@ hand it anything and get an answer back:
 | `skipped_binary` | Claimed to be text (`.txt`) and is not |
 | `skipped_empty` | No text layer — a scanned PDF, since there is no OCR |
 | `rejected_too_large` | Over the input cap; not parsed at all |
-| `rejected_bomb` | An archive whose declared expansion is hostile |
+| `rejected_bomb` | An archive whose *declared* expansion is hostile |
 | `failed_timeout` | The parser did not finish; its child was killed |
 | `failed_parse` | The parser raised, or crashed its child |
 
@@ -184,14 +194,23 @@ and the bomb defence would have to be right at every level rather than the top o
 
 ### The guards
 **Scanned content is untrusted input**, and extraction parsers are the engine's largest attack
-surface (`docs/security.md`, boundary 4). Four guards, each for a failure the others miss:
+surface (`docs/security.md`, boundary 4). Five guards, each for a failure the others miss:
 
 - **Size caps**, before any parsing — the cheapest check, and it eliminates "large file exhausts
   memory" whole.
 - **Decompression-ratio limits.** Office documents are ZIP archives and a few kilobytes of zeros
   expands to gigabytes. The compressed size is exactly the number that tells you nothing, so the
-  archive's *declared* sizes are checked first — and the read is bounded anyway, because that
-  declaration is attacker-controlled too.
+  archive's *declared* sizes are checked first — total expansion, ratio, and member count. A header
+  that lies the other way does not need a guard of its own: `zipfile` stops the read at the declared
+  size and then fails the CRC, so the file ends as `failed_parse`, which is still `is_hostile`.
+  Being merely *large* is not hostility — an honest part over what is left of the output budget is
+  truncated and scanned like any oversized `.txt`, because rejecting it outright scans none of a
+  spreadsheet whose whole point is that it might be full of credentials.
+- **An address-space ceiling on the child.** A PDF is handed to the parser without a decompression
+  guard — its streams are the format, not an archive — so the bound is `RLIMIT_AS` in the pool's
+  initializer. Without it a Flate bomb allocates until the *cgroup* picks a victim, and on a
+  memory-limited engine pod that can be the worker rather than the child: one hostile attachment
+  becomes a pod restart, a reclaimed task, and a re-download of the same file.
 - **Timeouts and crash isolation**, in a child process (`ExtractionSandbox`). A parser looping on a
   crafted cross-reference table cannot be caught with `try`, and cannot be bounded by a timer in the
   same process: `signal.alarm` only fires on the main thread, and a C extension in a tight loop

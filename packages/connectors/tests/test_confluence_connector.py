@@ -25,12 +25,15 @@ from confluence_server import (
     Page,
     Space,
     leaky_page_storage,
+    recorded_clients,
     storage_page,
 )
 from iceberg_connectors.confluence import ConfluenceConnector
+from iceberg_connectors.confluence.client import RateLimited, RateLimitPolicy
 from iceberg_connectors.extraction import ExtractionLimits
 from iceberg_connectors.protocol import ConnectorError, CredentialError, FetchOutcome, TaskSpec
 from iceberg_connectors.units import ContentOrigin, ContentUnit
+from structlog.testing import capture_logs
 
 
 def _connector(site: FakeConfluence, **overrides: Any) -> ConfluenceConnector:
@@ -117,6 +120,34 @@ def test_the_scope_filter_narrows_discovery() -> None:
     specs = list(_connector(site).discover(connection, API_TOKEN))
 
     assert [spec.params["space_key"] for spec in specs] == ["OPS"]
+
+
+def test_the_scope_filter_ignores_the_case_the_operator_typed() -> None:
+    """Space keys are conventionally uppercase and an operator types what they saw.
+    Matching case-sensitively gave `["docs"]` zero task specs and a scan that
+    completed looking clean — the silent empty scan (#133)."""
+    site = FakeConfluence(spaces=[Space("s1", "DOCS", "Docs"), Space("s2", "OPS", "Ops")])
+    connection = site.connection | {"spaces": ["docs", "Ops"]}
+
+    specs = list(_connector(site).discover(connection, API_TOKEN))
+
+    assert [spec.params["space_key"] for spec in specs] == ["DOCS", "OPS"]
+
+
+def test_a_scope_entry_that_matches_no_space_is_warned_about() -> None:
+    """The only signal an operator gets before an empty scan reads as "nothing to
+    find here"."""
+    site = FakeConfluence(spaces=[Space("s1", "DOCS", "Docs")])
+    connection = site.connection | {"spaces": ["DOCS", "typo"]}
+
+    with capture_logs() as events:
+        specs = list(_connector(site).discover(connection, API_TOKEN))
+
+    assert [spec.params["space_key"] for spec in specs] == ["DOCS"]
+    warned = [event for event in events if event["event"] == "confluence_spaces_not_found"]
+    assert warned == [
+        {"event": "confluence_spaces_not_found", "log_level": "warning", "spaces": ["typo"]}
+    ]
 
 
 def test_personal_spaces_are_excluded_unless_asked_for() -> None:
@@ -534,6 +565,33 @@ def test_an_attachment_that_lies_about_its_size_is_cut_off_mid_download() -> Non
     assert (outcome.skipped, outcome.failed) == (1, 0)
 
 
+def test_an_attachment_is_downloaded_from_the_context_base_the_site_reported() -> None:
+    """`downloadLink` and `webui` come from the same `_links` family. Splicing `/wiki`
+    onto one and resolving the other against the bare site root gives an analyst a
+    page link that works beside an attachment URL that 404s on every file (#124)."""
+    site = _site()
+
+    units, outcome = _fetch(_connector(site), site)
+
+    attachment = next(unit for unit in units if unit.origin is ContentOrigin.ATTACHMENT)
+    assert "/wiki/download/attachments/p1-0/notes.txt" in site.paths_requested()
+    assert attachment.display["url"].startswith(f"{SITE}/wiki/spaces/")
+    assert outcome.failed == 0
+
+
+def test_a_deployment_without_a_context_base_downloads_from_the_site_root() -> None:
+    """Server/DC mounts at the root and reports no `_links.base`. A hardcoded `/wiki`
+    would break every download there in exchange for fixing Cloud."""
+    site = _site()
+    site.link_base = None
+
+    units, outcome = _fetch(_connector(site), site)
+
+    assert "/download/attachments/p1-0/notes.txt" in site.paths_requested()
+    assert any(unit.origin is ContentOrigin.ATTACHMENT for unit in units)
+    assert outcome.failed == 0
+
+
 def test_an_attachment_that_will_not_download_is_counted_not_fatal() -> None:
     """One unreadable file must not fail a scan of a space."""
     site = _site(
@@ -632,6 +690,25 @@ def test_rate_limiting_mid_scan_is_waited_out() -> None:
     assert outcome.units >= 2
 
 
+@pytest.mark.parametrize("endpoint", ["/footer-comments", "/download/"])
+def test_throttling_past_the_wait_budget_fails_the_task_rather_than_the_page(
+    endpoint: str,
+) -> None:
+    """Comments, attachments, and the body fallback are most of the requests in a
+    fetch, and all of them run inside the per-page handler. Counting `RateLimited`
+    there as one failed page burns the whole `max_wait_seconds` budget again on the
+    next page and the next — a task holding its lease for hours on a site whose
+    answer was "come back with fewer engines" (#109)."""
+    site = _site()
+    site.throttled_paths, site.retry_after = (endpoint,), 30.0
+    connector = _connector(
+        site, rate_limit=RateLimitPolicy(max_wait_seconds=60.0), sleep=lambda _seconds: None
+    )
+
+    with pytest.raises(RateLimited, match="reduce engine concurrency"):
+        _fetch(connector, site)
+
+
 # ─── Extraction isolation (#46) ───────────────────────────────────────────────
 
 
@@ -653,6 +730,26 @@ def test_the_sandbox_is_per_fetch_and_closed_afterwards() -> None:
 
     assert len(made) == 2  # ...one per fetch, not one per connector
     assert all(sandbox.closed for sandbox in made)
+
+
+@pytest.mark.parametrize("phase", ["discover", "fetch"])
+def test_one_connection_pool_per_call_released_when_it_ends(
+    phase: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pool per request means a TCP and TLS handshake per page, comment, and
+    attachment, and a pool that outlives its call leaks a connection per space for
+    the life of the worker (#130)."""
+    made = recorded_clients(monkeypatch)
+    site = _site()
+    connector = _connector(site)
+
+    if phase == "discover":
+        list(connector.discover(site.connection, API_TOKEN))
+    else:
+        _fetch(connector, site)
+
+    assert len(made) == 1
+    assert made[0].is_closed
 
 
 def test_no_child_is_spawned_for_a_space_without_attachments() -> None:

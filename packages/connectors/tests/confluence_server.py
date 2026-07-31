@@ -32,6 +32,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import httpx2
+import pytest
 
 SITE = "https://wiki.example.test"
 EMAIL = "scanner@example.test"
@@ -63,9 +64,9 @@ class Attachment:
             "title": self.title,
             "mediaType": self.media_type,
             "fileSize": self.declared_size if self.declared_size is not None else len(self.data),
-            # Site-relative and outside the API prefix, exactly as v2 returns it —
-            # which is the detail a client that resolved links against the prefix
-            # would get wrong.
+            # Relative to the context base in `_links.base` and outside the API
+            # prefix, exactly as v2 returns it — the detail a client that resolved
+            # links against the prefix, or against the bare site root, gets wrong.
             "downloadLink": f"/download/attachments/{attachment_id}/{self.title}",
         }
 
@@ -152,6 +153,14 @@ class FakeConfluence:
     #: Paths containing any of these answer 500. One page in a space that cannot be
     #: read is the case a scan of fifty thousand has to survive.
     failing_paths: tuple[str, ...] = ()
+    #: Paths containing any of these answer 429 forever, however many requests have
+    #: already succeeded — one endpoint throttled while the rest of the site answers,
+    #: which is what a scan actually meets and what `throttle_first` cannot express.
+    throttled_paths: tuple[str, ...] = ()
+    #: The context base Cloud reports in `_links.base`, under which it serves both
+    #: the API and attachment downloads. None is the Server/DC shape: no base in the
+    #: payload, and downloads at the site root.
+    link_base: str | None = f"{SITE}/wiki"
 
     requests: list[httpx2.Request] = field(default_factory=list)
     throttled: int = 0
@@ -167,22 +176,33 @@ class FakeConfluence:
 
         if self.throttle_first > self.throttled:
             self.throttled += 1
-            headers = {} if self.retry_after is None else {"Retry-After": str(self.retry_after)}
-            return httpx2.Response(429, headers=headers, json={"errors": ["rate limited"]})
+            return self._throttle()
 
         if self.require_credential and not self._authorized(request):
             return httpx2.Response(401, json={"errors": ["unauthorized"]})
         if any(fragment in path for fragment in self.unauthorized_paths):
             return httpx2.Response(401, json={"errors": ["forbidden for this token"]})
+        if any(fragment in path for fragment in self.throttled_paths):
+            return self._throttle()
         if any(fragment in path for fragment in self.failing_paths):
             return httpx2.Response(500, json={"errors": ["internal error"]})
 
-        if path.startswith("/download/attachments/"):
-            return self._download(path)
+        downloads = f"{self.context}/download/attachments/"
+        if path.startswith(downloads):
+            return self._download(path.removeprefix(self.context))
         if not path.startswith("/wiki/api/v2/"):
             return httpx2.Response(404, json={"errors": ["no such endpoint"]})
 
         return self._api(path.removeprefix("/wiki/api/v2"), dict(request.url.params))
+
+    @property
+    def context(self) -> str:
+        """The path part of `_links.base` — `/wiki` on Cloud, nothing on Server/DC."""
+        return urlsplit(self.link_base).path.rstrip("/") if self.link_base else ""
+
+    def _throttle(self) -> httpx2.Response:
+        headers = {} if self.retry_after is None else {"Retry-After": str(self.retry_after)}
+        return httpx2.Response(429, headers=headers, json={"errors": ["rate limited"]})
 
     def _authorized(self, request: httpx2.Request) -> bool:
         import base64
@@ -219,7 +239,8 @@ class FakeConfluence:
             if found is None:
                 return httpx2.Response(404, json={"errors": ["no such page"]})
             space, page = found
-            return httpx2.Response(200, json=page.as_payload(space.id, with_body=True))
+            payload = self._with_base(page.as_payload(space.id, with_body=True))
+            return httpx2.Response(200, json=payload)
 
         if match := re.fullmatch(r"/pages/([^/]+)/(footer|inline)-comments", path):
             found = self._page(match[1])
@@ -289,12 +310,20 @@ class FakeConfluence:
 
         body: dict[str, Any] = {"results": window}
         if start + limit < len(results):
-            # Site-relative, with the cursor and nothing else the caller must
-            # re-send — which is what makes "follow it verbatim" the right rule.
+            # Carrying the context already, unlike `webui` and `downloadLink` — v2 is
+            # not consistent about it, and a client that prepended the context to
+            # this one would ask for `/wiki/wiki/api/v2`. That inconsistency is a
+            # fixture detail worth keeping, because it is the real one.
             body["_links"] = {
                 "next": f"/wiki/api/v2{path}?cursor=cursor-{start + limit}&limit={limit}"
             }
-        return httpx2.Response(200, json=body)
+        return httpx2.Response(200, json=self._with_base(body))
+
+    def _with_base(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Add the context base v2 reports alongside a response's other links."""
+        if self.link_base:
+            body.setdefault("_links", {})["base"] = self.link_base
+        return body
 
     # ─── Lookups ──────────────────────────────────────────────────────────────
 
@@ -368,6 +397,24 @@ def leaky_page_storage() -> str:
     return storage_page("Deployment runbook", "Set the aws access key before deploying:") + (
         storage_code_macro(f"export AWS_ACCESS_KEY_ID={SEEDED_SECRET}")
     )
+
+
+def recorded_clients(monkeypatch: pytest.MonkeyPatch) -> list[httpx2.Client]:
+    """Every `httpx2.Client` the code under test constructs, as it constructs them.
+
+    A client per request costs a TCP and TLS handshake per request, and an
+    in-process transport can never show that — so counting the constructions is the
+    only way to assert the pool is held for a scan rather than rebuilt for a page.
+    """
+    made: list[httpx2.Client] = []
+    real = httpx2.Client
+
+    def remember(**kwargs: Any) -> httpx2.Client:
+        made.append(real(**kwargs))
+        return made[-1]
+
+    monkeypatch.setattr(httpx2, "Client", remember)
+    return made
 
 
 def json_of(response: httpx2.Response) -> dict[str, Any]:

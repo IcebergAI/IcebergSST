@@ -95,12 +95,30 @@ def test_a_noformat_block_is_kept() -> None:
     assert SEEDED_SECRET in storage_to_text(storage)
 
 
-def test_cdata_containing_markup_is_not_stripped_as_markup() -> None:
-    """A CDATA body is literal text. Order matters here: unwrapping before the tag
-    stripper runs is what keeps an XML snippet in a code block readable."""
+def test_cdata_pseudo_tags_survive_the_tag_stripper_intact() -> None:
+    """A CDATA body is literal text someone pasted, so a `<...>` in it is not markup.
+    Keeping only the inner text is not enough: a pasted `<password>hunter2</password>`
+    that loses its keyword costs the proximity signal confidence is scored on (ADR
+    0003), which is most of why a code block is worth scanning at all."""
     text = storage_to_text(storage_code_macro("<config><token>abc123def456</token></config>"))
 
-    assert "abc123def456" in text
+    assert "<config><token>abc123def456</token></config>" in text
+
+
+def test_a_bracket_wrapped_value_in_a_code_block_is_not_deleted() -> None:
+    """`token=<AKIA...>` reads as a tag to a stripper and vanishes whole — the
+    secret, not just its markup."""
+    text = storage_to_text(storage_code_macro(f"token=<{SEEDED_SECRET}>"))
+
+    assert SEEDED_SECRET in text
+
+
+def test_block_elements_inside_a_code_block_are_not_turned_into_line_breaks() -> None:
+    """A pasted HTML template is content, not structure. Breaking on its `<p>` puts
+    a newline between a keyword and the value beside it."""
+    text = storage_to_text(storage_code_macro(f"<p>password: {SEEDED_SECRET}</p>"))
+
+    assert f"<p>password: {SEEDED_SECRET}</p>" in text
 
 
 # ─── The property the module exists for ───────────────────────────────────────

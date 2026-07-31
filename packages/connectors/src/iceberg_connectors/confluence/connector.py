@@ -38,6 +38,7 @@ from iceberg_connectors.confluence.client import (
     ConfluenceClient,
     Credential,
     DownloadTooLarge,
+    RateLimited,
     RateLimitPolicy,
 )
 from iceberg_connectors.confluence.storage import body_text, storage_to_text
@@ -91,27 +92,46 @@ class ConfluenceConnector:
         reconciliation refuses to auto-resolve on that evidence alone (ADR 0009 §4).
         """
         client = self._client(connection, credential)
-        wanted = {str(key) for key in connection.get("spaces") or ()}
+        # Casefolded on both sides: space keys are conventionally uppercase, and an
+        # operator who typed `docs` for the DOCS space would otherwise get zero task
+        # specs and a scan that completes looking clean — the silent empty scan,
+        # which is the failure this codebase treats as the dangerous one.
+        wanted = {str(key).casefold() for key in connection.get("spaces") or ()}
+        matched: set[str] = set()
         seen = 0
 
-        for space in client.paginate("/spaces", **_space_filters(connection)):
-            key = str(space.get("key") or "")
-            if wanted and key not in wanted:
-                continue
-            space_id = str(space.get("id") or "")
-            if not space_id:
-                # Nothing can be fetched without it, and guessing would produce a
-                # task that fails later with a much less obvious message.
-                logger.warning("confluence_space_without_id", space_key=key)
-                continue
+        try:
+            for space in client.paginate("/spaces", **_space_filters(connection)):
+                key = str(space.get("key") or "")
+                if wanted and key.casefold() not in wanted:
+                    continue
+                matched.add(key.casefold())
+                space_id = str(space.get("id") or "")
+                if not space_id:
+                    # Nothing can be fetched without it, and guessing would produce a
+                    # task that fails later with a much less obvious message.
+                    logger.warning("confluence_space_without_id", space_key=key)
+                    continue
 
-            seen += 1
-            yield TaskSpec(
-                label=f"space {key or space_id}",
-                params={"space_id": space_id, "space_key": key, "space_name": space.get("name")},
-            )
+                seen += 1
+                yield TaskSpec(
+                    label=f"space {key or space_id}",
+                    params={
+                        "space_id": space_id,
+                        "space_key": key,
+                        "space_name": space.get("name"),
+                    },
+                )
 
-        logger.info("confluence_discovery_complete", spaces=seen, filtered=bool(wanted))
+            if missing := sorted(wanted - matched):
+                # The scope named spaces this site does not have. Saying so is the
+                # only signal an operator gets before an empty scan reads as clean.
+                logger.warning("confluence_spaces_not_found", spaces=missing)
+            logger.info("confluence_discovery_complete", spaces=seen, filtered=bool(wanted))
+        finally:
+            # Reached on an abandoned generator too, so a discovery that stops early
+            # does not leak the connection pool.
+            client.close()
 
     # ─── Fetch ────────────────────────────────────────────────────────────────
 
@@ -131,7 +151,6 @@ class ConfluenceConnector:
         context = _SpaceContext(
             key=str(spec.params.get("space_key") or ""),
             name=spec.params.get("space_name"),
-            site=client.base_url,
         )
         want_comments = connection.get("include_comments", True)
         want_attachments = connection.get("include_attachments", True)
@@ -149,17 +168,21 @@ class ConfluenceConnector:
                     # Built once per page, from the page. Everything on a page —
                     # its comments, its attachments — shares the page's path, so
                     # one `path_glob` covers the page and its parts (#44).
-                    here = context.for_page(page, page_id)
+                    here = context.for_page(page, page_id, client.resolve)
 
                     yield from self._page_units(text, page_id, here, outcome)
                     if want_comments:
                         yield from self._comment_units(client, page_id, here, outcome)
                     if want_attachments:
                         yield from self._attachment_units(client, page_id, here, outcome, sandbox)
-                except CredentialError:
-                    # The token is bad for the whole site, not this page. Failing the
-                    # task tells the operator to rotate it; skipping would report a
-                    # site-wide auth problem as a scan that found nothing.
+                except CredentialError, RateLimited:
+                    # Neither is about this page. A bad token is bad for the whole
+                    # site, and a site throttling past `max_wait_seconds` will
+                    # throttle the next page too — counting that as a per-page
+                    # failure spends the wait budget again on every one of fifty
+                    # thousand pages while the task sits on its lease for hours.
+                    # Failing tells the operator what to change: rotate the token,
+                    # or run fewer engines.
                     raise
                 except ConnectorError as exc:
                     # This page and its parts, stepped over and counted.
@@ -167,8 +190,10 @@ class ConfluenceConnector:
                     logger.warning("confluence_page_failed", page_id=page_id, error=str(exc))
         finally:
             # Reached on a cancelled task too: closing a generator runs this, so an
-            # abandoned fetch does not leak the child process (ADR 0009 §4).
+            # abandoned fetch does not leak the child process (ADR 0009 §4) or the
+            # connection pool.
             sandbox.close()
+            client.close()
 
     def _body(
         self, client: ConfluenceClient, page: dict[str, Any], page_id: str
@@ -273,7 +298,7 @@ class ConfluenceConnector:
                 # It lied about its size, or did not say. Same outcome either way.
                 outcome.skipped += 1
                 continue
-            except CredentialError:
+            except CredentialError, RateLimited:
                 raise
             except ConnectorError as exc:
                 outcome.failed += 1
@@ -375,16 +400,17 @@ class _SpaceContext:
 
     key: str
     name: Any
-    site: str
 
-    def for_page(self, page: dict[str, Any], page_id: str) -> _PageContext:
+    def for_page(
+        self, page: dict[str, Any], page_id: str, resolve: Callable[[str], str]
+    ) -> _PageContext:
         webui = _webui(page)
-        return _PageContext(
-            space=self,
-            title=page.get("title"),
-            path=webui or f"/pages/{page_id}",
-            url=f"{self.site}/wiki{webui}" if webui else f"{self.site}/pages/{page_id}",
-        )
+        path = webui or f"/pages/{page_id}"
+        # Resolved through the client rather than by splicing on a context path
+        # here: `webui` and an attachment's `downloadLink` come from the same
+        # `_links` family and must be resolved the same way, or the console shows a
+        # page link that works next to an attachment URL that 404s (#124).
+        return _PageContext(space=self, title=page.get("title"), path=path, url=resolve(path))
 
 
 @dataclass(frozen=True, slots=True)

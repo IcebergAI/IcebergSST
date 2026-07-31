@@ -21,6 +21,7 @@ from confluence_server import (
     FakeConfluence,
     Page,
     Space,
+    recorded_clients,
     storage_page,
 )
 from iceberg_connectors.confluence.client import (
@@ -55,6 +56,32 @@ def _site(pages: int = 5) -> FakeConfluence:
             )
         ]
     )
+
+
+def _attached(*attachments: Attachment) -> FakeConfluence:
+    """A site whose one page carries `attachments`."""
+    page = Page("p1", "Runbook", "", attachments=[*attachments])
+    return FakeConfluence(spaces=[Space("s1", "DOCS", "Docs", pages=[page])])
+
+
+def _download_link(client: ConfluenceClient, site: FakeConfluence) -> str:
+    """The first attachment's link, read off a real collection response.
+
+    Fetched rather than hand-written because `_links.base` arrives with that
+    response and is what `downloadLink` is relative to — a test that skipped the
+    collection would be asserting against a link nobody ever received.
+    """
+    site.requests.clear()
+    attachment = next(iter(client.paginate("/pages/p1/attachments")))
+    site.requests.clear()
+    return str(attachment["downloadLink"])
+
+
+def _raising(error: Exception) -> Any:
+    def always(request: httpx2.Request) -> httpx2.Response:
+        raise error
+
+    return always
 
 
 # ─── Credentials ──────────────────────────────────────────────────────────────
@@ -241,7 +268,10 @@ def test_being_throttled_beyond_the_budget_fails_with_advice() -> None:
         list(client.paginate("/spaces/s1/pages"))
 
 
-def test_a_5xx_is_retried_and_then_reported() -> None:
+def test_a_5xx_is_retried_and_the_last_attempt_is_not_slept_on() -> None:
+    """Three attempts means two waits between them. Sleeping after the final one is
+    dead time before an error already decided — 16 s at the defaults, paid again for
+    every unreadable page in a space."""
     client, slept = _client(
         _site(),
         transport=httpx2.MockTransport(lambda _request: httpx2.Response(503)),
@@ -251,7 +281,7 @@ def test_a_5xx_is_retried_and_then_reported() -> None:
     with pytest.raises(ConnectorError, match="after 3 attempts"):
         list(client.paginate("/spaces"))
 
-    assert slept == [0.5, 1.0, 2.0]
+    assert slept == [0.5, 1.0]
 
 
 def test_a_transport_error_is_retried() -> None:
@@ -301,26 +331,10 @@ def test_a_non_json_body_is_reported_with_the_path_and_no_query() -> None:
 
 
 def test_an_attachment_downloads_as_bytes() -> None:
-    site = FakeConfluence(
-        spaces=[
-            Space(
-                "s1",
-                "DOCS",
-                "Docs",
-                pages=[
-                    Page(
-                        "p1",
-                        "Runbook",
-                        storage_page("see attached"),
-                        attachments=[Attachment("notes.txt", b"contents")],
-                    )
-                ],
-            )
-        ]
-    )
+    site = _attached(Attachment("notes.txt", b"contents"))
     client, _ = _client(site)
 
-    data = client.get_bytes("/download/attachments/p1-0/notes.txt", max_bytes=1024)
+    data = client.get_bytes(_download_link(client, site), max_bytes=1024)
 
     assert data == b"contents"
 
@@ -328,40 +342,47 @@ def test_an_attachment_downloads_as_bytes() -> None:
 def test_a_download_over_the_cap_is_cut_off_rather_than_buffered() -> None:
     """A `Content-Length` is attacker-influenced. A client that trusted it would
     buffer a gigabyte from a source that claimed a kilobyte."""
-    site = FakeConfluence(
-        spaces=[
-            Space(
-                "s1",
-                "DOCS",
-                "Docs",
-                pages=[Page("p1", "Big", "", attachments=[Attachment("big.txt", b"x" * 5000)])],
-            )
-        ]
-    )
+    site = _attached(Attachment("big.txt", b"x" * 5000))
     client, _ = _client(site)
 
     with pytest.raises(DownloadTooLarge):
-        client.get_bytes("/download/attachments/p1-0/big.txt", max_bytes=1000)
+        client.get_bytes(_download_link(client, site), max_bytes=1000)
 
 
-def test_a_download_link_is_resolved_against_the_site_not_the_api_prefix() -> None:
-    """v2 returns `downloadLink` relative to the site root, outside `/wiki/api/v2`.
-    Resolving it against the prefix 404s on every attachment."""
-    site = FakeConfluence(
-        spaces=[
-            Space(
-                "s1",
-                "DOCS",
-                "Docs",
-                pages=[Page("p1", "R", "", attachments=[Attachment("a.txt", b"hi")])],
-            )
-        ]
-    )
+def test_a_download_link_is_resolved_against_the_context_base_the_site_reported() -> None:
+    """`downloadLink` and `webui` come from the same `_links` family and are both
+    relative to `_links.base` — `https://site/wiki` on Cloud. Resolving a download
+    against the bare site root while UI links get `/wiki` 404s every attachment in
+    production while a fixture serving downloads at the root passes green (#124)."""
+    site = _attached(Attachment("a.txt", b"hi"))
     client, _ = _client(site)
 
-    client.get_bytes("/download/attachments/p1-0/a.txt", max_bytes=1024)
+    client.get_bytes(_download_link(client, site), max_bytes=1024)
 
+    assert site.paths_requested() == ["/wiki/download/attachments/p1-0/a.txt"]
+
+
+def test_a_deployment_that_reports_no_context_base_keeps_the_site_root() -> None:
+    """Server/DC does not mount under `/wiki` and reports no `_links.base`. Guessing
+    a context there would break every download the other way round."""
+    site = _attached(Attachment("a.txt", b"hi"))
+    site.link_base = None
+    client, _ = _client(site)
+
+    assert client.get_bytes(_download_link(client, site), max_bytes=1024) == b"hi"
     assert site.paths_requested() == ["/download/attachments/p1-0/a.txt"]
+
+
+def test_an_off_site_context_base_is_ignored_rather_than_adopted() -> None:
+    """`_links.base` is named by the response. Honouring one that points elsewhere
+    would aim the credentialed first download hop at a host the source chose."""
+    site = _attached(Attachment("a.txt", b"hi"))
+    site.link_base = "https://evil.test/wiki"
+    client, _ = _client(site)
+
+    _download_link(client, site)
+
+    assert client.link_base == ""
 
 
 def test_a_download_redirect_is_followed_without_the_credential() -> None:
@@ -440,6 +461,84 @@ def test_an_off_site_download_link_is_refused_before_the_first_request() -> None
         client.get_bytes("https://evil.test/blob", max_bytes=1024)
 
     assert seen == []
+
+
+def test_a_download_transport_error_is_wrapped_rather_than_escaping_raw() -> None:
+    """A reset connection mid-download used to leave `get_bytes` as a raw `httpx`
+    error, past the connector's `ConnectorError` handler and out of `fetch` — failing
+    the whole space task and discarding every page already scanned in it (#108)."""
+    client, _ = _client(
+        _site(),
+        transport=httpx2.MockTransport(_raising(httpx2.ReadError("connection reset"))),
+        rate_limit=RateLimitPolicy(attempts=2, base_delay_seconds=0.1),
+    )
+
+    with pytest.raises(ConnectorError, match="after 2 attempts"):
+        client.get_bytes("/download/attachments/p1-0/a.txt", max_bytes=1024)
+
+
+def test_a_download_transport_error_is_retried_before_it_is_reported() -> None:
+    attempts = {"n": 0}
+
+    def flaky(request: httpx2.Request) -> httpx2.Response:
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise httpx2.ConnectError("connection refused")
+        return httpx2.Response(200, content=b"the file")
+
+    client, _ = _client(_site(), transport=httpx2.MockTransport(flaky))
+
+    assert client.get_bytes("/download/attachments/p1-0/a.txt", max_bytes=1024) == b"the file"
+
+
+def test_a_throttled_download_waits_for_as_long_as_the_server_asked() -> None:
+    """Downloads used to get a single attempt each, so during throttling page fetches
+    waited politely while every interleaved attachment failed outright — dropping the
+    attachment corpus silently, where "could not read" reads as "no secrets here"."""
+    answered = {"n": 0}
+
+    def throttled_once(request: httpx2.Request) -> httpx2.Response:
+        answered["n"] += 1
+        if answered["n"] == 1:
+            return httpx2.Response(429, headers={"Retry-After": "7"})
+        return httpx2.Response(200, content=b"the file")
+
+    client, slept = _client(_site(), transport=httpx2.MockTransport(throttled_once))
+
+    assert client.get_bytes("/download/attachments/p1-0/a.txt", max_bytes=1024) == b"the file"
+    assert slept == [7.0]
+
+
+def test_a_5xx_download_is_retried_and_then_reported() -> None:
+    site = _attached(Attachment("a.txt", b"hi", download_status=503))
+    client, slept = _client(site, rate_limit=RateLimitPolicy(attempts=3, base_delay_seconds=0.5))
+
+    with pytest.raises(ConnectorError, match="after 3 attempts"):
+        client.get_bytes(_download_link(client, site), max_bytes=1024)
+
+    assert slept == [0.5, 1.0]
+
+
+# ─── Connection reuse ─────────────────────────────────────────────────────────
+
+
+def test_one_http_client_serves_every_request_and_closes_with_the_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client per request is a TCP and TLS handshake per request. Across a
+    fifty-thousand-page space with its comments and attachments that is hundreds of
+    thousands of handshakes, inflating the very load that trips the rate limiter —
+    and a `MockTransport` can never notice the cost (#130)."""
+    made = recorded_clients(monkeypatch)
+    site = _site(pages=5)
+    client, _ = _client(site, page_size=2)
+
+    list(client.paginate("/spaces/s1/pages"))
+    client.close()
+
+    assert len(site.requests) == 3  # ...three requests
+    assert len(made) == 1  # ...one connection pool
+    assert made[0].is_closed
 
 
 def test_a_json_body_over_the_cap_is_refused_rather_than_buffered() -> None:
