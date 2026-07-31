@@ -32,7 +32,7 @@ from iceberg_core.models import (
 )
 from sqlmodel import col, select
 
-from iceberg_api import audit
+from iceberg_api import audit, retention
 from iceberg_api.dispatch import build_dispatcher
 from iceberg_api.engines.auth import mint_token
 from iceberg_api.scans import service
@@ -58,6 +58,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("reclaim", help="return expired-lease tasks to the queue")
     commands.add_parser("scheduler-tick", help="run one scheduler round now")
+    commands.add_parser(
+        "retention-purge",
+        help="apply the configured retention windows now (see docs/retention.md)",
+    )
 
     migrate_parser = commands.add_parser("migrate", help="apply migrations up to a revision")
     migrate_parser.add_argument(
@@ -161,6 +165,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         case "migrate":
             migrate(args.revision)
             print(f"migrated to {args.revision}", file=sys.stderr)
+        case "retention-purge":
+            # The maintenance loop runs this on its own cadence; this exists for
+            # the first purge after a window is configured, when an operator wants
+            # to see the number rather than discover it in the audit log.
+            with session_scope() as db:
+                purged = retention.purge(db, settings)
+            print(
+                f"findings={purged.findings} finding_events={purged.finding_events} "
+                f"audit_events={purged.audit_events}",
+                file=sys.stderr,
+            )
     return 0
 
 

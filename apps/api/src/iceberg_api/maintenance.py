@@ -26,7 +26,7 @@ from iceberg_core.config import ApiSettings, get_api_settings
 from iceberg_core.db import session_scope
 from iceberg_core.secrets import SecretStore, build_secret_store
 
-from iceberg_api import suppressions
+from iceberg_api import retention, suppressions
 from iceberg_api.dispatch import Dispatcher, build_dispatcher
 from iceberg_api.notifications import dispatch as notification_dispatch
 from iceberg_api.scans import service
@@ -43,7 +43,7 @@ def run_once(
     settings: ApiSettings | None = None,
     store: SecretStore | None = None,
 ) -> None:
-    """One maintenance round: schedules, reclaim, the safety sweeps, then alerts.
+    """One round: schedules, reclaim, the safety sweeps, alerts, then retention.
 
     Leadership is held on a session of its own for the whole round. Holding it on
     the working session would not work: ``pg_try_advisory_xact_lock`` releases at
@@ -53,7 +53,8 @@ def run_once(
     transaction — and the lock — spans everything below.
 
     ``settings``/``store`` are injectable so a test can drive a round without a
-    configured SMTP relay; both default to the process configuration.
+    configured SMTP relay and with its own retention windows; both default to the
+    process configuration.
     """
     at = now or datetime.now(UTC)
     resolved = settings or get_api_settings()
@@ -88,6 +89,12 @@ def run_once(
         # gets retried on the next beat instead of losing the alert.
         with session_scope() as db:
             notification_dispatch.deliver_pending(db, resolved, secret_store, now=at)
+        # Retention (#73). A no-op unless the deployment configured a window —
+        # this database is evidence, so deleting any of it is opt-in. Last in the
+        # round because it is the only job that can be slow on a database that has
+        # never been purged, and nothing else waits on it.
+        with session_scope() as db:
+            retention.purge(db, resolved, now=at)
 
 
 def _already_leader(db: object) -> bool:

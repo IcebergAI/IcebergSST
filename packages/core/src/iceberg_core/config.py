@@ -165,6 +165,28 @@ class ApiSettings(SecretStoreSettings):
     #: a fresh identity per request.
     trusted_proxy_hops: int = Field(default=0, ge=0, le=10)
 
+    # ─── Data retention (#73) ─────────────────────────────────────────────────
+    # Findings and their append-only event trail grow forever otherwise. Every
+    # window is *off by default*: this database is evidence, and deleting some of
+    # it has to be a decision an operator made, not something that started
+    # happening because they upgraded (docs/retention.md).
+    #
+    # 0 means "keep forever" for all three.
+    #
+    #: Auto-resolved findings older than this are deleted. Only ``auto`` — a
+    #: finding an analyst resolved, accepted the risk on, or marked a false
+    #: positive is a decision, and decisions are not noise to be cleaned up.
+    retention_resolved_findings_days: int = Field(default=0, ge=0)
+    #: FindingEvent rows older than this are deleted, except the ones belonging to
+    #: findings that are still open.
+    retention_finding_events_days: int = Field(default=0, ge=0)
+    #: AuditEvent rows older than this are deleted. Usually the window a
+    #: compliance regime names; think before shortening it.
+    retention_audit_events_days: int = Field(default=0, ge=0)
+    #: Rows deleted per table per round, so one purge cannot lock a table for
+    #: minutes on a database that has never been purged before.
+    retention_batch_size: int = Field(default=1000, ge=1, le=100_000)
+
     @field_validator("database_url", "redis_url")
     @classmethod
     def _require_url_scheme(cls, value: str) -> str:
