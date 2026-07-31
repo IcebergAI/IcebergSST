@@ -1,0 +1,60 @@
+{{/*
+The role boundary, expressed where the network can enforce it.
+
+The code already guarantees engines hold no database credentials; this says the
+same thing at a layer that does not depend on the code being right. Off by
+default because it needs a CNI that enforces policy, and because the egress rules
+have to name your Postgres and Redis — which the chart cannot know.
+*/}}
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "icebergsst.componentName" (dict "context" . "role" "api") }}
+  labels:
+    {{- include "icebergsst.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "icebergsst.selectorLabels" (dict "context" . "role" "api") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # The ingress controller, for the console and the API.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressControllerNamespace }}
+      ports:
+        - protocol: TCP
+          port: 8000
+    # And engines, which report results back over the same port.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "icebergsst.selectorLabels" (dict "context" . "role" "engine") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "icebergsst.componentName" (dict "context" . "role" "engine") }}
+  labels:
+    {{- include "icebergsst.labels" . | nindent 4 }}
+    app.kubernetes.io/component: engine
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "icebergsst.selectorLabels" (dict "context" . "role" "engine") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Metrics scraping only. Nothing calls an engine to give it work — engines
+    # lease it from the api.
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.engine.metricsPort }}
+{{- end }}

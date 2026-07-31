@@ -1,0 +1,69 @@
+# A complete, working values file — the shape of a real deployment, with
+# placeholder credentials. Used by `make helm-verify` to render the chart, and a
+# reasonable starting point for a real one.
+#
+# It is outside the chart directory on purpose: nothing here should ever be
+# packaged, and the placeholders below must not be mistaken for defaults.
+
+image:
+  registry: ghcr.io
+  api:
+    tag: "0.1.0"
+  engine:
+    tag: "0.1.0"
+
+config:
+  environment: prod
+  oidc:
+    issuer: https://idp.example.com/realms/iceberg
+    clientId: icebergsst
+  bootstrapAdmin:
+    subject: "00000000-0000-0000-0000-000000000000"
+    email: security@example.com
+  rateLimit:
+    # One ingress controller in front, so the client address is the entry it
+    # added. Leaving this at 0 would charge every request to the controller.
+    trustedProxyHops: 1
+  retention:
+    resolvedFindingsDays: 365
+    findingEventsDays: 730
+    auditEventsDays: 2555 # seven years
+  smtp:
+    host: smtp.example.com
+    from: icebergsst@example.com
+
+# In a real deployment these come from a Secret created out of band and named in
+# secrets.existingApiSecret / existingEngineSecret. Inline here so the render is
+# self-contained.
+secrets:
+  api:
+    databaseUrl: postgresql+psycopg://iceberg:PLACEHOLDER@postgres.example.svc:5432/iceberg
+    redisUrl: redis://:PLACEHOLDER@redis.example.svc:6379/0
+    masterKey: PLACEHOLDER_MASTER_KEY
+    fingerprintPepperRef: PLACEHOLDER_PEPPER_REF
+    sessionSecret: PLACEHOLDER_SESSION_SECRET
+    oidcClientSecret: PLACEHOLDER_OIDC_SECRET
+    smtpPassword: PLACEHOLDER_SMTP_PASSWORD
+  engine:
+    redisUrl: redis://:PLACEHOLDER@redis.example.svc:6379/0
+    engineId: "00000000-0000-0000-0000-000000000001"
+    engineToken: PLACEHOLDER_ENGINE_TOKEN
+
+api:
+  replicaCount: 2
+  ingress:
+    enabled: true
+    className: nginx
+    host: icebergsst.example.com
+    tls:
+      enabled: true
+      secretName: icebergsst-tls
+
+engine:
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+
+networkPolicy:
+  enabled: true

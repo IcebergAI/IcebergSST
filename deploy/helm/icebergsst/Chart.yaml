@@ -1,0 +1,32 @@
+apiVersion: v2
+name: icebergsst
+description: |
+  IcebergSST — secret scanning for non-git enterprise sources. Deploys the api
+  control plane and a scalable fleet of scanner engines; Postgres and Redis are
+  expected to be provided (managed service or operator).
+type: application
+
+# The chart's own version. Bumped for chart changes, independently of the app.
+version: 0.1.0
+
+# What this chart deploys by default. Overridden per environment with
+# image.api.tag / image.engine.tag.
+appVersion: "0.1.0"
+
+keywords:
+  - security
+  - secret-scanning
+  - confluence
+
+home: https://github.com/IcebergAI/IcebergSST
+sources:
+  - https://github.com/IcebergAI/IcebergSST
+
+maintainers:
+  - name: IcebergAI
+
+# Deliberately no Postgres/Redis subchart dependencies. A bundled database is a
+# development convenience that turns into a production liability — no backups, no
+# failover, and a `helm uninstall` that takes the findings with it. Point the
+# chart at a managed service or an operator-provisioned instance instead
+# (docs/deployment.md).

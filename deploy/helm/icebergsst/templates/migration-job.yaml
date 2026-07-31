@@ -1,0 +1,70 @@
+{{/*
+Migrations as a hook Job, api role only (#62).
+
+`pre-install,pre-upgrade` with `hook-failed` deletion: the schema is in place
+before any new pod serves a request, and a Job that failed is left behind for its
+logs rather than tidied away at the moment somebody needs it. A successful one is
+deleted before the next hook runs so the release does not accumulate Jobs.
+
+It runs the api *image* — the only one with alembic and a database driver — and
+the same `python -m iceberg_api migrate` entry point compose and the tests use,
+so what runs here is what has been exercised everywhere else. The image itself
+never migrates on start: that would race its own replicas and surprise an
+operator mid-rollback.
+*/}}
+{{- if .Values.migrations.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-migrate" (include "icebergsst.fullname" .) }}
+  labels:
+    {{- include "icebergsst.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    {{- with .Values.migrations.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  # A migration that fails should be looked at, not retried into a worse state.
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "icebergsst.labels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "icebergsst.serviceAccountName" (dict "context" . "role" "api") }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "icebergsst.image" (dict "context" . "role" "api") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command: ["python", "-m", "iceberg_api", "migrate"]
+          env:
+            {{- include "icebergsst.commonEnv" . | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "icebergsst.configMapName" . }}
+            - secretRef:
+                name: {{ include "icebergsst.apiSecretName" . }}
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

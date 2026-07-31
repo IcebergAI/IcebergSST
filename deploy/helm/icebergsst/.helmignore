@@ -1,0 +1,11 @@
+.DS_Store
+.git/
+.gitignore
+*.swp
+*.tmp
+*.orig
+*.bak
+.idea/
+.vscode/
+# Example value files are documentation, not part of the packaged chart.
+examples/

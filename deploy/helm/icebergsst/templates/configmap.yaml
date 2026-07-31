@@ -1,0 +1,63 @@
+{{/*
+Non-secret configuration, readable by anyone who can read ConfigMaps in this
+namespace. Nothing here is a credential; credentials are in the two Secrets.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "icebergsst.configMapName" . }}
+  labels:
+    {{- include "icebergsst.labels" . | nindent 4 }}
+data:
+  ICEBERG_ENVIRONMENT: {{ .Values.config.environment | quote }}
+  ICEBERG_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+
+  # ── api role ──────────────────────────────────────────────────────────────
+  ICEBERG_SECRET_STORE_BACKEND: {{ .Values.config.secretStoreBackend | quote }}
+  ICEBERG_CONFIDENCE_THRESHOLD: {{ .Values.config.confidenceThreshold | quote }}
+
+  ICEBERG_OIDC_ISSUER: {{ .Values.config.oidc.issuer | quote }}
+  ICEBERG_OIDC_CLIENT_ID: {{ .Values.config.oidc.clientId | quote }}
+  ICEBERG_OIDC_SCOPES: {{ .Values.config.oidc.scopes | quote }}
+  {{- $redirect := .Values.config.oidc.redirectUrl }}
+  {{- if and (not $redirect) .Values.api.ingress.enabled }}
+  {{- $scheme := ternary "https" "http" .Values.api.ingress.tls.enabled }}
+  {{- $redirect = printf "%s://%s/api/v1/auth/callback" $scheme .Values.api.ingress.host }}
+  {{- end }}
+  ICEBERG_OIDC_REDIRECT_URL: {{ $redirect | quote }}
+
+  ICEBERG_SESSION_TTL_MINUTES: {{ .Values.config.session.ttlMinutes | quote }}
+  ICEBERG_COOKIE_SECURE: {{ .Values.config.session.cookieSecure | quote }}
+  ICEBERG_BOOTSTRAP_ADMIN_SUBJECT: {{ .Values.config.bootstrapAdmin.subject | quote }}
+  ICEBERG_BOOTSTRAP_ADMIN_EMAIL: {{ .Values.config.bootstrapAdmin.email | quote }}
+
+  # Rate limiting (#63). trustedProxyHops must match the real topology: behind an
+  # ingress controller, 0 charges every request to the controller's address and
+  # the limit protects nothing.
+  ICEBERG_RATE_LIMIT_ENABLED: {{ .Values.config.rateLimit.enabled | quote }}
+  ICEBERG_AUTH_RATE_LIMIT: {{ .Values.config.rateLimit.auth | quote }}
+  ICEBERG_ENGINE_RATE_LIMIT: {{ .Values.config.rateLimit.engine | quote }}
+  ICEBERG_ENGINE_AUTH_RATE_LIMIT: {{ .Values.config.rateLimit.engineAuth | quote }}
+  ICEBERG_TRUSTED_PROXY_HOPS: {{ .Values.config.rateLimit.trustedProxyHops | quote }}
+
+  # Retention (#73). Zero keeps everything; see docs/retention.md.
+  ICEBERG_RETENTION_RESOLVED_FINDINGS_DAYS: {{ .Values.config.retention.resolvedFindingsDays | quote }}
+  ICEBERG_RETENTION_FINDING_EVENTS_DAYS: {{ .Values.config.retention.findingEventsDays | quote }}
+  ICEBERG_RETENTION_AUDIT_EVENTS_DAYS: {{ .Values.config.retention.auditEventsDays | quote }}
+
+  # Notification dispatch (#60).
+  ICEBERG_SMTP_HOST: {{ .Values.config.smtp.host | quote }}
+  ICEBERG_SMTP_PORT: {{ .Values.config.smtp.port | quote }}
+  ICEBERG_SMTP_FROM: {{ .Values.config.smtp.from | quote }}
+  ICEBERG_SMTP_STARTTLS: {{ .Values.config.smtp.starttls | quote }}
+  ICEBERG_SMTP_USERNAME: {{ .Values.config.smtp.username | quote }}
+  ICEBERG_NOTIFICATION_MAX_ATTEMPTS: {{ .Values.config.notifications.maxAttempts | quote }}
+  ICEBERG_NOTIFICATION_RETRY_BACKOFF_SECONDS: {{ .Values.config.notifications.retryBackoffSeconds | quote }}
+
+  # ── engine role ───────────────────────────────────────────────────────────
+  # The api's in-cluster address. Engines reach the control plane and Redis, and
+  # nothing else — there is deliberately no database entry anywhere in this file
+  # that an engine reads.
+  ICEBERG_API_BASE_URL: {{ printf "http://%s:%v" (include "icebergsst.componentName" (dict "context" . "role" "api")) .Values.api.service.port | quote }}
+  ICEBERG_WORKER_THREADS: {{ .Values.engine.workerThreads | quote }}
+  ICEBERG_METRICS_PORT: {{ .Values.engine.metricsPort | quote }}

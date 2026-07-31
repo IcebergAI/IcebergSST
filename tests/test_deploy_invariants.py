@@ -4,13 +4,20 @@ These read the files that define the containers rather than the containers: chea
 checks for expensive mistakes, running in the ordinary unit-test suite where an
 engine handed a database URL fails in seconds.
 
-They are the fast half of the story. The slow half is
-``deploy/docker/verify-images.sh`` (``make images-verify``), which builds both
-images and probes the artefacts — no database package importable in the engine,
-both entrypoints serving, both running non-root. Reading a Dockerfile cannot tell
-you an image builds, and a text check cannot tell you sqlalchemy is genuinely
-absent rather than merely unmentioned (#81). Keep both: this file catches the
-mistake in the edit, that script catches it in the result.
+They are the fast half of the story. The slow half is two scripts that need tools
+this suite does not have:
+
+* ``deploy/docker/verify-images.sh`` (``make images-verify``) builds both images
+  and probes the artefacts — no database package importable in the engine, both
+  entrypoints serving, both running non-root (#81).
+* ``deploy/helm/verify-chart.sh`` (``make helm-verify``) renders the chart and
+  checks the manifests — the engine mounting only its own Secret, migrations as a
+  pre-upgrade hook, every workload unprivileged (#61, #62).
+
+Reading a Dockerfile cannot tell you an image builds, and a text check cannot
+tell you sqlalchemy is genuinely absent rather than merely unmentioned. Keep
+both halves: this file catches the mistake in the edit, those scripts catch it in
+the result.
 """
 
 import importlib
@@ -28,6 +35,8 @@ API_DOCKERFILE = DOCKER_DIR / "api.Dockerfile"
 ENGINE_DOCKERFILE = DOCKER_DIR / "engine.Dockerfile"
 COMPOSE_FILE = REPO_ROOT / "deploy" / "compose" / "docker-compose.yml"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
+HELM_DIR = REPO_ROOT / "deploy" / "helm"
+CHART_DIR = HELM_DIR / "icebergsst"
 
 #: ${VAR}, ${VAR:-default}, ${VAR:?message}
 INTERPOLATION_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)")
@@ -57,6 +66,21 @@ def _instructions(dockerfile: Path) -> str:
     return "\n".join(
         line for line in dockerfile.read_text().splitlines() if not line.lstrip().startswith("#")
     )
+
+
+#: Helm's block comments, ``{{/* … */}}``.
+HELM_COMMENT_RE = re.compile(r"\{\{-?/\*.*?\*/-?\}\}", re.DOTALL)
+
+
+def _template_instructions(template: Path) -> str:
+    """A chart template with both comment forms stripped.
+
+    Same reasoning as :func:`_instructions` for Dockerfiles: the engine
+    Deployment's header states "no database URL, no master key" as the rule it
+    follows, and a substring check over the raw text would read that as a breach.
+    """
+    text = HELM_COMMENT_RE.sub("", template.read_text())
+    return "\n".join(line for line in text.splitlines() if not line.strip().startswith("#"))
 
 
 def test_both_role_images_exist() -> None:
@@ -102,6 +126,57 @@ def test_the_engine_never_asks_for_the_orm_extra() -> None:
     base, _, extras = core_manifest.partition("[project.optional-dependencies]")
     assert "sqlmodel" not in base, "sqlmodel must stay in the db extra, not core's base deps"
     assert "sqlmodel" in extras
+
+
+def test_the_engine_chart_template_carries_no_database_configuration() -> None:
+    """ADR 0002 at the Kubernetes layer, checked in the template source.
+
+    The rendered form of this — the engine Deployment referencing only its own
+    Secret — is asserted by ``deploy/helm/verify-chart.sh``. This one runs in the
+    ordinary suite, so mounting the api Secret from the engine fails in seconds
+    rather than waiting for a job that needs Helm.
+    """
+    instructions = _template_instructions(CHART_DIR / "templates" / "engine-deployment.yaml")
+
+    assert "apiSecretName" not in instructions, "engine Deployment references the api's Secret"
+    assert "engineSecretName" in instructions
+    offenders = sorted(set(DB_VARIABLE_RE.findall(instructions)))
+    assert offenders == [], f"engine chart template mentions database config: {offenders}"
+
+
+def test_only_the_api_chart_template_runs_migrations() -> None:
+    job = (CHART_DIR / "templates" / "migration-job.yaml").read_text()
+
+    assert "pre-install,pre-upgrade" in job
+    assert '"python", "-m", "iceberg_api", "migrate"' in job
+    # The api image, because it is the only one with alembic and a driver.
+    assert '"role" "api"' in job
+
+    engine = (CHART_DIR / "templates" / "engine-deployment.yaml").read_text()
+    assert "migrate" not in engine
+
+
+def test_the_chart_separates_the_two_roles_secrets() -> None:
+    """One Secret per role is what makes "engines cannot read the api's" a rule a
+    cluster can enforce, rather than only a property of these templates."""
+    secrets = (CHART_DIR / "templates" / "secrets.yaml").read_text()
+
+    assert "existingApiSecret" in secrets
+    assert "existingEngineSecret" in secrets
+    api_half, _, engine_half = secrets.partition("-engine")
+    assert "ICEBERG_MASTER_KEY" in api_half
+    assert "ICEBERG_MASTER_KEY" not in engine_half
+    assert "ICEBERG_DATABASE_URL" not in engine_half
+
+
+def test_the_chart_verification_runs_in_ci() -> None:
+    script = HELM_DIR / "verify-chart.sh"
+    assert script.is_file()
+    assert script.stat().st_mode & 0o111, "verify-chart.sh must be executable"
+
+    workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert "make helm-verify" in workflow
+    assert "helm-verify:" in (REPO_ROOT / "Makefile").read_text()
 
 
 def test_the_image_verification_runs_in_ci() -> None:
