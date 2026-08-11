@@ -8,7 +8,7 @@ requires-python = ">=3.14"
 # `iceberg_core.models` are api-role modules and their dependency lives in the
 # `db` extra below, so an engine image cannot even import an ORM (ADR 0002).
 dependencies = [
-    "cryptography>=49.0.0",
+    "cryptography>=50.0.0",
     "prometheus-client>=0.25.0",
     "pydantic-settings>=2.13.0",
     "structlog>=26.1.0",

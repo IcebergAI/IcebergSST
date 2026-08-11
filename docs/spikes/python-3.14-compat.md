@@ -12,11 +12,11 @@ A scratch uv project exercised every core dependency beyond bare import:
 | sqlmodel 0.0.39 | table model + in-memory SQLite CRUD | OK |
 | dramatiq 2.2.0 | actor via `StubBroker`, enqueue + worker run | OK |
 | alembic 1.18.5 | config + `command.init` script directory | OK |
-| cryptography 49.0.0 | AES-GCM and Fernet encrypt/decrypt round-trips | OK |
+| cryptography 50.0.0 | AES-GCM and Fernet encrypt/decrypt round-trips | OK |
 | httpx 0.28.1 | client request via `MockTransport` | OK |
 | prometheus-client 0.25.0 | counter + text exposition | OK |
 | structlog 26.1.0 | JSON renderer output parses | OK |
-| pypdf 6.14.2 | write PDF + `extract_text` | OK |
+| pypdf 6.15.0 | write PDF + `extract_text` | OK |
 
 ## 3.14 evidence
 
