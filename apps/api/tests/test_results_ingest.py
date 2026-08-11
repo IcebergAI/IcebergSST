@@ -389,6 +389,20 @@ def test_completed_results_with_truncated_units_fail_closed_at_ingest(
     assert task.error == "1 requested content unit was truncated"
 
 
+def test_negative_engine_counts_are_rejected(scan_fixture: Fixture) -> None:
+    """Malformed tallies must not bypass the API's incomplete-scan guard."""
+    fixture = scan_fixture
+    task = fixture.fetch_task()
+
+    response = fixture.report(task, counts={"units_failed": -1})
+
+    assert response.status_code == 422
+    fixture.session.refresh(task)
+    assert task.status is ScanTaskStatus.LEASED
+    fixture.session.refresh(fixture.scan)
+    assert "units_failed" not in fixture.scan.counts
+
+
 def test_a_failed_scan_says_why_it_failed(scan_fixture: Fixture) -> None:
     """`Scan.error` is on the read contract, so something has to write it.
 

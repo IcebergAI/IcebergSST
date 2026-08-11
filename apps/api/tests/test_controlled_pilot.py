@@ -554,7 +554,7 @@ def test_incomplete_pilot_scan_keeps_partial_findings_and_queues_no_notification
     session: Session,
     dispatcher: RecordingDispatcher,
 ) -> None:
-    """Readable findings survive a failed unit, but reconciliation/outbox do not run."""
+    """A malformed 200 keeps readable findings but blocks reconciliation/outbox."""
     headers = _login_admin(client, provider)
     source_id = _create_source(client, headers)
     engine_id, engine_token, _engine_registration = _register_engine(client, headers)
@@ -591,8 +591,8 @@ def test_incomplete_pilot_scan_keeps_partial_findings_and_queues_no_notification
             _create_channel(client, headers)
 
             site.spaces[0].pages[1].body_in_list = False
+            site.spaces[0].pages[1].body_in_detail = False
             site.spaces[0].pages.append(Page("p3", "Third", leaky_page_storage()))
-            site.failing_paths = ("/pages/p2",)
             with capture_logs() as logs:
                 partial_scan_id = _run_scan(client, headers, source_id, dispatcher, engine)
         finally:

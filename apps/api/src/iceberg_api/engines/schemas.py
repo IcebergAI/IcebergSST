@@ -6,7 +6,7 @@ broker, which is why TLS on this channel is mandatory (docs/security.md).
 """
 
 import uuid
-from typing import Any
+from typing import Annotated, Any
 
 from iceberg_core.enums import EngineStatus, ScanTaskKind, ScanTaskStatus, Severity
 from pydantic import BaseModel, ConfigDict, Field
@@ -195,7 +195,7 @@ class ResultsSubmission(BaseModel):
     rulepack_version: str | None = Field(default=None, max_length=64)
     #: Engine-side tallies: units scanned, units skipped, matches dropped below the
     #: confidence threshold.
-    counts: dict[str, int] = Field(default_factory=dict)
+    counts: dict[str, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
 
 
 class ResultsAccepted(BaseModel):

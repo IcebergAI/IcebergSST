@@ -372,6 +372,75 @@ def test_a_page_with_no_text_is_a_skip_not_a_failure() -> None:
     assert (outcome.skipped, outcome.failed) == (1, 0)
 
 
+@pytest.mark.parametrize(
+    "page",
+    [
+        Page(
+            "p2",
+            "Missing",
+            storage_page("unreadable"),
+            body_in_list=False,
+            body_in_detail=False,
+        ),
+        Page(
+            "p2",
+            "Unsupported",
+            storage_page("unreadable"),
+            body_representation="atlas_doc_format",
+        ),
+    ],
+)
+def test_a_successful_page_response_without_supported_content_is_incomplete(
+    page: Page,
+) -> None:
+    """A malformed HTTP 200 is unread content, not evidence that a page is clean."""
+    site = _site(
+        spaces=[
+            Space(
+                "s1",
+                "DOCS",
+                "Docs",
+                pages=[Page("p1", "Readable", storage_page("visible")), page],
+            )
+        ]
+    )
+
+    units, outcome = _fetch(_connector(site), site)
+
+    assert [unit.locator.resource_id for unit in units] == ["p1"]
+    assert (outcome.units, outcome.failed) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    "comment",
+    [
+        Comment("c2", storage_page("unreadable"), include_body=False),
+        Comment(
+            "c2",
+            storage_page("unreadable"),
+            body_representation="atlas_doc_format",
+        ),
+    ],
+)
+def test_a_comment_without_supported_content_is_incomplete(comment: Comment) -> None:
+    """Malformed comments fail coverage while readable page content still survives."""
+    site = _site(
+        spaces=[
+            Space(
+                "s1",
+                "DOCS",
+                "Docs",
+                pages=[Page("p1", "Runbook", storage_page("visible"), comments=[comment])],
+            )
+        ]
+    )
+
+    units, outcome = _fetch(_connector(site), site)
+
+    assert [unit.text for unit in units] == ["visible"]
+    assert (outcome.units, outcome.failed) == (1, 1)
+
+
 def test_fetch_pages_through_a_large_space() -> None:
     site = _site(
         spaces=[
@@ -645,6 +714,35 @@ def test_a_malformed_attachment_is_incomplete_not_an_ordinary_skip() -> None:
 
     assert not any(unit.origin is ContentOrigin.ATTACHMENT for unit in units)
     assert (outcome.skipped, outcome.failed) == (0, 1)
+
+
+def test_parser_exception_text_never_reaches_connector_logs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parser may echo attacker-controlled document plaintext in its exception."""
+    canary = "plaintext-canary-must-not-log"
+
+    def raises_with_plaintext(_data: bytes, _limits: ExtractionLimits) -> Any:
+        raise ValueError(canary)
+
+    extraction = __import__("iceberg_connectors.extraction", fromlist=["_EXTRACTORS"])
+    monkeypatch.setitem(extraction._EXTRACTORS, "text", raises_with_plaintext)
+    site = _site()
+
+    with capture_logs() as events:
+        _, outcome = _fetch(_connector(site), site)
+
+    assert outcome.failed == 1
+    assert canary not in str(events)
+    rejected = [event for event in events if event["event"] == "confluence_attachment_rejected"]
+    assert rejected == [
+        {
+            "event": "confluence_attachment_rejected",
+            "log_level": "warning",
+            "name": "notes.txt",
+            "outcome": "failed_parse",
+        }
+    ]
 
 
 def test_a_truncated_attachment_keeps_its_partial_unit_but_fails_closed() -> None:

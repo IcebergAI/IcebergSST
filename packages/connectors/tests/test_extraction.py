@@ -10,6 +10,7 @@ import codecs
 import io
 import struct
 import zipfile
+from typing import Any
 
 import pytest
 from hostile import crashes, hangs
@@ -307,6 +308,22 @@ def test_a_malformed_document_fails_that_unit_only() -> None:
 
     assert result.outcome is ExtractionOutcome.FAILED_PARSE
     assert result.text == ""
+
+
+def test_parser_exception_text_is_not_retained(monkeypatch: pytest.MonkeyPatch) -> None:
+    canary = "plaintext-canary-must-not-survive"
+
+    def raises_with_plaintext(_data: bytes, _limits: ExtractionLimits) -> Any:
+        raise ValueError(canary)
+
+    extraction = __import__("iceberg_connectors.extraction", fromlist=["_EXTRACTORS"])
+    monkeypatch.setitem(extraction._EXTRACTORS, "text", raises_with_plaintext)
+
+    result = extract_text(b"attacker controlled", "notes.txt")
+
+    assert result.outcome is ExtractionOutcome.FAILED_PARSE
+    assert result.detail == "ValueError parser failure"
+    assert canary not in result.detail
 
 
 def test_extraction_through_the_sandbox_matches_extraction_without_it() -> None:

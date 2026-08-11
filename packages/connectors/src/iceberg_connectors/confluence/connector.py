@@ -44,7 +44,7 @@ from iceberg_connectors.confluence.client import (
     RateLimited,
     RateLimitPolicy,
 )
-from iceberg_connectors.confluence.storage import body_text, storage_to_text
+from iceberg_connectors.confluence.storage import storage_to_text, supported_body_text
 from iceberg_connectors.extraction import ExtractionLimits, extract_text
 from iceberg_connectors.protocol import ConnectorError, CredentialError, FetchOutcome, TaskSpec
 from iceberg_connectors.sandbox import ExtractionSandbox
@@ -214,12 +214,15 @@ class ConfluenceConnector:
         returns the merged payload, because that response also carries the `webui`
         link every unit on the page needs for its display path.
         """
-        text = body_text(page)
-        if text:
+        supported, text = supported_body_text(page)
+        if supported:
             return page, text
 
         detail = client.get_json(client.url(f"/pages/{page_id}"), params=_body_format())
-        return {**page, **detail}, body_text(detail)
+        supported, text = supported_body_text(detail)
+        if not supported:
+            raise ConnectorError("page response omitted a supported body representation")
+        return {**page, **detail}, text
 
     def _page_units(
         self, text: str, page_id: str, context: _PageContext, outcome: FetchOutcome
@@ -271,9 +274,15 @@ class ConfluenceConnector:
             while pending:
                 comment = pending.popleft()
                 comment_id = str(comment["id"])
-                text = body_text(comment)
+                supported, text = supported_body_text(comment)
 
-                if text:
+                if not supported:
+                    outcome.failed += 1
+                    logger.warning(
+                        "confluence_comment_missing_body",
+                        comment_id=comment_id,
+                    )
+                elif text:
                     outcome.units += 1
                     yield ContentUnit(
                         locator=CoarseLocator(
@@ -362,7 +371,6 @@ class ConfluenceConnector:
                         "confluence_attachment_rejected",
                         name=name,
                         outcome=extracted.outcome.value,
-                        detail=extracted.detail,
                     )
                 continue
 

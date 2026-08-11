@@ -83,6 +83,8 @@ class Comment:
     storage: str
     inline: bool = False
     replies: list[Comment] = field(default_factory=list)
+    include_body: bool = True
+    body_representation: str = "storage"
 
 
 @dataclass(slots=True)
@@ -97,6 +99,9 @@ class Page:
     #: Omit the body from the *list* response, forcing the connector to fetch the
     #: page individually — an older deployment, and a real fallback path.
     body_in_list: bool = True
+    #: Independently omit it from the detail response to model a malformed 200.
+    body_in_detail: bool = True
+    body_representation: str = "storage"
 
     def as_payload(self, space_id: str, *, with_body: bool) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -107,7 +112,12 @@ class Page:
             "_links": {"webui": f"/spaces/SPACE/pages/{self.id}/{self.title}"},
         }
         if with_body:
-            payload["body"] = {"storage": {"value": self.storage, "representation": "storage"}}
+            payload["body"] = {
+                self.body_representation: {
+                    "value": self.storage,
+                    "representation": self.body_representation,
+                }
+            }
         return payload
 
 
@@ -244,7 +254,7 @@ class FakeConfluence:
             if found is None:
                 return httpx2.Response(404, json={"errors": ["no such page"]})
             space, page = found
-            payload = self._with_base(page.as_payload(space.id, with_body=True))
+            payload = self._with_base(page.as_payload(space.id, with_body=page.body_in_detail))
             return httpx2.Response(200, json=payload)
 
         if match := re.fullmatch(r"/pages/([^/]+)/(footer|inline)-comments", path):
@@ -362,10 +372,15 @@ class FakeConfluence:
 
     @staticmethod
     def _comment_payload(comment: Comment) -> dict[str, Any]:
-        return {
-            "id": comment.id,
-            "body": {"storage": {"value": comment.storage, "representation": "storage"}},
-        }
+        payload: dict[str, Any] = {"id": comment.id}
+        if comment.include_body:
+            payload["body"] = {
+                comment.body_representation: {
+                    "value": comment.storage,
+                    "representation": comment.body_representation,
+                }
+            }
+        return payload
 
     # ─── Convenience ──────────────────────────────────────────────────────────
 

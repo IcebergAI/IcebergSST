@@ -212,10 +212,10 @@ def extract_text(
             if sandbox is None
             else sandbox.run(extractor, data, bounds, timeout=bounds.timeout_seconds)
         )
-    except SandboxTimeout as exc:
-        return Extracted(ExtractionOutcome.FAILED_TIMEOUT, detail=str(exc))
-    except SandboxCrashed as exc:
-        return Extracted(ExtractionOutcome.FAILED_PARSE, detail=str(exc))
+    except SandboxTimeout:
+        return Extracted(ExtractionOutcome.FAILED_TIMEOUT, detail="parser timed out")
+    except SandboxCrashed:
+        return Extracted(ExtractionOutcome.FAILED_PARSE, detail="parser process crashed")
     except BombError as exc:
         return Extracted(ExtractionOutcome.REJECTED_BOMB, detail=str(exc))
     except _BinaryContent:
@@ -223,8 +223,10 @@ def extract_text(
     except Exception as exc:
         # Any parser failure. Deliberately broad: the point is that no malformed
         # file can produce an exception this function does not turn into a value.
+        # Exception text is attacker-influenced parser output and may echo document
+        # plaintext, so only the code-owned exception class is retained.
         return Extracted(
-            ExtractionOutcome.FAILED_PARSE, detail=f"{type(exc).__name__}: {exc}"[:200]
+            ExtractionOutcome.FAILED_PARSE, detail=f"{type(exc).__name__} parser failure"
         )
 
     if not parsed.text.strip():
