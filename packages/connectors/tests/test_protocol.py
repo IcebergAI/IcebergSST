@@ -64,7 +64,7 @@ def test_an_empty_source_discovers_nothing_without_erroring() -> None:
 
 
 def test_fetch_yields_units_and_tallies_skips_and_failures(source: FakeConnector) -> None:
-    """One bad page must not fail a scan of fifty thousand — counted, not raised."""
+    """One bad page is counted without hiding readable neighboring units."""
     outcome = FetchOutcome()
 
     units = list(source.fetch({}, TaskSpec("space DOCS", {"space": "DOCS"}), None, outcome))

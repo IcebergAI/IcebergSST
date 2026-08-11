@@ -328,6 +328,17 @@ def test_hostile_outcomes_are_distinguishable_from_ordinary_skips() -> None:
     assert not ExtractionOutcome.EXTRACTED.is_hostile
 
 
+def test_incomplete_outcomes_are_distinguishable_from_policy_skips() -> None:
+    """Incomplete text may not justify reconciliation; an unsupported image may."""
+    assert ExtractionOutcome.REJECTED_TOO_LARGE.is_incomplete
+    assert ExtractionOutcome.REJECTED_BOMB.is_incomplete
+    assert ExtractionOutcome.FAILED_TIMEOUT.is_incomplete
+    assert ExtractionOutcome.FAILED_PARSE.is_incomplete
+    assert not ExtractionOutcome.SKIPPED_UNSUPPORTED.is_incomplete
+    assert not ExtractionOutcome.SKIPPED_BINARY.is_incomplete
+    assert not ExtractionOutcome.SKIPPED_EMPTY.is_incomplete
+
+
 def test_no_input_makes_extract_text_raise() -> None:
     """The contract a connector loop depends on, asserted over the nastiest inputs
     this suite can produce."""

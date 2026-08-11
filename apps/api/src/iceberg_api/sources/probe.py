@@ -34,12 +34,9 @@ from iceberg_core.enums import SourceType
 from iceberg_core.models import Source
 from pydantic import SecretStr
 
-from iceberg_api.sources.schemas import ConnectivityResult
+from iceberg_api.sources.schemas import ConfluenceConnection, ConnectivityResult
 
-#: The cheapest authenticated endpoint per source type: "who am I?".
-PROBE_PATHS: dict[SourceType, str] = {
-    SourceType.CONFLUENCE: "/rest/api/user/current",
-}
+CONFLUENCE_DEFAULT_API_PREFIX = "/wiki/api/v2"
 
 TIMEOUT_SECONDS = 10.0
 
@@ -78,16 +75,17 @@ async def probe_source(
     transport: httpx2.AsyncBaseTransport | None = None,
 ) -> ConnectivityResult:
     """Make one authenticated request and describe what happened."""
-    path = PROBE_PATHS.get(source.type)
-    if path is None:
+    if source.type is not SourceType.CONFLUENCE:
         raise ProbeError(f"no connectivity check is defined for {source.type.value} sources yet")
 
-    base_url = str(source.connection.get("base_url") or "").rstrip("/")
-    if not base_url:
-        raise ProbeError("source connection has no base_url")
+    try:
+        connection = ConfluenceConnection.model_validate(source.connection)
+    except ValueError as exc:
+        raise ProbeError("source connection has an invalid base_url or API configuration") from exc
 
-    url = f"{base_url}{path}"
-    email = str(source.connection.get("email") or "") or None
+    api_prefix = connection.api_prefix or CONFLUENCE_DEFAULT_API_PREFIX
+    url = f"{connection.base_url}{api_prefix}/spaces"
+    email = connection.email
     headers = {
         "Authorization": authorization_header(credential, email=email),
         "Accept": "application/json",
@@ -99,7 +97,10 @@ async def probe_source(
             follow_redirects=False,
             transport=transport,
         ) as client:
-            response = await client.get(url, headers=headers)
+            # Probe the same v2 collection a real discovery starts with. This
+            # keeps custom Server/DC mounts and Cloud's `/wiki` prefix aligned
+            # with the connector without importing engine-side connector code.
+            response = await client.get(url, headers=headers, params={"limit": 1})
     except httpx2.HTTPError as exc:
         # Type name only: an exception string can contain the URL with credentials
         # embedded, and for a DNS failure it adds nothing anyway.

@@ -81,9 +81,9 @@ class RateLimited(ConnectorError):
 class DownloadTooLarge(ConnectorError):
     """A download exceeded its byte cap and was cut off.
 
-    Its own type because the connector's response is specific: count the
-    attachment as skipped and keep going. Extraction would have rejected the file
-    at its input cap anyway, so nothing was lost by stopping early.
+    Its own type because the connector's response is specific: mark the attachment
+    incomplete and keep scanning neighboring units. The resulting failed task
+    keeps the scan partial, so unseen content cannot drive reconciliation.
     """
 
     def __init__(self, seen: int) -> None:
@@ -181,6 +181,18 @@ class ConfluenceClient:
 
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip("/")
+        # Compatibility for sources saved from the old UI/seed example. The API
+        # prefix already carries `/wiki`; leaving it on the base produces
+        # `/wiki/wiki/api/v2`. Only the exact Cloud context with the default prefix
+        # is normalised, so custom Server/DC context paths remain untouched.
+        split = urlsplit(self.base_url)
+        if (
+            self.api_prefix == DEFAULT_API_PREFIX
+            and split.path.rstrip("/") == "/wiki"
+            and not split.query
+            and not split.fragment
+        ):
+            self.base_url = f"{split.scheme}://{split.netloc}"
         self.link_base = self.link_base.rstrip("/")
 
     # ─── Collections ──────────────────────────────────────────────────────────

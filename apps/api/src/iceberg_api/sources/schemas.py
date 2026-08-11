@@ -11,7 +11,8 @@ Two rules shape these:
 """
 
 import uuid
-from typing import Any
+from typing import Any, Self
+from urllib.parse import urlsplit, urlunsplit
 
 from croniter import croniter
 from iceberg_core.enums import SourceType
@@ -95,6 +96,25 @@ class ConfluenceConnection(BaseModel):
             # missing its leading slash fails hours later inside a scan task.
             raise ValueError("api_prefix must be an absolute path like /wiki/api/v2")
         return trimmed
+
+    @model_validator(mode="after")
+    def _normalise_cloud_context(self) -> Self:
+        """Store the Cloud site root, accepting the legacy ``/wiki`` example.
+
+        The client appends the default ``/wiki/api/v2`` prefix.  Normalising only
+        an exact ``/wiki`` context with the default prefix preserves Server/DC
+        deployments whose custom context and API mount are intentional.
+        """
+        split = urlsplit(self.base_url)
+        default_cloud_prefix = self.api_prefix in {None, "/wiki/api/v2"}
+        if (
+            default_cloud_prefix
+            and split.path.rstrip("/") == "/wiki"
+            and not split.query
+            and not split.fragment
+        ):
+            self.base_url = urlunsplit((split.scheme, split.netloc, "", "", ""))
+        return self
 
     @field_validator("spaces")
     @classmethod

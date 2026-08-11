@@ -57,18 +57,22 @@ class Attachment:
     declared_size: int | None = None
     #: Answer the download with this status instead of the bytes.
     download_status: int = 200
+    #: Omit ``downloadLink`` to model a malformed/incomplete API result.
+    include_download_link: bool = True
 
     def as_payload(self, attachment_id: str) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "id": attachment_id,
             "title": self.title,
             "mediaType": self.media_type,
             "fileSize": self.declared_size if self.declared_size is not None else len(self.data),
+        }
+        if self.include_download_link:
             # Relative to the context base in `_links.base` and outside the API
             # prefix, exactly as v2 returns it — the detail a client that resolved
             # links against the prefix, or against the bare site root, gets wrong.
-            "downloadLink": f"/download/attachments/{attachment_id}/{self.title}",
-        }
+            payload["downloadLink"] = f"/download/attachments/{attachment_id}/{self.title}"
+        return payload
 
 
 @dataclass(slots=True)
@@ -78,6 +82,7 @@ class Comment:
     id: str
     storage: str
     inline: bool = False
+    replies: list[Comment] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -249,13 +254,20 @@ class FakeConfluence:
             inline = match[2] == "inline"
             comments = [c for c in found[1].comments if c.inline == inline]
             return self._collection(
-                [
-                    {
-                        "id": c.id,
-                        "body": {"storage": {"value": c.storage, "representation": "storage"}},
-                    }
-                    for c in comments
-                ],
+                [self._comment_payload(c) for c in comments],
+                path,
+                params,
+            )
+
+        if match := re.fullmatch(r"/(footer|inline)-comments/([^/]+)/children", path):
+            comment = self._comment(match[2])
+            if comment is None:
+                return httpx2.Response(404, json={"errors": ["no such comment"]})
+            inline = match[1] == "inline"
+            if comment.inline != inline:
+                return httpx2.Response(404, json={"errors": ["wrong comment type"]})
+            return self._collection(
+                [self._comment_payload(reply) for reply in comment.replies],
                 path,
                 params,
             )
@@ -336,6 +348,24 @@ class FakeConfluence:
                 if page.id == page_id:
                     return space, page
         return None
+
+    def _comment(self, comment_id: str) -> Comment | None:
+        pending = [
+            comment for space in self.spaces for page in space.pages for comment in page.comments
+        ]
+        while pending:
+            comment = pending.pop()
+            if comment.id == comment_id:
+                return comment
+            pending.extend(comment.replies)
+        return None
+
+    @staticmethod
+    def _comment_payload(comment: Comment) -> dict[str, Any]:
+        return {
+            "id": comment.id,
+            "body": {"storage": {"value": comment.storage, "representation": "storage"}},
+        }
 
     # ─── Convenience ──────────────────────────────────────────────────────────
 

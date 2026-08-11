@@ -9,17 +9,12 @@ import base64
 
 import httpx2
 import pytest
-from iceberg_api.sources.probe import (
-    PROBE_PATHS,
-    ProbeError,
-    authorization_header,
-    probe_source,
-)
+from iceberg_api.sources.probe import ProbeError, authorization_header, probe_source
 from iceberg_core.enums import SourceType
 from iceberg_core.models import Source
 from pydantic import SecretStr
 
-BASE_URL = "https://example.atlassian.net/wiki"
+BASE_URL = "https://example.atlassian.net"
 BASIC_CREDENTIAL = SecretStr("admin@example.test:api-token")
 BEARER_CREDENTIAL = SecretStr("a-personal-access-token")
 
@@ -83,6 +78,56 @@ async def test_the_probe_reads_the_email_from_the_connection_blob() -> None:
 
 
 @pytest.mark.anyio
+async def test_a_normalised_cloud_root_probes_the_scanners_v2_spaces_surface() -> None:
+    sent: list[httpx2.Request] = []
+    source = Source(
+        name="probe-target",
+        type=SourceType.CONFLUENCE,
+        connection={"base_url": BASE_URL, "email": "admin@example.test"},
+    )
+
+    await probe_source(source, SecretStr("api-token"), transport=_transport(capture=sent))
+
+    assert str(sent[0].url) == f"{BASE_URL}/wiki/api/v2/spaces?limit=1"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("connection", "expected"),
+    [
+        (
+            {"base_url": f"{BASE_URL}/wiki", "email": "admin@example.test"},
+            f"{BASE_URL}/wiki/api/v2/spaces?limit=1",
+        ),
+        (
+            {
+                "base_url": BASE_URL,
+                "email": "admin@example.test",
+                "api_prefix": "/confluence/api/v2",
+            },
+            f"{BASE_URL}/confluence/api/v2/spaces?limit=1",
+        ),
+        (
+            {
+                "base_url": "https://server.example.test/confluence",
+                "api_prefix": "/rest/api/v2",
+            },
+            "https://server.example.test/confluence/rest/api/v2/spaces?limit=1",
+        ),
+    ],
+)
+async def test_probe_preserves_legacy_cloud_and_custom_server_contexts(
+    connection: dict[str, str], expected: str
+) -> None:
+    sent: list[httpx2.Request] = []
+    source = Source(name="probe-target", type=SourceType.CONFLUENCE, connection=connection)
+
+    await probe_source(source, SecretStr("api-token"), transport=_transport(capture=sent))
+
+    assert str(sent[0].url) == expected
+
+
+@pytest.mark.anyio
 async def test_a_successful_probe_hits_the_expected_url_with_the_credential() -> None:
     sent: list[httpx2.Request] = []
 
@@ -90,7 +135,7 @@ async def test_a_successful_probe_hits_the_expected_url_with_the_credential() ->
 
     assert result.reachable is True
     assert result.status_code == 200
-    assert str(sent[0].url) == f"{BASE_URL}{PROBE_PATHS[SourceType.CONFLUENCE]}"
+    assert str(sent[0].url) == f"{BASE_URL}/wiki/api/v2/spaces?limit=1"
     assert sent[0].headers["authorization"].startswith("Basic ")
 
 

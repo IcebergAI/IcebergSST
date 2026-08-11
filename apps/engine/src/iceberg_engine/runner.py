@@ -112,6 +112,20 @@ class TaskReport:
         return submission
 
 
+def _incomplete_content_error(failed: int, truncated: int) -> str | None:
+    """A content-free reason suitable for the API and durable task state."""
+    if failed and not truncated:
+        noun = "unit" if failed == 1 else "units"
+        return f"{failed} requested content {noun} could not be read"
+    if truncated and not failed:
+        noun = "unit" if truncated == 1 else "units"
+        verb = "was" if truncated == 1 else "were"
+        return f"{truncated} requested content {noun} {verb} truncated"
+    if failed and truncated:
+        return f"{failed} requested content units could not be read and {truncated} were truncated"
+    return None
+
+
 def run_task(
     task_id: uuid.UUID,
     *,
@@ -250,9 +264,15 @@ def _discover(connector: Connector, lease: Lease, report: TaskReport) -> None:
     this one, so a crash cannot record the discovery as done yet lose what it
     found (ADR 0009).
     """
-    specs = list(connector.discover(lease.connection, lease.credential))
-    report.task_specs = [spec.as_payload() for spec in specs]
-    report.counts["specs_discovered"] = len(specs)
+    try:
+        for spec in connector.discover(lease.connection, lease.credential):
+            # Append as discovery progresses so a late failure (for example one
+            # configured space missing after other matches) does not discard the
+            # matched spaces.  The failed discovery keeps the overall scan partial,
+            # so fetching these specs can surface findings but cannot reconcile.
+            report.task_specs.append(spec.as_payload())
+    finally:
+        report.counts["specs_discovered"] = len(report.task_specs)
 
 
 def _fetch(
@@ -307,6 +327,15 @@ def _fetch(
             **tallies,
             "prefiltered": filtered.suppressed_count,
         }
+        if error := _incomplete_content_error(outcome.failed, tallies["units_truncated"]):
+            # Findings from readable units are still valuable and the API ingests
+            # them even for a failed task.  The status is nevertheless failed:
+            # calling a partial read completed would let source-wide reconciliation
+            # auto-resolve findings in the content the connector could not read.
+            # Keep the error content-free; connector resource details remain in
+            # the engine log and may contain attacker-controlled names.
+            report.status = "failed"
+            report.error = error
 
 
 def _candidates(

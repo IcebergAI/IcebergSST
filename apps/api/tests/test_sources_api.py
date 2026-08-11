@@ -226,7 +226,7 @@ def test_a_trailing_slash_in_the_base_url_is_normalised(
 
     body = _create(client, headers, connection={"base_url": "https://example.atlassian.net/wiki/"})
 
-    assert body["connection"]["base_url"] == "https://example.atlassian.net/wiki"  # type: ignore[index]
+    assert body["connection"]["base_url"] == "https://example.atlassian.net"  # type: ignore[index]
 
 
 @pytest.mark.parametrize("unsupported", ["jira", "smb"])

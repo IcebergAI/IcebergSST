@@ -58,14 +58,13 @@ because the content is by definition hostile and the parsers are third-party.
 | Mitigation | Evidence |
 |---|---|
 | Size caps, extraction timeouts, decompression-ratio limits | `packages/connectors/tests/test_sandbox.py`, `test_extraction.py` |
-| Per-unit failure isolation: one bad attachment does not fail a scan | `test_extraction.py`, `apps/engine/tests/test_runner.py` |
+| Per-unit isolation preserves readable findings, while incomplete content makes the scan partial | `test_extraction.py`, `test_confluence_connector.py`, `apps/engine/tests/test_runner.py` |
 | Redaction happens in the engine, before results leave it | `packages/core/tests/test_redaction.py` |
 | Dropped and clipped matches do not leak plaintext | `test_redaction.py` (ADR 0004) |
 
-**Residual risk, stated:** a memory-safety bug in `pypdf` or the standard library's parsers is not
-mitigated by any of the above. The controls bound the blast radius (non-root, read-only rootfs, no
-database credentials, no master key) rather than prevent it. Out-of-process sandboxing of extraction
-remains the honest next step.
+**Residual risk, stated:** child-process isolation bounds parser crashes, time, and address space;
+it does not prove third-party parsers memory-safe. Container controls further bound the blast radius
+(non-root, read-only rootfs, no database credentials, no master key).
 
 ### 5. Engine ↔ source API
 

@@ -27,9 +27,12 @@ a caller that stops early still needs the tallies.
 be indistinguishable from one that found no secrets.
 
 **Errors split by operator response.** `CredentialError` means rotate the credential — retrying
-will not help. Other `ConnectorError`s fail the task. A single unreadable page is neither: it is
-counted in `FetchOutcome.failed` and the scan continues, because one bad page must not fail a scan
-of fifty thousand.
+will not help. Other `ConnectorError`s abort the task immediately. A per-unit failure is counted in
+`FetchOutcome.failed` and scanning continues so findings from readable neighbors survive. The
+engine then fails the fetch task and the API marks the scan partial; reconciliation and completion
+notifications run only after a complete scan. This makes “could not read” distinct from “secret is
+gone.” Policy exclusions such as images, unsupported formats, and genuinely empty text remain
+ordinary skips.
 
 ### ContentUnit
 Normalized input to detection:
@@ -71,6 +74,11 @@ that are. Both arrive as one opaque string from the task lease; the `email` fiel
 connection blob picks between them. That keeps Cloud specifics out of the `Connector` protocol,
 which only knows "a credential".
 
+For Cloud, configure `base_url` as the site root, for example
+`https://example.atlassian.net`, **without** `/wiki`; the default `api_prefix` is
+`/wiki/api/v2`. The API and client normalize the old exact `/wiki` form for compatibility. A
+Server/DC context path is preserved when paired with its explicit custom `api_prefix`.
+
 The credential is never logged. `Credential.__repr__` is overridden rather than trusted, because
 structlog and tracebacks both render values with `repr` and a token printed once into a log
 aggregator has to be rotated.
@@ -104,7 +112,7 @@ every remaining page in the space.
 | Origin | Source | Locator `sub_resource` |
 |---|---|---|
 | `body` | page storage format → text | *(none)* |
-| `comment` | footer **and** inline comments | `comment:<id>` |
+| `comment` | footer and inline comments, including cursor-paginated nested replies | `comment:<id>` |
 | `attachment` | text-extractable files via `extract_text` | `attachment:<filename>` |
 
 Comments are separate units rather than appended to the body: they are separate things to fix, and
@@ -122,7 +130,9 @@ they dominate the space count on a large site, and scanning them should be a del
 
 Attachment size is checked twice — against the declared `fileSize` so an oversized file costs no
 bandwidth, and against the bytes actually arriving, because that declaration comes from the same
-place the file does. Both produce a *skip*, not a failure.
+place the file does. Both mark the task incomplete. So do malformed, bomb-like, timed-out, or
+truncated requested documents; usable extracted prefixes are still scanned. Unsupported, binary,
+and empty files remain policy skips.
 
 ### Storage format → text
 
@@ -159,9 +169,10 @@ What it does not do is validate requests against Atlassian's OpenAPI schema, so 
 upstream passes here and fails in production. That risk is accepted — the alternative is no offline
 test at all.
 
-`tests/test_confluence_pipeline.py` runs the whole loop against it: lease → REST → storage→text →
-detect → fingerprint → redact → pre-filter → submission, asserting a seeded secret surfaces redacted
-and that fingerprints survive a re-scan of edited content.
+`tests/test_confluence_pipeline.py` runs the engine-side loop against it: lease → REST →
+storage→text → detect → fingerprint → redact → pre-filter → submission. The controlled-pilot
+acceptance in `apps/api/tests/test_controlled_pilot.py` crosses the real signed OIDC, CSRF/RBAC,
+engine lease/results, database ingest, triage/audit, outbox, and signed webhook boundaries as well.
 
 ## Post-MVP connectors
 - **Jira** — issues, comments, attachments (same interface, similar auth).
@@ -184,7 +195,8 @@ hand it anything and get an answer back:
 | `failed_timeout` | The parser did not finish; its child was killed |
 | `failed_parse` | The parser raised, or crashed its child |
 
-`is_hostile` separates the ones worth an operator's attention from an ordinary PNG.
+`is_hostile` separates the ones worth an operator's attention from an ordinary PNG;
+`is_incomplete` separates outcomes that must make the scan partial from policy skips.
 
 Formats: text/code/config by extension (an allowlist, so a new binary format nobody denylisted is
 not decoded as garbage), ZIP-backed office documents through their XML parts, and PDF through its
@@ -217,4 +229,5 @@ surface (`docs/security.md`, boundary 4). Five guards, each for a failure the ot
   never returns to the interpreter to notice it. A hang is a timeout and the child is killed; a
   segfault takes the child only. The pool is reused across files and replaced only when a child is
   actually lost.
-- **Per-unit failure isolation** — the sum of the above. One hostile file costs one content unit.
+- **Per-unit failure isolation** — the sum of the above. One hostile file does not stop readable
+  neighbors from producing findings, but it makes the fetch task fail and the scan partial.

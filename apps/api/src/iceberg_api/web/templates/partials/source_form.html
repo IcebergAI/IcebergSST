@@ -49,8 +49,8 @@
       Base URL
       <input class="field" name="base_url" required inputmode="url"
              value="{{ connection.get('base_url', '') }}"
-             placeholder="https://example.atlassian.net/wiki">
-      <span class="field-hint">The instance root. Validated on save, not hours later inside a scan.</span>
+             placeholder="https://example.atlassian.net">
+      <span class="field-hint">The site root without <code>/wiki</code>. Validated on save.</span>
     </label>
 
     <label>
