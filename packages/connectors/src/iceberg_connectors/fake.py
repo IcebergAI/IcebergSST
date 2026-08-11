@@ -81,8 +81,8 @@ class FakeConnector:
                 outcome.skipped += 1
                 continue
             if page.unreadable:
-                # One bad page must not fail a scan of fifty thousand: counted,
-                # and the scan reports it rather than dying on it.
+                # Keep yielding readable neighbors, then let the runner turn this
+                # incomplete count into a failed task and partial scan.
                 outcome.failed += 1
                 continue
 

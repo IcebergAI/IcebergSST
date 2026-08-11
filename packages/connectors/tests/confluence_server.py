@@ -57,18 +57,22 @@ class Attachment:
     declared_size: int | None = None
     #: Answer the download with this status instead of the bytes.
     download_status: int = 200
+    #: Omit ``downloadLink`` to model a malformed/incomplete API result.
+    include_download_link: bool = True
 
     def as_payload(self, attachment_id: str) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "id": attachment_id,
             "title": self.title,
             "mediaType": self.media_type,
             "fileSize": self.declared_size if self.declared_size is not None else len(self.data),
+        }
+        if self.include_download_link:
             # Relative to the context base in `_links.base` and outside the API
             # prefix, exactly as v2 returns it — the detail a client that resolved
             # links against the prefix, or against the bare site root, gets wrong.
-            "downloadLink": f"/download/attachments/{attachment_id}/{self.title}",
-        }
+            payload["downloadLink"] = f"/download/attachments/{attachment_id}/{self.title}"
+        return payload
 
 
 @dataclass(slots=True)
@@ -78,6 +82,9 @@ class Comment:
     id: str
     storage: str
     inline: bool = False
+    replies: list[Comment] = field(default_factory=list)
+    include_body: bool = True
+    body_representation: str = "storage"
 
 
 @dataclass(slots=True)
@@ -92,6 +99,9 @@ class Page:
     #: Omit the body from the *list* response, forcing the connector to fetch the
     #: page individually — an older deployment, and a real fallback path.
     body_in_list: bool = True
+    #: Independently omit it from the detail response to model a malformed 200.
+    body_in_detail: bool = True
+    body_representation: str = "storage"
 
     def as_payload(self, space_id: str, *, with_body: bool) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -102,7 +112,12 @@ class Page:
             "_links": {"webui": f"/spaces/SPACE/pages/{self.id}/{self.title}"},
         }
         if with_body:
-            payload["body"] = {"storage": {"value": self.storage, "representation": "storage"}}
+            payload["body"] = {
+                self.body_representation: {
+                    "value": self.storage,
+                    "representation": self.body_representation,
+                }
+            }
         return payload
 
 
@@ -239,7 +254,7 @@ class FakeConfluence:
             if found is None:
                 return httpx2.Response(404, json={"errors": ["no such page"]})
             space, page = found
-            payload = self._with_base(page.as_payload(space.id, with_body=True))
+            payload = self._with_base(page.as_payload(space.id, with_body=page.body_in_detail))
             return httpx2.Response(200, json=payload)
 
         if match := re.fullmatch(r"/pages/([^/]+)/(footer|inline)-comments", path):
@@ -249,13 +264,20 @@ class FakeConfluence:
             inline = match[2] == "inline"
             comments = [c for c in found[1].comments if c.inline == inline]
             return self._collection(
-                [
-                    {
-                        "id": c.id,
-                        "body": {"storage": {"value": c.storage, "representation": "storage"}},
-                    }
-                    for c in comments
-                ],
+                [self._comment_payload(c) for c in comments],
+                path,
+                params,
+            )
+
+        if match := re.fullmatch(r"/(footer|inline)-comments/([^/]+)/children", path):
+            comment = self._comment(match[2])
+            if comment is None:
+                return httpx2.Response(404, json={"errors": ["no such comment"]})
+            inline = match[1] == "inline"
+            if comment.inline != inline:
+                return httpx2.Response(404, json={"errors": ["wrong comment type"]})
+            return self._collection(
+                [self._comment_payload(reply) for reply in comment.replies],
                 path,
                 params,
             )
@@ -336,6 +358,29 @@ class FakeConfluence:
                 if page.id == page_id:
                     return space, page
         return None
+
+    def _comment(self, comment_id: str) -> Comment | None:
+        pending = [
+            comment for space in self.spaces for page in space.pages for comment in page.comments
+        ]
+        while pending:
+            comment = pending.pop()
+            if comment.id == comment_id:
+                return comment
+            pending.extend(comment.replies)
+        return None
+
+    @staticmethod
+    def _comment_payload(comment: Comment) -> dict[str, Any]:
+        payload: dict[str, Any] = {"id": comment.id}
+        if comment.include_body:
+            payload["body"] = {
+                comment.body_representation: {
+                    "value": comment.storage,
+                    "representation": comment.body_representation,
+                }
+            }
+        return payload
 
     # ─── Convenience ──────────────────────────────────────────────────────────
 

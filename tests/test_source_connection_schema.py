@@ -21,6 +21,7 @@ from types import ModuleType
 import iceberg_connectors.confluence.connector as confluence_connector
 from iceberg_api.sources import probe
 from iceberg_api.sources.schemas import ConfluenceConnection
+from iceberg_connectors.confluence.client import ConfluenceClient
 
 #: Keys the connector tolerates as fallbacks in hand-authored blobs, mapped to
 #: the canonical field the API stores instead. The schema deliberately offers
@@ -71,9 +72,37 @@ def test_every_key_the_connector_reads_is_a_schema_field() -> None:
 
 
 def test_the_probe_reads_only_storable_keys() -> None:
-    """The probe authenticates from the same blob a scan does; a key it reads
-    that the schema forbids would make `POST /sources/{id}/test` and a real scan
-    disagree about the source's configuration."""
+    """The probe validates the blob through the same model the API stores."""
     read = _keys_read_from_connection(probe)
-    assert read  # the probe reads base_url at minimum
     assert read <= set(ConfluenceConnection.model_fields)
+    assert "ConfluenceConnection.model_validate(source.connection)" in inspect.getsource(probe)
+
+
+def test_a_legacy_cloud_wiki_url_builds_the_v2_path_once() -> None:
+    """Older UI/seed examples included Cloud's context path in ``base_url``.
+    Normalisation must protect both new writes and already stored connection blobs."""
+    connection = ConfluenceConnection.model_validate(
+        {"base_url": "https://example.atlassian.net/wiki/"}
+    )
+    client = ConfluenceClient(base_url="https://example.atlassian.net/wiki/")
+
+    assert connection.base_url == "https://example.atlassian.net"
+    assert client.url("/spaces") == "https://example.atlassian.net/wiki/api/v2/spaces"
+
+
+def test_a_custom_server_context_and_api_prefix_are_preserved() -> None:
+    connection = ConfluenceConnection.model_validate(
+        {
+            "base_url": "https://confluence.example.test/confluence",
+            "api_prefix": "/rest/api/v2",
+        }
+    )
+    client = ConfluenceClient(
+        base_url=connection.base_url,
+        api_prefix=connection.api_prefix or "/wiki/api/v2",
+    )
+
+    assert connection.base_url == "https://confluence.example.test/confluence"
+    assert client.url("/spaces") == (
+        "https://confluence.example.test/confluence/rest/api/v2/spaces"
+    )

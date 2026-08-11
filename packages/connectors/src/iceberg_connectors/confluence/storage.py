@@ -104,21 +104,32 @@ def storage_to_text(storage: str) -> str:
     return _BREAK_RUN.sub("\n", text).strip()
 
 
-def body_text(resource: Mapping[str, Any]) -> str:
-    """Pull the storage body out of a v2 page/comment payload and flatten it.
+def supported_body_text(resource: Mapping[str, Any]) -> tuple[bool, str]:
+    """Return whether a supported body was present, plus its flattened text.
 
-    Tolerant of a body that is missing: a page whose body did not come back is a
-    page with no text to scan, not a task failure. ``view`` is accepted as a
-    fallback because it is rendered HTML and flattens the same way; ADF
-    (``atlas_doc_format``) is JSON and deliberately not handled here — running it
-    through an XHTML flattener would produce structure, not prose.
+    Presence is separate from text because an explicit empty body is a legitimate
+    empty page, while a successful response that omits every requested
+    representation is unread content.  Treating both as ``""`` lets the latter
+    reconcile an older finding as though the page had been cleared.
     """
     body = resource.get("body")
-    if not isinstance(body, dict):
-        return ""
+    if not isinstance(body, Mapping):
+        return False, ""
 
     for representation in ("storage", "view"):
         holder = body.get(representation)
-        if isinstance(holder, dict) and holder.get("value"):
-            return storage_to_text(str(holder["value"]))
-    return ""
+        if isinstance(holder, Mapping) and "value" in holder and isinstance(holder["value"], str):
+            return True, storage_to_text(holder["value"])
+    return False, ""
+
+
+def body_text(resource: Mapping[str, Any]) -> str:
+    """Pull a supported v2 page/comment body out and flatten it.
+
+    ``view`` is accepted as a fallback because it is rendered HTML and flattens
+    the same way. ADF (``atlas_doc_format``) is JSON and deliberately not handled
+    here — running it through an XHTML flattener would produce structure, not
+    prose. Callers that need fail-closed coverage use :func:`supported_body_text`
+    to distinguish missing from explicitly empty content.
+    """
+    return supported_body_text(resource)[1]

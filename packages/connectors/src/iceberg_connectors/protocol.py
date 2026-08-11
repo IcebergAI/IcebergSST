@@ -29,9 +29,10 @@ class ConnectorError(Exception):
     """A connector could not do its job.
 
     Raised for conditions the *task* cannot recover from — bad credentials, a
-    source that does not answer. A single unreadable page is not this: connectors
-    skip and count those, because one bad page should not fail a scan of fifty
-    thousand (:class:`FetchOutcome`).
+    source that does not answer. A single unreadable page is counted in
+    :class:`FetchOutcome` instead so the connector can continue and preserve
+    findings from readable units. The engine still fails the task afterward,
+    making the scan partial and disabling reconciliation and notifications.
     """
 
 
@@ -123,7 +124,7 @@ class Connector(Protocol):
         credential: str | None,
         outcome: FetchOutcome,
     ) -> Iterator[ContentUnit]:
-        """Yield the content units for one spec, tallying skips into ``outcome``.
+        """Yield units for one spec, tallying skips and failures into ``outcome``.
 
         ``outcome`` is passed in rather than returned because this is a generator:
         the caller needs the tallies even if it stops consuming early, which a

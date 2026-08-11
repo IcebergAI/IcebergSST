@@ -81,7 +81,7 @@ def test_creating_a_source_from_the_form_drives_the_sources_api(
 
     source = session.exec(select(Source).where(Source.name == "confluence-eng")).one()
     assert source.type is SourceType.CONFLUENCE
-    assert source.connection["base_url"] == "https://example.atlassian.net/wiki"
+    assert source.connection["base_url"] == "https://example.atlassian.net"
     assert source.connection["spaces"] == ["ENG", "OPS"]
     assert source.connection["email"] == "scanner@example.com"
     # Sealed through the secret store, not stored as typed.

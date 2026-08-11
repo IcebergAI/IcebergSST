@@ -18,7 +18,11 @@ from confluence_server import (
     storage_code_macro,
     storage_page,
 )
-from iceberg_connectors.confluence.storage import body_text, storage_to_text
+from iceberg_connectors.confluence.storage import (
+    body_text,
+    storage_to_text,
+    supported_body_text,
+)
 
 # ─── Markup goes ──────────────────────────────────────────────────────────────
 
@@ -153,6 +157,7 @@ def test_an_unterminated_tag_does_not_eat_the_document() -> None:
 
 def test_an_empty_body_is_empty_text() -> None:
     assert storage_to_text("") == ""
+    assert supported_body_text({"body": {"storage": {"value": ""}}}) == (True, "")
 
 
 def test_empty_elements_do_not_become_blank_lines() -> None:
@@ -191,8 +196,8 @@ def test_adf_is_not_flattened_as_xhtml() -> None:
 
 
 def test_a_missing_body_is_no_text_rather_than_an_error() -> None:
-    """A page whose body did not come back is a page with nothing to scan, not a
-    task failure — one page must not fail a scan of fifty thousand."""
+    """The tolerant text helper remains convenient for display-only callers."""
     assert body_text({}) == ""
     assert body_text({"body": None}) == ""
     assert body_text({"body": {}}) == ""
+    assert supported_body_text({}) == (False, "")

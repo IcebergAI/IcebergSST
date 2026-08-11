@@ -19,7 +19,7 @@ from typing import Any
 import httpx2
 import pytest
 from dramatiq.middleware import TimeLimitExceeded
-from iceberg_connectors import ConnectorError, FakeConnector, FakePage, registry
+from iceberg_connectors import ConnectorError, FakeConnector, FakePage, TaskSpec, registry
 from iceberg_detect import load_named_pack
 from iceberg_engine.api_client import EngineClient
 from iceberg_engine.runner import run_task
@@ -146,6 +146,27 @@ def test_a_discovery_task_reports_specs_rather_than_findings() -> None:
     assert [spec["params"]["space"] for spec in submission["task_specs"]] == ["DOCS"]
     assert submission["findings"] == []
     assert submission["status"] == "completed"
+
+
+def test_a_failed_discovery_keeps_specs_found_before_the_failure() -> None:
+    """Matched spaces remain useful work even when another explicitly requested
+    space is missing.  The failed discovery keeps the eventual scan partial."""
+
+    class PartlyDiscoverable(FakeConnector):
+        def discover(self, *args: Any, **kwargs: Any) -> Iterator[TaskSpec]:
+            yield TaskSpec(label="space DOCS", params={"space": "DOCS"})
+            raise ConnectorError("configured space MISSING was not found")
+
+    registry.clear()
+    registry.register(PartlyDiscoverable())
+    api = Api(_lease(kind="discovery", spec={}))
+
+    report = run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    assert report is not None and report.status == "failed"
+    assert api.submission["status"] == "failed"
+    assert api.submission["task_specs"] == [{"label": "space DOCS", "params": {"space": "DOCS"}}]
+    assert api.submission["counts"]["specs_discovered"] == 1
 
 
 def test_the_lease_suppressions_are_applied_before_reporting() -> None:
@@ -302,8 +323,10 @@ def test_an_unexpected_bug_is_still_reported() -> None:
     assert "something nobody anticipated" not in api.submission["error"]
 
 
-def test_a_page_the_source_could_not_read_is_counted_not_fatal() -> None:
-    """One bad page must not fail a scan of fifty thousand."""
+def test_unreadable_requested_content_fails_closed_without_dropping_findings() -> None:
+    """A partial result may be useful, but it is never proof that missing secrets
+    were remediated.  The failed task keeps findings from readable units while its
+    scan status prevents reconciliation and notifications (ADR 0009 §4)."""
     registry.clear()
     registry.register(
         FakeConnector(
@@ -314,9 +337,29 @@ def test_a_page_the_source_could_not_read_is_counted_not_fatal() -> None:
 
     run_task(TASK_ID, client=_client(api), pack=PACK)
 
-    assert api.submission["status"] == "completed"
+    assert api.submission["status"] == "failed"
+    assert api.submission["error"] == "1 requested content unit could not be read"
     assert api.submission["counts"]["units_failed"] == 1
     assert len(api.submission["findings"]) == 1
+
+
+def test_detection_truncation_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A detector cap keeps work bounded, but content past the cap remains unread
+    and therefore cannot justify reconciliation."""
+    from iceberg_detect import DetectionResult
+
+    monkeypatch.setattr(
+        "iceberg_engine.runner.detect",
+        lambda *_args, **_kwargs: DetectionResult(truncated=True),
+    )
+    api = Api()
+
+    report = run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    assert report is not None and report.status == "failed"
+    assert api.submission["counts"]["units_truncated"] == 2
+    assert api.submission["status"] == "failed"
+    assert api.submission["error"] == "2 requested content units were truncated"
 
 
 def test_a_cancelled_task_is_abandoned_without_reporting() -> None:

@@ -63,6 +63,40 @@ logger = structlog.get_logger()
 REPORTABLE_STATUSES = (ScanTaskStatus.COMPLETED, ScanTaskStatus.FAILED)
 
 
+def _effective_outcome(body: ResultsSubmission) -> tuple[ScanTaskStatus, str | None]:
+    """Fail closed when a connector could not read requested content.
+
+    Engines report both a task status and connector tallies.  Older engines could
+    truthfully report ``units_failed`` while still labelling the task completed;
+    trusting that label lets source-wide reconciliation treat unread content as
+    evidence that its old findings disappeared.  The API is the only writer of
+    record, so it enforces the invariant at ingest as well as relying on current
+    runners to send the correct status.
+    """
+    failed_units = body.counts.get("units_failed", 0)
+    truncated_units = body.counts.get("units_truncated", 0)
+    if body.status is ScanTaskStatus.COMPLETED and failed_units > 0 and not truncated_units:
+        noun = "unit" if failed_units == 1 else "units"
+        return (
+            ScanTaskStatus.FAILED,
+            f"{failed_units} requested content {noun} could not be read",
+        )
+    if body.status is ScanTaskStatus.COMPLETED and truncated_units > 0 and not failed_units:
+        noun = "unit" if truncated_units == 1 else "units"
+        verb = "was" if truncated_units == 1 else "were"
+        return (
+            ScanTaskStatus.FAILED,
+            f"{truncated_units} requested content {noun} {verb} truncated",
+        )
+    if body.status is ScanTaskStatus.COMPLETED and (failed_units > 0 or truncated_units > 0):
+        return (
+            ScanTaskStatus.FAILED,
+            f"{failed_units} requested content units could not be read and "
+            f"{truncated_units} were truncated",
+        )
+    return body.status, body.error
+
+
 def _rulepack_record(report: RulepackReport) -> dict[str, object]:
     """The stored shape of a reported rule pack. Metadata only — never a regex."""
     return report.model_dump(mode="json")
@@ -328,11 +362,15 @@ async def submit_results(
 
     outcome = ingest.IngestOutcome()
     fetch_tasks: list[ScanTask] = []
+    task_status, task_error = _effective_outcome(body)
 
     if task.kind is ScanTaskKind.DISCOVERY:
-        if body.status is ScanTaskStatus.COMPLETED:
+        if body.task_specs:
             # Created in the same transaction that completes the discovery task: a
             # crash cannot record the discovery as done yet lose what it discovered.
+            # Specs yielded before a late discovery failure are still safe to scan:
+            # the failed discovery keeps the overall scan partial, so their findings
+            # are ingested but the incomplete source can never reconcile.
             fetch_tasks = service.create_fetch_tasks(db, scan, body.task_specs)
     elif body.findings:
         # Ingested whatever the task's outcome. A connector that dies halfway
@@ -352,7 +390,7 @@ async def submit_results(
     ingest.merge_scan_counts(scan, outcome, body.counts)
     if body.rulepack_version:
         scan.rulepack_version = body.rulepack_version
-    service.complete_task(db, task, status=body.status, error=body.error, now=now)
+    service.complete_task(db, task, status=task_status, error=task_error, now=now)
     db.add(scan)
     db.commit()
 

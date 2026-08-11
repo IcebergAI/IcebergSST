@@ -19,6 +19,7 @@ def test_seeding_creates_a_disabled_source_with_a_sealed_credential(
 
     assert source.name == DEMO_SOURCE_NAME
     assert source.enabled is False
+    assert source.connection["base_url"] == "https://example.atlassian.net"
     assert source.credential_ref is not None
     assert PLACEHOLDER_CREDENTIAL not in source.credential_ref
     assert secret_store.open(source.credential_ref).get_secret_value() == PLACEHOLDER_CREDENTIAL

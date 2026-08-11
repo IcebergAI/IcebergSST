@@ -40,7 +40,7 @@ def seed(session: Session, store: SecretStore) -> Source:
     source = Source(
         name=DEMO_SOURCE_NAME,
         type=SourceType.CONFLUENCE,
-        connection={"base_url": "https://example.atlassian.net/wiki", "spaces": ["DEMO"]},
+        connection={"base_url": "https://example.atlassian.net", "spaces": ["DEMO"]},
         # Sealed through the same interface the API uses, so the fixture exercises
         # the real path rather than writing a plaintext placeholder.
         credential_ref=store.seal("replace-with-a-real-api-token"),

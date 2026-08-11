@@ -20,12 +20,15 @@ carries the title; never the version. Get it wrong and every re-scan orphans the
 analyst's triage decisions while looking like it worked (see
 :mod:`iceberg_connectors.units`).
 
-**One bad page must not fail a scan of fifty thousand.** Every per-page failure
-below is counted into :class:`FetchOutcome` and stepped over. What does fail the
-task is a bad credential or a site that will not answer at all, because reporting
-an empty space for those would read as "no secrets here".
+**One bad page must not stop a scan of fifty thousand.** Every per-page failure
+below is counted into :class:`FetchOutcome` and stepped over so findings from
+readable neighbors survive. The engine nevertheless fails that fetch task and the
+API marks the scan partial: unread content cannot justify auto-resolving an older
+finding or sending completion notifications. Bad credentials and site-wide
+failures abort immediately because no later unit can recover from them.
 """
 
+from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -41,7 +44,7 @@ from iceberg_connectors.confluence.client import (
     RateLimited,
     RateLimitPolicy,
 )
-from iceberg_connectors.confluence.storage import body_text, storage_to_text
+from iceberg_connectors.confluence.storage import storage_to_text, supported_body_text
 from iceberg_connectors.extraction import ExtractionLimits, extract_text
 from iceberg_connectors.protocol import ConnectorError, CredentialError, FetchOutcome, TaskSpec
 from iceberg_connectors.sandbox import ExtractionSandbox
@@ -105,7 +108,6 @@ class ConfluenceConnector:
                 key = str(space.get("key") or "")
                 if wanted and key.casefold() not in wanted:
                     continue
-                matched.add(key.casefold())
                 space_id = str(space.get("id") or "")
                 if not space_id:
                     # Nothing can be fetched without it, and guessing would produce a
@@ -113,6 +115,7 @@ class ConfluenceConnector:
                     logger.warning("confluence_space_without_id", space_key=key)
                     continue
 
+                matched.add(key.casefold())
                 seen += 1
                 yield TaskSpec(
                     label=f"space {key or space_id}",
@@ -124,9 +127,14 @@ class ConfluenceConnector:
                 )
 
             if missing := sorted(wanted - matched):
-                # The scope named spaces this site does not have. Saying so is the
-                # only signal an operator gets before an empty scan reads as clean.
+                # The scope named spaces this site did not make fetchable. Matched
+                # specs have already been yielded and the runner preserves them,
+                # but discovery must fail so the eventual scan remains partial and
+                # cannot reconcile unread content as remediated.
                 logger.warning("confluence_spaces_not_found", spaces=missing)
+                raise ConnectorError(
+                    "configured Confluence spaces were not found: " + ", ".join(missing)
+                )
             logger.info("confluence_discovery_complete", spaces=seen, filtered=bool(wanted))
         finally:
             # Reached on an abandoned generator too, so a discovery that stops early
@@ -206,12 +214,15 @@ class ConfluenceConnector:
         returns the merged payload, because that response also carries the `webui`
         link every unit on the page needs for its display path.
         """
-        text = body_text(page)
-        if text:
+        supported, text = supported_body_text(page)
+        if supported:
             return page, text
 
         detail = client.get_json(client.url(f"/pages/{page_id}"), params=_body_format())
-        return {**page, **detail}, body_text(detail)
+        supported, text = supported_body_text(detail)
+        if not supported:
+            raise ConnectorError("page response omitted a supported body representation")
+        return {**page, **detail}, text
 
     def _page_units(
         self, text: str, page_id: str, context: _PageContext, outcome: FetchOutcome
@@ -244,25 +255,59 @@ class ConfluenceConnector:
         person's comment change the body's fingerprint.
         """
         for endpoint in COMMENT_ENDPOINTS:
+            pending: deque[dict[str, Any]] = deque()
+            seen: set[str] = set()
             for comment in client.paginate(f"/pages/{page_id}/{endpoint}", **_body_format()):
                 comment_id = str(comment.get("id") or "")
-                text = body_text(comment)
-                if not comment_id or not text:
+                if not comment_id:
+                    outcome.failed += 1
                     continue
+                if comment_id in seen:
+                    continue
+                seen.add(comment_id)
+                pending.append(comment)
 
-                outcome.units += 1
-                yield ContentUnit(
-                    locator=CoarseLocator(
-                        connector_type=self.connector_type,
-                        resource_id=page_id,
-                        # The comment's own id: editing the page must not change a
-                        # comment finding's identity, or vice versa.
-                        sub_resource=f"comment:{comment_id}",
-                    ),
-                    text=text,
-                    origin=ContentOrigin.COMMENT,
-                    display=context.display() | {"comment_id": comment_id},
-                )
+            # Page collections return roots only. Every comment type has its own
+            # cursor-paginated children endpoint, and replies may themselves have
+            # children. An iterative walk avoids recursion depth becoming a remote
+            # input while ``seen`` prevents a broken API response from cycling.
+            while pending:
+                comment = pending.popleft()
+                comment_id = str(comment["id"])
+                supported, text = supported_body_text(comment)
+
+                if not supported:
+                    outcome.failed += 1
+                    logger.warning(
+                        "confluence_comment_missing_body",
+                        comment_id=comment_id,
+                    )
+                elif text:
+                    outcome.units += 1
+                    yield ContentUnit(
+                        locator=CoarseLocator(
+                            connector_type=self.connector_type,
+                            resource_id=page_id,
+                            # The comment's own id: editing the page must not change
+                            # a comment finding's identity, or vice versa.
+                            sub_resource=f"comment:{comment_id}",
+                        ),
+                        text=text,
+                        origin=ContentOrigin.COMMENT,
+                        display=context.display() | {"comment_id": comment_id},
+                    )
+
+                for reply in client.paginate(
+                    f"/{endpoint}/{comment_id}/children", **_body_format()
+                ):
+                    reply_id = str(reply.get("id") or "")
+                    if not reply_id:
+                        outcome.failed += 1
+                        continue
+                    if reply_id in seen:
+                        continue
+                    seen.add(reply_id)
+                    pending.append(reply)
 
     def _attachment_units(
         self,
@@ -283,20 +328,25 @@ class ConfluenceConnector:
             name = str(attachment.get("title") or "")
             link = attachment.get("downloadLink")
             if not name or not link:
-                outcome.skipped += 1
+                outcome.failed += 1
+                logger.warning(
+                    "confluence_attachment_missing_metadata",
+                    attachment_id=str(attachment.get("id") or ""),
+                )
                 continue
 
             declared = _as_int(attachment.get("fileSize"))
             if declared is not None and declared > self.extraction_limits.max_input_bytes:
-                outcome.skipped += 1
+                outcome.failed += 1
                 logger.debug("confluence_attachment_too_large", name=name, bytes=declared)
                 continue
 
             try:
                 data = client.get_bytes(str(link), max_bytes=self.extraction_limits.max_input_bytes)
             except DownloadTooLarge:
-                # It lied about its size, or did not say. Same outcome either way.
-                outcome.skipped += 1
+                # It lied about its size, or did not say. The cap is intentional,
+                # but unread content cannot justify source-wide reconciliation.
+                outcome.failed += 1
                 continue
             except CredentialError, RateLimited:
                 raise
@@ -309,17 +359,25 @@ class ConfluenceConnector:
                 data, name, limits=self.extraction_limits, sandbox=sandbox.get()
             )
             if not extracted.outcome.is_text:
-                # An image is an ordinary skip; a bomb or a hang is worth saying so.
-                outcome.skipped += 1
+                # An image is an ordinary policy skip. A malformed, oversized,
+                # bomb-like, or timed-out document was requested text that could
+                # not be read, so it makes the task incomplete instead.
+                if extracted.outcome.is_incomplete:
+                    outcome.failed += 1
+                else:
+                    outcome.skipped += 1
                 if extracted.outcome.is_hostile:
                     logger.warning(
                         "confluence_attachment_rejected",
                         name=name,
                         outcome=extracted.outcome.value,
-                        detail=extracted.detail,
                     )
                 continue
 
+            if extracted.truncated:
+                # Keep the useful prefix as a unit, but do not let the unseen tail
+                # auto-resolve a finding from an earlier complete scan.
+                outcome.failed += 1
             outcome.units += 1
             yield ContentUnit(
                 locator=CoarseLocator(

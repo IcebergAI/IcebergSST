@@ -16,8 +16,9 @@ Four of them, each for a failure the others do not cover:
   cannot be caught with ``try``; the only honest answer is somewhere it can die
   alone.
 * **Per-unit failure isolation.** Every outcome below is a value, not an
-  exception. One hostile file produces one skipped unit and a count — never a
-  failed task, never a dead worker.
+  exception. One hostile file does not stop neighboring content from being
+  scanned, but its incomplete count fails the fetch task so the API cannot
+  reconcile findings against unread content.
 
 What is *not* here: OCR (out of scope for MVP), and archive traversal. A ZIP
 attachment is skipped rather than walked, because recursing into archives means
@@ -100,6 +101,21 @@ class ExtractionOutcome(StrEnum):
     def is_hostile(self) -> bool:
         """Worth a log line and an operator's attention, unlike an ordinary skip."""
         return self in {
+            ExtractionOutcome.REJECTED_BOMB,
+            ExtractionOutcome.FAILED_TIMEOUT,
+            ExtractionOutcome.FAILED_PARSE,
+        }
+
+    @property
+    def is_incomplete(self) -> bool:
+        """Whether requested text could not be scanned completely.
+
+        Unsupported, binary, and empty files are policy skips.  These outcomes are
+        different: the attachment was in scope and should have been readable, so a
+        source-wide reconciliation may not treat its absent findings as remediated.
+        """
+        return self in {
+            ExtractionOutcome.REJECTED_TOO_LARGE,
             ExtractionOutcome.REJECTED_BOMB,
             ExtractionOutcome.FAILED_TIMEOUT,
             ExtractionOutcome.FAILED_PARSE,
@@ -196,10 +212,10 @@ def extract_text(
             if sandbox is None
             else sandbox.run(extractor, data, bounds, timeout=bounds.timeout_seconds)
         )
-    except SandboxTimeout as exc:
-        return Extracted(ExtractionOutcome.FAILED_TIMEOUT, detail=str(exc))
-    except SandboxCrashed as exc:
-        return Extracted(ExtractionOutcome.FAILED_PARSE, detail=str(exc))
+    except SandboxTimeout:
+        return Extracted(ExtractionOutcome.FAILED_TIMEOUT, detail="parser timed out")
+    except SandboxCrashed:
+        return Extracted(ExtractionOutcome.FAILED_PARSE, detail="parser process crashed")
     except BombError as exc:
         return Extracted(ExtractionOutcome.REJECTED_BOMB, detail=str(exc))
     except _BinaryContent:
@@ -207,8 +223,10 @@ def extract_text(
     except Exception as exc:
         # Any parser failure. Deliberately broad: the point is that no malformed
         # file can produce an exception this function does not turn into a value.
+        # Exception text is attacker-influenced parser output and may echo document
+        # plaintext, so only the code-owned exception class is retained.
         return Extracted(
-            ExtractionOutcome.FAILED_PARSE, detail=f"{type(exc).__name__}: {exc}"[:200]
+            ExtractionOutcome.FAILED_PARSE, detail=f"{type(exc).__name__} parser failure"
         )
 
     if not parsed.text.strip():

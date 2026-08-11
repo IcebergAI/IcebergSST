@@ -134,16 +134,19 @@ def test_the_scope_filter_ignores_the_case_the_operator_typed() -> None:
     assert [spec.params["space_key"] for spec in specs] == ["DOCS", "OPS"]
 
 
-def test_a_scope_entry_that_matches_no_space_is_warned_about() -> None:
-    """The only signal an operator gets before an empty scan reads as "nothing to
-    find here"."""
+def test_a_scope_entry_that_matches_no_space_fails_discovery() -> None:
+    """An explicitly requested space is part of the coverage contract.  Silently
+    omitting it would let an incomplete scan reconcile as clean."""
     site = FakeConfluence(spaces=[Space("s1", "DOCS", "Docs")])
     connection = site.connection | {"spaces": ["DOCS", "typo"]}
 
     with capture_logs() as events:
-        specs = list(_connector(site).discover(connection, API_TOKEN))
+        discovered = _connector(site).discover(connection, API_TOKEN)
+        first = next(discovered)
+        with pytest.raises(ConnectorError, match="typo"):
+            next(discovered)
 
-    assert [spec.params["space_key"] for spec in specs] == ["DOCS"]
+    assert first.params["space_key"] == "DOCS"
     warned = [event for event in events if event["event"] == "confluence_spaces_not_found"]
     assert warned == [
         {"event": "confluence_spaces_not_found", "log_level": "warning", "spaces": ["typo"]}
@@ -269,6 +272,60 @@ def test_inline_and_footer_comments_are_both_scanned() -> None:
     assert sorted(texts) == ["footer note", "inline note"]
 
 
+def test_paginated_footer_and_inline_replies_are_scanned_recursively() -> None:
+    """Page comment collections contain roots only. Replies live on separate,
+    cursor-paginated children endpoints for both comment types."""
+    footer = Comment(
+        "f0",
+        storage_page("footer root"),
+        replies=[
+            Comment(
+                "f1",
+                storage_page("footer reply one"),
+                replies=[Comment("f1a", storage_page("footer nested reply"))],
+            ),
+            Comment("f2", storage_page("footer reply two")),
+            Comment("f3", storage_page("footer reply three")),
+        ],
+    )
+    inline = Comment(
+        "i0",
+        storage_page("inline root"),
+        inline=True,
+        replies=[
+            Comment("i1", storage_page("inline reply one"), inline=True),
+            Comment("i2", storage_page("inline reply two"), inline=True),
+            Comment("i3", storage_page("inline reply three"), inline=True),
+        ],
+    )
+    site = _site(
+        spaces=[
+            Space(
+                "s1",
+                "DOCS",
+                "Docs",
+                pages=[Page("p1", "Runbook", storage_page("body"), comments=[footer, inline])],
+            )
+        ],
+        page_size=2,
+    )
+
+    units, outcome = _fetch(_connector(site), site)
+
+    comment_ids = {
+        unit.display["comment_id"] for unit in units if unit.origin is ContentOrigin.COMMENT
+    }
+    assert comment_ids == {"f0", "f1", "f1a", "f2", "f3", "i0", "i1", "i2", "i3"}
+    requested = [str(request.url) for request in site.requests]
+    assert any(
+        "/footer-comments/f0/children?" in url and "cursor=cursor-2" in url for url in requested
+    )
+    assert any(
+        "/inline-comments/i0/children?" in url and "cursor=cursor-2" in url for url in requested
+    )
+    assert outcome.failed == 0
+
+
 def test_comments_can_be_switched_off() -> None:
     site = _site()
     connection = site.connection | {"include_comments": False}
@@ -313,6 +370,75 @@ def test_a_page_with_no_text_is_a_skip_not_a_failure() -> None:
 
     assert units == []
     assert (outcome.skipped, outcome.failed) == (1, 0)
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        Page(
+            "p2",
+            "Missing",
+            storage_page("unreadable"),
+            body_in_list=False,
+            body_in_detail=False,
+        ),
+        Page(
+            "p2",
+            "Unsupported",
+            storage_page("unreadable"),
+            body_representation="atlas_doc_format",
+        ),
+    ],
+)
+def test_a_successful_page_response_without_supported_content_is_incomplete(
+    page: Page,
+) -> None:
+    """A malformed HTTP 200 is unread content, not evidence that a page is clean."""
+    site = _site(
+        spaces=[
+            Space(
+                "s1",
+                "DOCS",
+                "Docs",
+                pages=[Page("p1", "Readable", storage_page("visible")), page],
+            )
+        ]
+    )
+
+    units, outcome = _fetch(_connector(site), site)
+
+    assert [unit.locator.resource_id for unit in units] == ["p1"]
+    assert (outcome.units, outcome.failed) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    "comment",
+    [
+        Comment("c2", storage_page("unreadable"), include_body=False),
+        Comment(
+            "c2",
+            storage_page("unreadable"),
+            body_representation="atlas_doc_format",
+        ),
+    ],
+)
+def test_a_comment_without_supported_content_is_incomplete(comment: Comment) -> None:
+    """Malformed comments fail coverage while readable page content still survives."""
+    site = _site(
+        spaces=[
+            Space(
+                "s1",
+                "DOCS",
+                "Docs",
+                pages=[Page("p1", "Runbook", storage_page("visible"), comments=[comment])],
+            )
+        ]
+    )
+
+    units, outcome = _fetch(_connector(site), site)
+
+    assert [unit.text for unit in units] == ["visible"]
+    assert (outcome.units, outcome.failed) == (1, 1)
 
 
 def test_fetch_pages_through_a_large_space() -> None:
@@ -511,7 +637,7 @@ def test_an_image_is_skipped_rather_than_scanned() -> None:
     assert outcome.skipped == 1
 
 
-def test_an_attachment_that_declares_a_huge_size_costs_no_bandwidth() -> None:
+def test_an_attachment_that_declares_a_huge_size_is_incomplete_without_download() -> None:
     """Checked against the declared size first so an obviously oversized file is
     never downloaded."""
     site = _site(
@@ -534,11 +660,11 @@ def test_an_attachment_that_declares_a_huge_size_costs_no_bandwidth() -> None:
 
     _, outcome = _fetch(_connector(site), site)
 
-    assert outcome.skipped == 1
+    assert (outcome.skipped, outcome.failed) == (0, 1)
     assert not any("/download/" in path for path in site.paths_requested())
 
 
-def test_an_attachment_that_lies_about_its_size_is_cut_off_mid_download() -> None:
+def test_an_attachment_that_lies_about_its_size_fails_closed_mid_download() -> None:
     """The declaration comes from the same place the file does, so the bytes are
     counted as they arrive too."""
     site = _site(
@@ -562,7 +688,88 @@ def test_an_attachment_that_lies_about_its_size_is_cut_off_mid_download() -> Non
 
     _, outcome = _fetch(connector, site)
 
-    assert (outcome.skipped, outcome.failed) == (1, 0)
+    assert (outcome.skipped, outcome.failed) == (0, 1)
+
+
+def test_a_malformed_attachment_is_incomplete_not_an_ordinary_skip() -> None:
+    site = _site(
+        spaces=[
+            Space(
+                "s1",
+                "DOCS",
+                "Docs",
+                pages=[
+                    Page(
+                        "p1",
+                        "Runbook",
+                        storage_page("attached"),
+                        attachments=[Attachment("broken.docx", b"not a zip archive")],
+                    )
+                ],
+            )
+        ]
+    )
+
+    units, outcome = _fetch(_connector(site), site)
+
+    assert not any(unit.origin is ContentOrigin.ATTACHMENT for unit in units)
+    assert (outcome.skipped, outcome.failed) == (0, 1)
+
+
+def test_parser_exception_text_never_reaches_connector_logs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parser may echo attacker-controlled document plaintext in its exception."""
+    canary = "plaintext-canary-must-not-log"
+
+    def raises_with_plaintext(_data: bytes, _limits: ExtractionLimits) -> Any:
+        raise ValueError(canary)
+
+    extraction = __import__("iceberg_connectors.extraction", fromlist=["_EXTRACTORS"])
+    monkeypatch.setitem(extraction._EXTRACTORS, "text", raises_with_plaintext)
+    site = _site()
+
+    with capture_logs() as events:
+        _, outcome = _fetch(_connector(site), site)
+
+    assert outcome.failed == 1
+    assert canary not in str(events)
+    rejected = [event for event in events if event["event"] == "confluence_attachment_rejected"]
+    assert rejected == [
+        {
+            "event": "confluence_attachment_rejected",
+            "log_level": "warning",
+            "name": "notes.txt",
+            "outcome": "failed_parse",
+        }
+    ]
+
+
+def test_a_truncated_attachment_keeps_its_partial_unit_but_fails_closed() -> None:
+    site = _site(
+        spaces=[
+            Space(
+                "s1",
+                "DOCS",
+                "Docs",
+                pages=[
+                    Page(
+                        "p1",
+                        "Runbook",
+                        storage_page("attached"),
+                        attachments=[Attachment("large.txt", b"useful text " * 100)],
+                    )
+                ],
+            )
+        ]
+    )
+    connector = _connector(site, extraction_limits=ExtractionLimits(max_output_chars=64))
+
+    units, outcome = _fetch(connector, site)
+
+    attachment = next(unit for unit in units if unit.origin is ContentOrigin.ATTACHMENT)
+    assert attachment.display["truncated"] is True
+    assert outcome.failed == 1
 
 
 def test_an_attachment_is_downloaded_from_the_context_base_the_site_reported() -> None:
@@ -592,8 +799,8 @@ def test_a_deployment_without_a_context_base_downloads_from_the_site_root() -> N
     assert outcome.failed == 0
 
 
-def test_an_attachment_that_will_not_download_is_counted_not_fatal() -> None:
-    """One unreadable file must not fail a scan of a space."""
+def test_an_attachment_that_will_not_download_keeps_scanning_but_is_incomplete() -> None:
+    """An unreadable file preserves the page finding and fails reconciliation."""
     site = _site(
         spaces=[
             Space(
@@ -618,6 +825,39 @@ def test_an_attachment_that_will_not_download_is_counted_not_fatal() -> None:
     assert SEEDED_SECRET in units[0].text  # ...and the page was still scanned
 
 
+@pytest.mark.parametrize(
+    "attachment",
+    [
+        Attachment("", b"content"),
+        Attachment("notes.txt", b"content", include_download_link=False),
+    ],
+)
+def test_an_attachment_missing_download_metadata_is_incomplete(
+    attachment: Attachment,
+) -> None:
+    site = _site(
+        spaces=[
+            Space(
+                "s1",
+                "DOCS",
+                "Docs",
+                pages=[
+                    Page(
+                        "p1",
+                        "Runbook",
+                        storage_page("attached"),
+                        attachments=[attachment],
+                    )
+                ],
+            )
+        ]
+    )
+
+    _, outcome = _fetch(_connector(site), site)
+
+    assert (outcome.skipped, outcome.failed) == (0, 1)
+
+
 def test_attachments_can_be_switched_off() -> None:
     site = _site()
     outcome = FetchOutcome()
@@ -638,7 +878,7 @@ def test_attachments_can_be_switched_off() -> None:
 # ─── Failure handling ─────────────────────────────────────────────────────────
 
 
-def test_a_page_that_errors_mid_space_does_not_fail_the_space() -> None:
+def test_a_page_that_errors_mid_space_keeps_scanning_but_is_incomplete() -> None:
     """A scan of fifty thousand pages will meet one that 404s or 500s. It is counted
     and stepped over; the pages on either side of it are still scanned."""
     site = _site(

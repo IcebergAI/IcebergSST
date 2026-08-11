@@ -143,6 +143,47 @@ def test_discovery_results_become_fetch_tasks(scan_fixture: Fixture) -> None:
     assert set(fixture.dispatcher.enqueued) == {task.id for task in fetch_tasks}
 
 
+def test_failed_discovery_still_scans_matched_specs_without_reconciling(
+    scan_fixture: Fixture,
+) -> None:
+    """A missing configured space fails discovery, but spaces already matched are
+    still scanned so their redacted findings are not discarded.  The failed
+    discovery keeps the final scan partial."""
+    fixture = scan_fixture
+    fixture.lease(fixture.discovery)
+    fixture.session.refresh(fixture.discovery)
+
+    discovered = fixture.report(
+        fixture.discovery,
+        status="failed",
+        error="configured Confluence spaces were not found: MISSING",
+        task_specs=[
+            {
+                "label": "space DOCS",
+                "params": {"space_id": "s1", "space_key": "DOCS"},
+            }
+        ],
+    )
+
+    assert discovered.status_code == 200
+    assert discovered.json()["fetch_tasks_created"] == 1
+    assert discovered.json()["scan_status"] is None
+    fetch = fixture.session.exec(
+        select(ScanTask)
+        .where(ScanTask.scan_id == fixture.scan.id)
+        .where(ScanTask.kind == ScanTaskKind.FETCH)
+    ).one()
+    fixture.lease(fetch)
+    fixture.session.refresh(fetch)
+
+    fetched = fixture.report(fetch, findings=[_finding_payload()])
+
+    assert fetched.json()["findings_ingested"] == 1
+    assert fetched.json()["scan_status"] == ScanStatus.PARTIAL.value
+    fixture.session.refresh(fixture.scan)
+    assert fixture.scan.status is ScanStatus.PARTIAL
+
+
 def test_findings_are_stored_with_no_place_for_a_plaintext_secret(
     scan_fixture: Fixture,
 ) -> None:
@@ -287,6 +328,79 @@ def test_a_failed_task_still_has_its_findings_ingested(scan_fixture: Fixture) ->
     assert fixture.scan.status is ScanStatus.PARTIAL
     assert fixture.scan.counts["findings"] == 1
     assert fixture.scan.counts["units_failed"] == 1
+
+
+def test_completed_results_with_unreadable_units_fail_closed_at_ingest(
+    scan_fixture: Fixture,
+) -> None:
+    """The API is the reconciliation boundary and must remain safe with an older
+    engine that reports ``completed`` while its connector reports failed units."""
+    fixture = scan_fixture
+    earlier = Scan(
+        source_id=fixture.source.id, trigger=ScanTrigger.MANUAL, status=ScanStatus.COMPLETED
+    )
+    fixture.session.add(earlier)
+    fixture.session.commit()
+    unseen = Finding(
+        source_id=fixture.source.id,
+        fingerprint=OTHER_FINGERPRINT,
+        rule_id="aws-access-key-id",
+        rulepack_version="2026.07.1",
+        resource_locator={},
+        redacted_snippet="[redacted]",
+        secret_hash="c" * 64,
+        severity="high",
+        first_seen_scan_id=earlier.id,
+        last_seen_scan_id=earlier.id,
+    )
+    fixture.session.add(unseen)
+    fixture.session.commit()
+
+    task = fixture.fetch_task()
+    response = fixture.report(
+        task,
+        findings=[_finding_payload()],
+        counts={"units": 1, "units_failed": 1},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["findings_ingested"] == 1
+    assert response.json()["scan_status"] == ScanStatus.PARTIAL.value
+    fixture.session.refresh(unseen)
+    assert unseen.state is FindingState.OPEN
+    fixture.session.refresh(task)
+    assert task.status is ScanTaskStatus.FAILED
+    assert task.error == "1 requested content unit could not be read"
+
+
+def test_completed_results_with_truncated_units_fail_closed_at_ingest(
+    scan_fixture: Fixture,
+) -> None:
+    """Stale engines may report detector truncation without failing the task."""
+    fixture = scan_fixture
+    task = fixture.fetch_task()
+
+    response = fixture.report(task, counts={"units": 1, "units_truncated": 1})
+
+    assert response.status_code == 200
+    assert response.json()["scan_status"] == ScanStatus.PARTIAL.value
+    fixture.session.refresh(task)
+    assert task.status is ScanTaskStatus.FAILED
+    assert task.error == "1 requested content unit was truncated"
+
+
+def test_negative_engine_counts_are_rejected(scan_fixture: Fixture) -> None:
+    """Malformed tallies must not bypass the API's incomplete-scan guard."""
+    fixture = scan_fixture
+    task = fixture.fetch_task()
+
+    response = fixture.report(task, counts={"units_failed": -1})
+
+    assert response.status_code == 422
+    fixture.session.refresh(task)
+    assert task.status is ScanTaskStatus.LEASED
+    fixture.session.refresh(fixture.scan)
+    assert "units_failed" not in fixture.scan.counts
 
 
 def test_a_failed_scan_says_why_it_failed(scan_fixture: Fixture) -> None:
