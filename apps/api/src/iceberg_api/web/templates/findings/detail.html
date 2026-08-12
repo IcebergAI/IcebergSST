@@ -14,6 +14,15 @@
       <span class="tag tag--c state-{{ finding.state.value }}"><span class="dot"></span>{{ finding.state.value | humanize }}</span>
       {% if finding.resolution %}<span class="tag">{{ finding.resolution.value }} resolution</span>{% endif %}
       {% if finding.suppressed_at %}<span class="tag tag--c is-neutral"><span class="dot"></span>suppressed</span>{% endif %}
+      {#- Role-shaped by the API (ADR 0010): viewers receive correlation=null,
+          so this renders only for the roles that can open the cluster page. -#}
+      {% if finding.correlation and finding.correlation.finding_count > 1 %}
+      <a class="tag tag--c is-neutral" href="/clusters/{{ finding.correlation.correlation_id }}">
+        <span class="dot"></span>
+        same secret in {{ finding.correlation.finding_count }} findings
+        across {{ finding.correlation.source_count }} source{{ 's' if finding.correlation.source_count != 1 }}
+      </a>
+      {% endif %}
     </div>
   </div>
 </div>
