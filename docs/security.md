@@ -50,7 +50,12 @@ system itself a high-value target. This document states the trust boundaries and
   the findings DB, credentials at rest, or other engines' results. Narrower than direct-DB
   workers; not zero.
 - **Peppered hashes.** Secret hashes use a pepper from the secret store, so they aren't
-  brute-forceable offline from a DB dump.
+  brute-forceable offline from a DB dump. The hash itself is never exposed by the API; the
+  analyst-only exposure-cluster views use a *correlation id* derived from it under a separate
+  API-held key, which reveals equality and nothing else (ADR 0010).
+- **Role-shaped remediation evidence.** Remediation notes and evidence-link URLs are analyst
+  material: viewers see that an action happened and its link labels, never the URLs or free
+  text, and a retention window can scrub URLs off long-resolved findings (ADR 0011).
 - **Encrypted connector credentials.** Stored via the secret store (AES-GCM/Fernet by default;
   Vault in prod). Never logged; never returned by the API in plaintext.
 - **Full audit trail.** Every finding state/assignee/comment change writes a `FindingEvent`.
