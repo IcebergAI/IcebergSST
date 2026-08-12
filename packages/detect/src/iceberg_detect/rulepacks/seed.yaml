@@ -17,7 +17,7 @@
 # Bump `version` whenever a rule changes: it is stamped on every finding, and a
 # result that cannot be traced to the rules that made it is not reproducible.
 
-version: "2026.07.1"
+version: "2026.08.1"
 description: IcebergSST seed rule pack — common, high-signal secret types.
 
 rules:
@@ -84,6 +84,7 @@ rules:
     keywords: [github, token, pat, gh]
     redaction: keep_prefix
     base_confidence: 0.9
+    validator: github-token-v1
 
   - id: github-fine-grained-pat
     description: GitHub fine-grained personal access token
@@ -94,6 +95,7 @@ rules:
     keywords: [github, token, pat, gh]
     redaction: keep_prefix
     base_confidence: 0.9
+    validator: github-token-v1
 
   - id: slack-token
     description: Slack API token

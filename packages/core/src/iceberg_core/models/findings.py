@@ -13,6 +13,8 @@ from iceberg_core.enums import (
     FindingState,
     Severity,
     SuppressionScope,
+    ValidationReason,
+    ValidationStatus,
 )
 from iceberg_core.models.base import (
     IcebergModel,
@@ -63,6 +65,21 @@ class Finding(TimestampedModel, table=True):
     entropy: float | None = Field(default=None)
     confidence: float | None = Field(default=None)
     severity: Severity = Field(sa_type=enum_type(Severity, name="severity"))
+
+    #: Structured liveness metadata only. The credential itself never reaches
+    #: this model; validation happens ephemerally inside the engine.
+    validation_provider: str | None = Field(default=None, max_length=64)
+    validation_validator_id: str | None = Field(default=None, max_length=128)
+    validation_contract_version: str | None = Field(default=None, max_length=64)
+    validation_status: ValidationStatus | None = Field(
+        default=None,
+        sa_type=enum_type(ValidationStatus, name="validation_status"),
+    )
+    validation_reason: ValidationReason | None = Field(
+        default=None,
+        sa_type=enum_type(ValidationReason, name="validation_reason"),
+    )
+    validated_at: datetime | None = Field(default=None, sa_type=utc_timestamp_type())
 
     state: FindingState = Field(
         default=FindingState.OPEN,

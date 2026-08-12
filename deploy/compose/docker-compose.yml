@@ -87,6 +87,7 @@ services:
       # api-only on purpose: engines receive the threshold in their lease, the
       # same way they receive the pepper and the suppressions (#70).
       ICEBERG_CONFIDENCE_THRESHOLD: ${ICEBERG_CONFIDENCE_THRESHOLD:-0.5}
+      ICEBERG_SECRET_VALIDATION_ENABLED: ${ICEBERG_SECRET_VALIDATION_ENABLED:-false}
       # Notification dispatch (#60) — api-only for the same reason: delivery runs
       # in the maintenance loop, which needs the database (docs/notifications.md).
       ICEBERG_SMTP_HOST: ${ICEBERG_SMTP_HOST:-}

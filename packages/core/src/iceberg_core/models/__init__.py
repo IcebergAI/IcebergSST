@@ -36,9 +36,13 @@ from iceberg_core.models.audit import (
     AUDIT_TARGET_SOURCE,
     AUDIT_TARGET_SUPPRESSION,
     AUDIT_TARGET_USER,
+    AUDIT_TARGET_VALIDATION_POLICY,
     AUDIT_USER_DISABLED,
     AUDIT_USER_ENABLED,
     AUDIT_USER_ROLE_CHANGED,
+    AUDIT_VALIDATION_POLICY_CREATED,
+    AUDIT_VALIDATION_POLICY_DELETED,
+    AUDIT_VALIDATION_POLICY_UPDATED,
     AuditEvent,
 )
 from iceberg_core.models.base import (
@@ -56,6 +60,7 @@ from iceberg_core.models.identity import User
 from iceberg_core.models.notifications import NotificationChannel, NotificationDelivery
 from iceberg_core.models.scans import Engine, Scan, ScanTask
 from iceberg_core.models.sources import Schedule, Source
+from iceberg_core.models.validation import ValidationPolicy
 
 __all__ = [
     "AUDIT_CHANNEL_CREATED",
@@ -82,9 +87,13 @@ __all__ = [
     "AUDIT_TARGET_SOURCE",
     "AUDIT_TARGET_SUPPRESSION",
     "AUDIT_TARGET_USER",
+    "AUDIT_TARGET_VALIDATION_POLICY",
     "AUDIT_USER_DISABLED",
     "AUDIT_USER_ENABLED",
     "AUDIT_USER_ROLE_CHANGED",
+    "AUDIT_VALIDATION_POLICY_CREATED",
+    "AUDIT_VALIDATION_POLICY_DELETED",
+    "AUDIT_VALIDATION_POLICY_UPDATED",
     "NAMING_CONVENTION",
     "AuditEvent",
     "Engine",
@@ -100,6 +109,7 @@ __all__ = [
     "Suppression",
     "TimestampedModel",
     "User",
+    "ValidationPolicy",
     "enum_type",
     "json_type",
     "metadata",

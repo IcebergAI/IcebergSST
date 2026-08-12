@@ -118,6 +118,11 @@ class ApiSettings(SecretStoreSettings):
     #: core cannot import detect, which depends on core.
     confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
 
+    #: Deployment-wide kill switch for the only feature that deliberately sends
+    #: a detected credential to its provider (ADR 0010). Database policies are a
+    #: second, independent opt-in; neither can enable validation alone.
+    secret_validation_enabled: bool = False
+
     #: OIDC-only auth needs a seed administrator (docs/security.md § Bootstrap).
     #: Matched at user creation, so a later demotion is not undone by re-login.
     bootstrap_admin_subject: str | None = None

@@ -41,6 +41,10 @@ system itself a high-value target. This document states the trust boundaries and
 6. **API ↔ Postgres** — only the API holds DB credentials.
 7. **API ↔ secret store** — credentials and pepper accessed only through the `SecretStore`
    interface (ADR 0007).
+8. **Engine ↔ credential provider (optional)** — disabled by default. When a deployment switch
+   and an administrator-approved exact rule/provider policy both allow it, a detected credential
+   is sent once to the fixed read-only HTTPS endpoint compiled into the reviewed adapter. The
+   response body is discarded and only a fixed status/reason crosses back to the API (ADR 0010).
 
 ## Key mitigations
 - **No plaintext at rest.** Redaction happens in the engine; only masked snippet + salted hash
