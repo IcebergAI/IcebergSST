@@ -184,6 +184,11 @@ class FindingEventKind(StrEnum):
     COMMENT = "comment"
     SUPPRESSED = "suppressed"
     REOPENED = "reopened"
+    #: Remediation actions (#142): recorded / one-way verified / set-once
+    #: retracted. Stored as VARCHAR, so adding these needed no migration.
+    REMEDIATION = "remediation"
+    REMEDIATION_VERIFIED = "remediation_verified"
+    REMEDIATION_RETRACTED = "remediation_retracted"
 
 
 class Severity(StrEnum):
@@ -191,6 +196,37 @@ class Severity(StrEnum):
     MEDIUM = "medium"
     HIGH = "high"
     CRITICAL = "critical"
+
+
+#: Severity as an order, for "at or above this severity" policy checks. Lives
+#: beside the enum because anything ranking severities must agree with it.
+SEVERITY_RANK: dict[Severity, int] = {
+    Severity.LOW: 0,
+    Severity.MEDIUM: 1,
+    Severity.HIGH: 2,
+    Severity.CRITICAL: 3,
+}
+
+
+class RemediationActionKind(StrEnum):
+    """What a responder did about an exposed credential (#142).
+
+    The four verbs guidance separates, plus an explicit escape hatch — `other`
+    forces the note to carry the story rather than mislabelling the action.
+    """
+
+    REVOKE = "revoke"
+    ROTATE = "rotate"
+    SCOPE_REDUCE = "scope_reduce"
+    REMOVE_SOURCE = "remove_source"
+    OTHER = "other"
+
+
+class RemediationVerification(StrEnum):
+    """Whether anyone has confirmed the action took effect. One-way."""
+
+    UNVERIFIED = "unverified"
+    VERIFIED = "verified"
 
 
 class SuppressionScope(StrEnum):

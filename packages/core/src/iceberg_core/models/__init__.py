@@ -57,6 +57,7 @@ from iceberg_core.models.base import (
 from iceberg_core.models.findings import Finding, FindingEvent, Suppression
 from iceberg_core.models.identity import User
 from iceberg_core.models.notifications import NotificationChannel, NotificationDelivery
+from iceberg_core.models.remediation import RemediationAction
 from iceberg_core.models.scans import Engine, Scan, ScanTask
 from iceberg_core.models.sources import Schedule, Source
 
@@ -99,6 +100,7 @@ __all__ = [
     "IcebergModel",
     "NotificationChannel",
     "NotificationDelivery",
+    "RemediationAction",
     "Scan",
     "ScanTask",
     "Schedule",
