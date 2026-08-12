@@ -18,7 +18,13 @@ from typing import Any
 from iceberg_core.enums import CoverageObjectKind, CoverageReason
 from iceberg_core.fingerprint import CoarseLocator
 
-from iceberg_connectors.protocol import CredentialError, FetchOutcome, TaskSpec
+from iceberg_connectors.protocol import (
+    ConnectorCapability,
+    ConnectorMetadata,
+    CredentialError,
+    FetchOutcome,
+    TaskSpec,
+)
 from iceberg_connectors.units import ContentOrigin, ContentUnit
 
 FAKE_CONNECTOR_TYPE = "fake"
@@ -53,6 +59,18 @@ class FakeConnector:
     discovery_fails: bool = False
 
     connector_type: str = FAKE_CONNECTOR_TYPE
+    metadata: ConnectorMetadata = field(
+        default_factory=lambda: ConnectorMetadata(
+            connector_type=FAKE_CONNECTOR_TYPE,
+            capabilities=frozenset(
+                {
+                    ConnectorCapability.DISCOVERY,
+                    ConnectorCapability.GAP_REPORTING,
+                    ConnectorCapability.ANONYMOUS_AUTH,
+                }
+            ),
+        )
+    )
 
     def discover(self, connection: dict[str, Any], credential: str | None) -> Iterator[TaskSpec]:
         if self.discovery_fails:

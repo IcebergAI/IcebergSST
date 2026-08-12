@@ -11,7 +11,12 @@ when the answer decides whether a scan runs or fails.
 
 import structlog
 
-from iceberg_connectors.protocol import Connector, ConnectorError
+from iceberg_connectors.protocol import (
+    CONNECTOR_SDK_VERSION,
+    Connector,
+    ConnectorError,
+    ConnectorMetadata,
+)
 
 logger = structlog.get_logger()
 
@@ -30,6 +35,16 @@ class UnknownConnectorError(ConnectorError):
 
 def register(connector: Connector, *, replace: bool = False) -> None:
     """Make a connector available by its ``connector_type``."""
+    metadata = getattr(connector, "metadata", None)
+    if not isinstance(metadata, ConnectorMetadata):
+        raise ConnectorError("connector does not declare ConnectorMetadata")
+    if metadata.connector_type != connector.connector_type:
+        raise ConnectorError("connector metadata type does not match connector_type")
+    if metadata.sdk_version.split(".", 1)[0] != CONNECTOR_SDK_VERSION.split(".", 1)[0]:
+        raise ConnectorError(
+            f"connector SDK {metadata.sdk_version!r} is incompatible with "
+            f"engine SDK {CONNECTOR_SDK_VERSION!r}"
+        )
     existing = _REGISTRY.get(connector.connector_type)
     if existing is not None and not replace:
         raise ConnectorError(
@@ -54,6 +69,11 @@ def get(source_type: str) -> Connector:
 def registered_types() -> tuple[str, ...]:
     """Source types this engine can scan. Reported at registration (#70-adjacent)."""
     return tuple(sorted(_REGISTRY))
+
+
+def capability_manifest() -> list[dict[str, object]]:
+    """JSON-safe, content-free inventory of explicitly registered connectors."""
+    return [_REGISTRY[key].metadata.as_payload() for key in sorted(_REGISTRY)]
 
 
 def clear() -> None:

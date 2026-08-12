@@ -28,8 +28,12 @@ from iceberg_connectors.extraction import (
 )
 from iceberg_connectors.fake import FAKE_CONNECTOR_TYPE, FakeConnector, FakePage
 from iceberg_connectors.protocol import (
+    CONNECTOR_SDK_VERSION,
     Connector,
+    ConnectorCapability,
     ConnectorError,
+    ConnectorFailureCode,
+    ConnectorMetadata,
     CredentialError,
     FetchOutcome,
     RateLimitError,
@@ -38,17 +42,27 @@ from iceberg_connectors.protocol import (
 )
 from iceberg_connectors.registry import UnknownConnectorError
 from iceberg_connectors.sandbox import ExtractionSandbox
+from iceberg_connectors.testing import (
+    ConformanceCase,
+    assert_connector_conformance,
+    assert_failure_contract,
+)
 from iceberg_connectors.units import GLOB_FRIENDLY_KEYS, ContentOrigin, ContentUnit
 
 __version__ = "0.1.0"
 
 __all__ = [
     "CONFLUENCE_CONNECTOR_TYPE",
+    "CONNECTOR_SDK_VERSION",
     "FAKE_CONNECTOR_TYPE",
     "GLOB_FRIENDLY_KEYS",
     "ConfluenceConnector",
+    "ConformanceCase",
     "Connector",
+    "ConnectorCapability",
     "ConnectorError",
+    "ConnectorFailureCode",
+    "ConnectorMetadata",
     "ContentOrigin",
     "ContentUnit",
     "CoverageReason",
@@ -65,6 +79,8 @@ __all__ = [
     "TaskSpec",
     "UnknownConnectorError",
     "__version__",
+    "assert_connector_conformance",
+    "assert_failure_contract",
     "classify",
     "extract_text",
 ]

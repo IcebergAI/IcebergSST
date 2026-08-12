@@ -23,8 +23,9 @@ make docs-check
   results back to the API; they never import the database package.
 - Plaintext secrets may exist only ephemerally inside the engine while a unit is being scanned.
   Findings contain a masked snippet and a peppered hash, never the matched value.
-- New connectors implement the protocol and sandbox limits, document their source permissions,
-  and add conformance tests for partial reads, redirects, rate limits, and redaction.
+- New connectors implement [Connector SDK v1](docs/connector-sdk.md), declare only implemented
+  capabilities, run the shared conformance kit, document source permissions, and add source-specific
+  tests for partial reads, redirects, rate limits, malformed responses, and redaction.
 - Browser routes call the API contract and remain CSRF-protected; do not add inline scripts or
   styles to templates.
 - Schema changes require an Alembic revision, SQLite migration coverage, and PostgreSQL upgrade,
