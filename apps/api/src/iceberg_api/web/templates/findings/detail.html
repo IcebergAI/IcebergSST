@@ -40,11 +40,28 @@
             somebody else's Confluence. -#}
         <pre class="snippet">{{ finding.redacted_snippet }}</pre>
         <p class="field-hint" style="margin-top:8px">
-          The secret itself was never transmitted or stored — only this mask and a peppered hash,
-          which is what makes the finding identifiable across re-scans without being reversible.
+          The secret itself was never stored or sent to the API — only this mask and a peppered
+          hash. If an administrator enabled liveness validation, the engine disclosed it once to
+          the named provider under the reviewed contract shown below.
         </p>
       </div>
     </section>
+
+    {% if finding.validation_status %}
+    <section class="card card-pad">
+      <div class="eyebrow" style="margin-bottom:8px">Credential liveness</div>
+      <div class="row-inline">
+        <span class="tag tag--c is-neutral"><span class="dot"></span>{{ finding.validation_status.value | humanize }}</span>
+        <strong>{{ finding.validation_provider }}</strong>
+      </div>
+      <p class="field-hint" style="margin-top:10px">
+        {{ finding.validation_reason.value | humanize }} · validator
+        <span class="mono">{{ finding.validation_validator_id }}</span> contract
+        <span class="mono">{{ finding.validation_contract_version }}</span> · checked
+        {{ finding.validated_at | dt }}
+      </p>
+    </section>
+    {% endif %}
 
     <section class="card">
       <div class="card-head"><h2 class="section-title">Where it is</h2></div>

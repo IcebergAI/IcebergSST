@@ -17,7 +17,7 @@ result = detect(text, pack)         # redacted, scored matches
 
 ### Rule shape (YAML)
 ```yaml
-version: "2026.07.1"
+version: "2026.08.1"
 rules:
   - id: aws-access-key-id          # lowercase-hyphenated; reaches URLs and metric labels
     description: AWS Access Key ID

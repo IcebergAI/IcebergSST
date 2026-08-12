@@ -31,6 +31,7 @@ from iceberg_connectors.confluence import ConfluenceConnector
 from iceberg_detect import load_named_pack
 from iceberg_engine.api_client import EngineClient
 from iceberg_engine.runner import run_task
+from iceberg_engine.validation import OpaqueCredential, ValidationExecutor, ValidationOutcome
 from prometheus_client import REGISTRY
 from structlog.testing import capture_logs
 
@@ -41,6 +42,7 @@ TASK_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 #: AWS's own documented example key — it has never authenticated anything.
 LEAKY = "Deployment notes: set aws access key AKIAIOSFODNN7EXAMPLE in the runbook."
 CLEAN = "The fix landed in commit 3f2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b on main."
+GITHUB_SECRET = "github_pat_" + "A" * 80
 
 
 def _lease(**overrides: Any) -> dict[str, Any]:
@@ -154,6 +156,70 @@ def test_no_plaintext_reaches_the_api() -> None:
     run_task(TASK_ID, client=_client(api), pack=PACK)
 
     assert "AKIAIOSFODNN7EXAMPLE" not in json.dumps(api.submission)
+
+
+def test_validation_uses_plaintext_only_inside_provider_boundary(
+    source: FakeConnector,
+) -> None:
+    source.spaces["DOCS"] = [FakePage("page-1", GITHUB_SECRET)]
+    api = Api(
+        _lease(
+            validation_policies=[
+                {
+                    "policy_id": "55555555-5555-5555-5555-555555555555",
+                    "rule_id": "github-fine-grained-pat",
+                    "validator_id": "github-token-v1",
+                    "timeout_seconds": 1,
+                    "requests_per_minute": 10,
+                    "max_attempts_per_task": 1,
+                }
+            ]
+        )
+    )
+
+    class Provider:
+        validator_id = "github-token-v1"
+        provider = "github"
+        contract_version = "1"
+        supported_rule_ids = frozenset({"github-fine-grained-pat"})
+
+        def __init__(self) -> None:
+            self.received: list[str] = []
+
+        def validate(
+            self, credential: OpaqueCredential, *, timeout_seconds: float
+        ) -> ValidationOutcome:
+            self.received.append(credential.reveal_for_provider())
+            return ValidationOutcome(
+                provider=self.provider,
+                validator_id=self.validator_id,
+                contract_version=self.contract_version,
+                status="live",
+                reason="credential_accepted",
+            )
+
+    provider = Provider()
+    executor = ValidationExecutor.from_payloads(
+        api.lease_body["validation_policies"],
+        validators={provider.validator_id: provider},
+    )
+
+    run_task(
+        TASK_ID,
+        client=_client(api),
+        pack=PACK,
+        validation_executor=executor,
+    )
+
+    assert provider.received == [GITHUB_SECRET]
+    assert api.submission["findings"][0]["validation"] == {
+        "provider": "github",
+        "validator_id": "github-token-v1",
+        "contract_version": "1",
+        "status": "live",
+        "reason": "credential_accepted",
+    }
+    assert GITHUB_SECRET not in json.dumps(api.submission)
 
 
 def test_coverage_gap_references_cross_the_wire_without_raw_source_identifiers() -> None:
@@ -564,6 +630,76 @@ def test_a_cancelled_task_is_abandoned_without_reporting() -> None:
         report = run_task(TASK_ID, client=_client(api), pack=PACK, tasks=tasks)
 
     assert report is None
+    assert api.submissions == []
+
+
+def test_cancellation_stops_provider_validation_after_a_collected_candidate(
+    source: FakeConnector,
+) -> None:
+    """Once cancellation is observed, previously detected plaintext is not sent."""
+    from contextlib import nullcontext
+
+    source.spaces["DOCS"] = [
+        FakePage("page-1", GITHUB_SECRET),
+        FakePage("page-2", "ordinary text"),
+    ]
+    api = Api(
+        _lease(
+            validation_policies=[
+                {
+                    "policy_id": "55555555-5555-5555-5555-555555555555",
+                    "rule_id": "github-fine-grained-pat",
+                    "validator_id": "github-token-v1",
+                    "timeout_seconds": 1,
+                    "requests_per_minute": 10,
+                    "max_attempts_per_task": 1,
+                }
+            ]
+        )
+    )
+
+    class Provider:
+        validator_id = "github-token-v1"
+        provider = "github"
+        contract_version = "1"
+        supported_rule_ids = frozenset({"github-fine-grained-pat"})
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def validate(
+            self, credential: OpaqueCredential, *, timeout_seconds: float
+        ) -> ValidationOutcome:
+            self.calls += 1
+            raise AssertionError("provider must not be called after cancellation")
+
+    class CancellingRegistry:
+        def __init__(self) -> None:
+            self.checks = 0
+
+        def holding(self, _task_id: object) -> object:
+            return nullcontext()
+
+        def is_cancelled(self, _task_id: object) -> bool:
+            self.checks += 1
+            return self.checks == 2
+
+    provider = Provider()
+    executor = ValidationExecutor.from_payloads(
+        api.lease_body["validation_policies"],
+        validators={provider.validator_id: provider},
+    )
+
+    report = run_task(
+        TASK_ID,
+        client=_client(api),
+        pack=PACK,
+        tasks=CancellingRegistry(),  # type: ignore[arg-type]
+        validation_executor=executor,
+    )
+
+    assert report is None
+    assert provider.calls == 0
     assert api.submissions == []
 
 

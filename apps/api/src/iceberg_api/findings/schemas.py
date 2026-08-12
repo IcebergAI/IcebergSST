@@ -24,6 +24,8 @@ from iceberg_core.enums import (
     FindingState,
     Severity,
     SuppressionScope,
+    ValidationReason,
+    ValidationStatus,
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -49,6 +51,12 @@ class FindingRead(BaseModel):
     entropy: float | None
     confidence: float | None
     severity: Severity
+    validation_provider: str | None
+    validation_validator_id: str | None
+    validation_contract_version: str | None
+    validation_status: ValidationStatus | None
+    validation_reason: ValidationReason | None
+    validated_at: UtcDatetime | None
 
     state: FindingState
     resolution: FindingResolution | None

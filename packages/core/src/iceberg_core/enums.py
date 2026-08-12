@@ -184,6 +184,35 @@ class FindingEventKind(StrEnum):
     COMMENT = "comment"
     SUPPRESSED = "suppressed"
     REOPENED = "reopened"
+    VALIDATION = "validation"
+
+
+class ValidationStatus(StrEnum):
+    """A side-effect-free credential validator's structured conclusion.
+
+    Absence of a result is represented by nullable finding fields, not another
+    status: validation is opt-in and most findings will never be submitted to a
+    provider.
+    """
+
+    LIVE = "live"
+    REVOKED = "revoked"
+    UNKNOWN = "unknown"
+    BLOCKED = "blocked"
+    ERROR = "error"
+
+
+class ValidationReason(StrEnum):
+    """Stable content-free reasons emitted by reviewed validators."""
+
+    CREDENTIAL_ACCEPTED = "credential_accepted"
+    CREDENTIAL_REJECTED = "credential_rejected"
+    PROVIDER_RATE_LIMITED = "provider_rate_limited"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    INCONCLUSIVE_RESPONSE = "inconclusive_response"
+    TIMEOUT = "timeout"
+    PROTOCOL_ERROR = "protocol_error"
+    POLICY_BUDGET_EXHAUSTED = "policy_budget_exhausted"
 
 
 class Severity(StrEnum):

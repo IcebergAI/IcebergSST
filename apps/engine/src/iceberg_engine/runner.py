@@ -16,10 +16,10 @@ exception is a refused lease: the task was already claimed, finished, or
 cancelled, so there is nothing to report and the correct move is to drop the
 message (ADR 0009 §2).
 
-**Plaintext never leaves this function.** Detection redacts before returning, the
-secret is used exactly twice — hashed, then dropped — and the payload type has no
-field for it. The engine is the last place a secret exists in the clear, which is
-the whole of ADR 0004.
+**Plaintext has one optional outbound path.** Detection redacts before reporting.
+When an administrator has enabled an exact reviewed policy, the candidate may be
+sent once to that provider from this function; it never enters the API payload,
+broker, logs, metrics, audit events, or database (ADR 0004 and ADR 0010).
 """
 
 import base64
@@ -60,6 +60,7 @@ from iceberg_engine.api_client import (
 )
 from iceberg_engine.heartbeat import TaskRegistry
 from iceberg_engine.suppression import prefilter, rules_from_lease
+from iceberg_engine.validation import RateLimiter, ValidationExecutor
 
 logger = structlog.get_logger()
 
@@ -88,6 +89,7 @@ class Candidate:
     rule_id: str
     resource_locator: dict[str, Any]
     payload: dict[str, Any]
+    secret: str = field(repr=False)
 
 
 @dataclass(slots=True)
@@ -138,6 +140,8 @@ def run_task(
     client: EngineClient,
     pack: RulePack,
     tasks: TaskRegistry | None = None,
+    validation_executor: ValidationExecutor | None = None,
+    validation_limiter: RateLimiter | None = None,
 ) -> TaskReport | None:
     """Lease a task, do it, and report.
 
@@ -170,7 +174,16 @@ def run_task(
             if lease.kind == DISCOVERY:
                 _discover(connector, lease, report)
             elif lease.kind == FETCH:
-                _fetch(connector, lease, report, pack=pack, tasks=tasks, task_id=task_id)
+                _fetch(
+                    connector,
+                    lease,
+                    report,
+                    pack=pack,
+                    tasks=tasks,
+                    task_id=task_id,
+                    validation_executor=validation_executor,
+                    validation_limiter=validation_limiter,
+                )
             else:
                 # A kind this engine does not implement (a newer API, say). Fail
                 # loudly rather than silently mis-running it as a fetch.
@@ -309,6 +322,8 @@ def _fetch(
     pack: RulePack,
     tasks: TaskRegistry | None = None,
     task_id: uuid.UUID | None = None,
+    validation_executor: ValidationExecutor | None = None,
+    validation_limiter: RateLimiter | None = None,
 ) -> None:
     """Phase two: scan the content one spec describes.
 
@@ -324,6 +339,7 @@ def _fetch(
     candidates: list[Candidate] = []
     tallies = {"units_truncated": 0, "dropped_below_threshold": 0}
 
+    cancelled = False
     try:
         for unit in connector.fetch(lease.connection, spec, lease.credential, outcome):
             # Between units, not mid-unit: a content unit is small and finishing one
@@ -342,6 +358,9 @@ def _fetch(
             candidates.extend(
                 _candidates(unit, result, pepper=pepper, previous_pepper=previous_pepper, pack=pack)
             )
+    except TaskCancelled:
+        cancelled = True
+        raise
     finally:
         # In a `finally` because a source that gives out halfway — a pagination cap,
         # retries exhausted against a blipping Confluence — must not discard the
@@ -352,6 +371,31 @@ def _fetch(
         # suppressions again at ingest, authoritatively, so this can only ever be
         # the more permissive of the two (#44).
         filtered = prefilter(candidates, rules_from_lease(lease.suppressions))
+
+        eligible_bindings = {
+            rule.id: rule.validator_id for rule in pack.rules if rule.validator_id is not None
+        }
+        validator = validation_executor or ValidationExecutor.from_payloads(
+            [
+                policy
+                for policy in lease.validation_policies
+                if eligible_bindings.get(str(policy.get("rule_id")))
+                == str(policy.get("validator_id"))
+            ],
+            limiter=validation_limiter,
+        )
+        # Cancellation is an explicit revocation of further sensitive work. Keep
+        # finalization for coverage accounting, but initiate no provider calls
+        # after the heartbeat has observed it.
+        if not cancelled:
+            for candidate in filtered.kept:
+                validation = validator.validate(
+                    rule_id=candidate.rule_id,
+                    secret_hash=str(candidate.payload["secret_hash"]),
+                    secret=candidate.secret,
+                )
+                if validation is not None:
+                    candidate.payload["validation"] = validation.as_payload()
 
         report.findings = [candidate.payload for candidate in filtered.kept]
         report.counts = {
@@ -487,6 +531,7 @@ def _candidates(
             rule_id=found.rule_id,
             resource_locator=locator,
             payload=payload,
+            secret=found.secret,
         )
 
 

@@ -48,6 +48,9 @@ config:
   # Matches scoring below this are dropped (#70). Delivered to engines in their
   # lease, so it is api-side only.
   confidenceThreshold: 0.5
+  # ADR 0010: still requires an enabled admin policy for an exact reviewed
+  # detector/validator pair. Keep false until provider egress is enforced.
+  secretValidationEnabled: false
 
   # Authentication (ADR 0005). The client *secret* is in `secrets`.
   oidc:

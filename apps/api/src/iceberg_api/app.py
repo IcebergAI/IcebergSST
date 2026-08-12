@@ -36,6 +36,7 @@ from iceberg_api.scans.routes import router as scans_router
 from iceberg_api.sources.routes import router as sources_router
 from iceberg_api.sources.schedule_routes import router as schedules_router
 from iceberg_api.users.routes import router as users_router
+from iceberg_api.validation.routes import router as validation_policies_router
 from iceberg_api.web import errors as web_errors
 from iceberg_api.web.assets import STATIC_DIR
 from iceberg_api.web.routes import router as web_router
@@ -119,6 +120,7 @@ def create_app(settings: ApiSettings | None = None, *, background: bool = True) 
     app.include_router(sources_router, prefix=API_PREFIX)
     app.include_router(suppressions_router, prefix=API_PREFIX)
     app.include_router(users_router, prefix=API_PREFIX)
+    app.include_router(validation_policies_router, prefix=API_PREFIX)
 
     # The browser surface, last: its routes live at the root, and mounting them
     # after the API guarantees no web path can shadow an /api/v1 one.

@@ -212,6 +212,17 @@ def test_redaction_keep_is_carried_onto_the_policy() -> None:
     assert policy.keep == 8
 
 
+def test_reviewed_validator_binding_is_carried_on_the_rule() -> None:
+    pack = load_pack(_pack("id: github-token", "validator: github-token-v1"))
+
+    assert pack.rule("github-token").validator_id == "github-token-v1"
+
+
+def test_unknown_validator_binding_fails_at_pack_load() -> None:
+    with pytest.raises(RulePackError, match="unknown credential validator"):
+        load_pack(_pack("validator: caller-controlled-provider"))
+
+
 def test_an_unknown_rule_id_is_a_key_error() -> None:
     with pytest.raises(KeyError):
         load_pack(MINIMAL).rule("no-such-rule")

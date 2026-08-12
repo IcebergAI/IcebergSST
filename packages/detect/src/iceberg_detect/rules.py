@@ -85,6 +85,7 @@ _RULE_KEYS = frozenset(
         "redaction",
         "redaction_keep",
         "base_confidence",
+        "validator",
     }
 )
 
@@ -138,6 +139,11 @@ class Rule:
 
     #: Confidence before the entropy and proximity signals adjust it.
     base_confidence: float = 0.5
+
+    #: Optional immutable binding to a reviewed credential validator. Runtime
+    #: policy may enable this exact binding, but can never substitute another
+    #: provider or destination.
+    validator_id: str | None = None
 
     #: The named capture group holding the secret, when the pattern needs context
     #: around it to match (``password=(?P<secret>…)``). Falls back to the whole
@@ -284,7 +290,19 @@ def _build_rule(entry: object, index: int) -> Rule:
         requires_keyword=requires_keyword,
         redaction=redaction,
         base_confidence=_unit_float(entry.get("base_confidence", 0.5), where, "base_confidence"),
+        validator_id=_validator_id(entry.get("validator"), where, rule_id),
     )
+
+
+def _validator_id(value: object, where: str, rule_id: str) -> str | None:
+    if value is None:
+        return None
+    if value != "github-token-v1" or rule_id not in {
+        "github-token",
+        "github-fine-grained-pat",
+    }:
+        raise RulePackError(f"{where}: unknown credential validator {value!r}")
+    return str(value)
 
 
 def _compile(source: str, flag_names: object, where: str) -> re.Pattern[str]:

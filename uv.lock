@@ -514,6 +514,7 @@ dependencies = [
     { name = "iceberg-core" },
     { name = "iceberg-detect" },
     { name = "prometheus-client" },
+    { name = "redis" },
     { name = "structlog" },
 ]
 
@@ -525,6 +526,7 @@ requires-dist = [
     { name = "iceberg-core", editable = "packages/core" },
     { name = "iceberg-detect", editable = "packages/detect" },
     { name = "prometheus-client", specifier = ">=0.25.0" },
+    { name = "redis", specifier = ">=8.0.1" },
     { name = "structlog", specifier = ">=26.1.0" },
 ]
 

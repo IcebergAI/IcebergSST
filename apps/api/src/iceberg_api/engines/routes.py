@@ -55,6 +55,7 @@ from iceberg_api.engines.schemas import (
 )
 from iceberg_api.scans import service
 from iceberg_api.scans.coverage import failure_report
+from iceberg_api.validation import service as validation_service
 
 router = APIRouter(tags=["engines"])
 logger = structlog.get_logger()
@@ -322,6 +323,9 @@ async def lease_task(
             rule.as_payload() for rule in suppressions.applicable_suppressions(db, source.id)
         ],
         confidence_threshold=settings.confidence_threshold,
+        validation_policies=validation_service.enabled_lease_snapshot(
+            db, deployment_enabled=settings.secret_validation_enabled
+        ),
     )
 
 
@@ -375,6 +379,15 @@ async def submit_results(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "fetch tasks may report findings but not task specs",
         )
+
+    try:
+        validation_service.require_authorized_results(
+            db,
+            body.findings,
+            deployment_enabled=settings.secret_validation_enabled,
+        )
+    except validation_service.UnauthorizedValidation as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
 
     now = datetime.now(UTC)
 
