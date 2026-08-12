@@ -24,7 +24,7 @@ from iceberg_api.dispatch import DispatcherDep
 from iceberg_api.engines.schemas import ScanTaskRead
 from iceberg_api.pagination import DEFAULT_LIMIT
 from iceberg_api.scans import routes as api
-from iceberg_api.scans.schemas import ScanRead
+from iceberg_api.scans.schemas import CoverageManifest, ScanRead
 from iceberg_api.sources.routes import list_sources, read_source
 from iceberg_api.web.dependencies import CurrentViewer, WebAnalyst, WebViewer
 from iceberg_api.web.forms import error_text
@@ -101,11 +101,16 @@ async def scan_detail(
     scan = await api.read_scan(scan_id=scan_id, user=user, db=db)
     source = await read_source(source_id=scan.source_id, user=user, db=db)
     tasks = await api.list_scan_tasks(scan_id=scan_id, user=user, db=db)
+    coverage = (
+        None
+        if _is_active(scan)
+        else await api.read_scan_coverage(scan_id=scan_id, user=user, db=db)
+    )
     return render_page(
         request,
         "scans/detail.html",
         viewer,
-        _status_context(scan, tasks) | {"source": source},
+        _status_context(scan, tasks, coverage=coverage) | {"source": source},
     )
 
 
@@ -120,7 +125,17 @@ async def scan_status_fragment(
     """The polled fragment: status, tallies, and per-task progress."""
     scan = await api.read_scan(scan_id=scan_id, user=user, db=db)
     tasks = await api.list_scan_tasks(scan_id=scan_id, user=user, db=db)
-    return render_fragment(request, "scan_status.html", viewer, _status_context(scan, tasks))
+    coverage = (
+        None
+        if _is_active(scan)
+        else await api.read_scan_coverage(scan_id=scan_id, user=user, db=db)
+    )
+    return render_fragment(
+        request,
+        "scan_status.html",
+        viewer,
+        _status_context(scan, tasks, coverage=coverage),
+    )
 
 
 @router.post("/sources/{source_id}/scan", dependencies=[CsrfProtected])
@@ -166,12 +181,25 @@ async def cancel_scan(
         message = error_text(exc)
 
     tasks = await api.list_scan_tasks(scan_id=scan_id, user=analyst, db=db)
+    coverage = (
+        None
+        if _is_active(scan)
+        else await api.read_scan_coverage(scan_id=scan_id, user=analyst, db=db)
+    )
     return render_fragment(
-        request, "scan_status.html", viewer, _status_context(scan, tasks) | {"message": message}
+        request,
+        "scan_status.html",
+        viewer,
+        _status_context(scan, tasks, coverage=coverage) | {"message": message},
     )
 
 
-def _status_context(scan: ScanRead, tasks: Sequence[ScanTaskRead]) -> dict[str, object]:
+def _status_context(
+    scan: ScanRead,
+    tasks: Sequence[ScanTaskRead],
+    *,
+    coverage: CoverageManifest | None = None,
+) -> dict[str, object]:
     """Everything the status fragment renders, computed in one place.
 
     Progress is counted from the tasks rather than taken from a field: a scan's
@@ -189,6 +217,7 @@ def _status_context(scan: ScanRead, tasks: Sequence[ScanTaskRead]) -> dict[str, 
         "task_finished": len(finished),
         "percent": int(len(finished) * 100 / total) if total else 0,
         "message": None,
+        "coverage": coverage,
     }
 
 

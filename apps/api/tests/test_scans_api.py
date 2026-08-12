@@ -231,7 +231,26 @@ def test_finalisation_and_reconciliation_stand_or_fall_together(
     """
     scan = _launch(session, dispatcher, _source(session))
     task = session.exec(select(ScanTask).where(ScanTask.scan_id == scan.id)).one()
-    service.complete_task(session, task, status=ScanTaskStatus.COMPLETED)
+    service.complete_task(
+        session,
+        task,
+        status=ScanTaskStatus.COMPLETED,
+        coverage={
+            "version": "1",
+            "phase": "discovery",
+            "counts": {
+                "requested": 0,
+                "discovered": 0,
+                "scanned": 0,
+                "skipped": 0,
+                "failed": 0,
+            },
+            "scope": {"requested": 0, "discovered": 0, "gaps": 0},
+            "reasons": [],
+            "gaps": [],
+            "gaps_omitted": 0,
+        },
+    )
     session.commit()
 
     def die(*args: object, **kwargs: object) -> None:

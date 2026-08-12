@@ -35,6 +35,33 @@ FINGERPRINT = "a" * 64
 OTHER_FINGERPRINT = "b" * 64
 
 
+def _clean_coverage(
+    phase: ScanTaskKind,
+    *,
+    scanned: int = 0,
+    scope_discovered: int = 0,
+) -> dict[str, Any]:
+    return {
+        "version": "1",
+        "phase": phase.value,
+        "counts": {
+            "requested": scanned,
+            "discovered": scanned,
+            "scanned": scanned,
+            "skipped": 0,
+            "failed": 0,
+        },
+        "scope": {
+            "requested": None,
+            "discovered": scope_discovered,
+            "gaps": 0,
+        },
+        "reasons": [],
+        "gaps": [],
+        "gaps_omitted": 0,
+    }
+
+
 def _source(session: Session, store: EnvKeyBackend) -> Source:
     source = Source(
         name="confluence-prod",
@@ -100,7 +127,11 @@ class Fixture:
         """Complete discovery with one fetch spec and lease the resulting task."""
         self.lease(self.discovery)
         self.session.refresh(self.discovery)
-        self.report(self.discovery, task_specs=[{"page_ids": ["1"]}])
+        self.report(
+            self.discovery,
+            task_specs=[{"page_ids": ["1"]}],
+            coverage=_clean_coverage(ScanTaskKind.DISCOVERY, scope_discovered=1),
+        )
         task = self.session.exec(
             select(ScanTask)
             .where(ScanTask.scan_id == self.scan.id)
@@ -403,6 +434,212 @@ def test_negative_engine_counts_are_rejected(scan_fixture: Fixture) -> None:
     assert "units_failed" not in fixture.scan.counts
 
 
+@pytest.mark.parametrize(
+    "coverage",
+    [
+        {
+            "version": "1",
+            "phase": "fetch",
+            "counts": {
+                "requested": 1,
+                "discovered": 1,
+                "scanned": 1,
+                "skipped": 0,
+                "failed": 1,
+            },
+            "scope": {"requested": None, "discovered": 0, "gaps": 0},
+            "reasons": [],
+            "gaps": [],
+            "gaps_omitted": 0,
+        },
+        {
+            "version": "1",
+            "phase": "fetch",
+            "counts": {
+                "requested": 0,
+                "discovered": 0,
+                "scanned": 0,
+                "skipped": 0,
+                "failed": 0,
+            },
+            "scope": {"requested": None, "discovered": 0, "gaps": 1},
+            "reasons": [{"outcome": "scope_gap", "reason": "made_up", "count": 1}],
+            "gaps": [],
+            "gaps_omitted": 1,
+        },
+        {
+            "version": "1",
+            "phase": "fetch",
+            "counts": {
+                "requested": 1,
+                "discovered": 1,
+                "scanned": 0,
+                "skipped": 1,
+                "failed": 0,
+            },
+            "scope": {"requested": None, "discovered": 0, "gaps": 0},
+            "reasons": [{"outcome": "skipped", "reason": "permission_denied", "count": 1}],
+            "gaps": [],
+            "gaps_omitted": 1,
+        },
+        {
+            "version": "1",
+            "phase": "fetch",
+            "counts": {
+                "requested": 2,
+                "discovered": 2,
+                "scanned": 0,
+                "skipped": 1,
+                "failed": 1,
+            },
+            "scope": {"requested": None, "discovered": 0, "gaps": 0},
+            "reasons": [
+                {"outcome": "skipped", "reason": "empty_content", "count": 1},
+                {"outcome": "failed", "reason": "size_limit", "count": 1},
+            ],
+            "gaps": [
+                {
+                    "kind": "page",
+                    "outcome": "skipped",
+                    "reason": "empty_content",
+                    "reference": "a" * 64,
+                },
+                {
+                    "kind": "comment",
+                    "outcome": "skipped",
+                    "reason": "empty_content",
+                    "reference": "b" * 64,
+                },
+            ],
+            "gaps_omitted": 0,
+        },
+    ],
+)
+def test_non_reconciling_or_unknown_coverage_is_rejected(
+    scan_fixture: Fixture,
+    coverage: dict[str, Any],
+) -> None:
+    fixture = scan_fixture
+    task = fixture.fetch_task()
+
+    response = fixture.report(task, coverage=coverage)
+
+    assert response.status_code == 422
+    fixture.session.refresh(task)
+    assert task.status is ScanTaskStatus.LEASED
+    assert task.coverage == {}
+
+
+def test_coverage_phase_must_match_the_leased_task(scan_fixture: Fixture) -> None:
+    fixture = scan_fixture
+    task = fixture.fetch_task()
+
+    response = fixture.report(
+        task,
+        coverage={
+            "version": "1",
+            "phase": "discovery",
+            "counts": {
+                "requested": 0,
+                "discovered": 0,
+                "scanned": 0,
+                "skipped": 0,
+                "failed": 0,
+            },
+            "scope": {"requested": 0, "discovered": 0, "gaps": 0},
+            "reasons": [],
+            "gaps": [],
+            "gaps_omitted": 0,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "coverage phase does not match the leased task kind"
+    fixture.session.refresh(task)
+    assert task.status is ScanTaskStatus.LEASED
+    assert task.coverage == {}
+
+
+def test_discovery_coverage_must_reconcile_to_reported_specs(scan_fixture: Fixture) -> None:
+    fixture = scan_fixture
+    fixture.lease(fixture.discovery)
+    fixture.session.refresh(fixture.discovery)
+
+    response = fixture.report(
+        fixture.discovery,
+        task_specs=[{"page_ids": ["1"]}],
+        coverage=_clean_coverage(ScanTaskKind.DISCOVERY, scope_discovered=2),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "discovery coverage must reconcile to the reported task specs"
+    )
+    fixture.session.refresh(fixture.discovery)
+    assert fixture.discovery.status is ScanTaskStatus.LEASED
+
+
+def test_task_payloads_cannot_cross_the_discovery_fetch_boundary(scan_fixture: Fixture) -> None:
+    fixture = scan_fixture
+    fixture.lease(fixture.discovery)
+    fixture.session.refresh(fixture.discovery)
+
+    discovery = fixture.report(fixture.discovery, findings=[_finding_payload()])
+    assert discovery.status_code == 422
+    assert discovery.json()["detail"] == "discovery tasks may report task specs but not findings"
+
+    # Complete discovery correctly so a fetch task can exercise the inverse.
+    fixture.report(
+        fixture.discovery,
+        task_specs=[{"page_ids": ["1"]}],
+        coverage=_clean_coverage(ScanTaskKind.DISCOVERY, scope_discovered=1),
+    )
+    task = fixture.session.exec(
+        select(ScanTask)
+        .where(ScanTask.scan_id == fixture.scan.id)
+        .where(ScanTask.kind == ScanTaskKind.FETCH)
+    ).one()
+    fixture.lease(task)
+    fixture.session.refresh(task)
+
+    fetch = fixture.report(task, task_specs=[{"page_ids": ["2"]}])
+    assert fetch.status_code == 422
+    assert fetch.json()["detail"] == "fetch tasks may report findings but not task specs"
+
+
+def test_result_replay_cannot_change_the_frozen_coverage_manifest(
+    scan_fixture: Fixture,
+) -> None:
+    fixture = scan_fixture
+    task = fixture.fetch_task()
+    key = f"{task.id}:{task.attempts}"
+    coverage = {
+        "version": "1",
+        "phase": "fetch",
+        "counts": {
+            "requested": 1,
+            "discovered": 1,
+            "scanned": 1,
+            "skipped": 0,
+            "failed": 0,
+        },
+        "scope": {"requested": None, "discovered": 0, "gaps": 0},
+        "reasons": [],
+        "gaps": [],
+        "gaps_omitted": 0,
+    }
+    first = fixture.report(task, idempotency_key=key, coverage=coverage)
+    fixture.session.refresh(fixture.scan)
+    frozen = dict(fixture.scan.coverage_manifest)
+
+    second = fixture.report(task, idempotency_key=key, coverage=coverage)
+    fixture.session.refresh(fixture.scan)
+
+    assert first.status_code == 200
+    assert second.json()["replay"] is True
+    assert fixture.scan.coverage_manifest == frozen
+
+
 def test_a_failed_scan_says_why_it_failed(scan_fixture: Fixture) -> None:
     """`Scan.error` is on the read contract, so something has to write it.
 
@@ -457,7 +694,11 @@ def test_a_completed_scan_auto_resolves_what_it_did_not_see(
     fixture.session.commit()
 
     task = fixture.fetch_task()
-    response = fixture.report(task, findings=[_finding_payload()])
+    response = fixture.report(
+        task,
+        findings=[_finding_payload()],
+        coverage=_clean_coverage(ScanTaskKind.FETCH, scanned=1),
+    )
 
     assert response.json()["scan_status"] == ScanStatus.COMPLETED.value
     fixture.session.refresh(remediated)
@@ -470,6 +711,70 @@ def test_a_completed_scan_auto_resolves_what_it_did_not_see(
     assert event.actor_id is None
     fixture.session.refresh(fixture.scan)
     assert fixture.scan.counts["resolved"] == 1
+
+
+@pytest.mark.parametrize(
+    "coverage",
+    [
+        None,
+        {
+            "version": "1",
+            "phase": "fetch",
+            "counts": {
+                "requested": 1,
+                "discovered": 1,
+                "scanned": 0,
+                "skipped": 1,
+                "failed": 0,
+            },
+            "scope": {"requested": None, "discovered": 0, "gaps": 0},
+            "reasons": [{"outcome": "skipped", "reason": "empty_content", "count": 1}],
+            "gaps": [],
+            "gaps_omitted": 1,
+        },
+    ],
+    ids=["old-engine-unreported", "reported-skip"],
+)
+def test_incomplete_coverage_cannot_authorize_reconciliation(
+    scan_fixture: Fixture,
+    coverage: dict[str, Any] | None,
+) -> None:
+    fixture = scan_fixture
+    earlier = Scan(
+        source_id=fixture.source.id,
+        trigger=ScanTrigger.MANUAL,
+        status=ScanStatus.COMPLETED,
+    )
+    fixture.session.add(earlier)
+    fixture.session.commit()
+    unseen = Finding(
+        source_id=fixture.source.id,
+        fingerprint=OTHER_FINGERPRINT,
+        rule_id="aws-access-key-id",
+        rulepack_version="2026.07.1",
+        resource_locator={},
+        redacted_snippet="[redacted]",
+        secret_hash="c" * 64,
+        severity="high",
+        first_seen_scan_id=earlier.id,
+        last_seen_scan_id=earlier.id,
+    )
+    fixture.session.add(unseen)
+    fixture.session.commit()
+    task = fixture.fetch_task()
+
+    body: dict[str, Any] = {}
+    if coverage is not None:
+        body["coverage"] = coverage
+    response = fixture.report(task, **body)
+
+    assert response.status_code == 200
+    assert response.json()["scan_status"] == ScanStatus.COMPLETED.value
+    fixture.session.refresh(unseen)
+    assert unseen.state is FindingState.OPEN
+    fixture.session.refresh(fixture.scan)
+    assert fixture.scan.coverage_manifest["coverage_state"] == "partial"
+    assert "resolved" not in fixture.scan.counts
 
 
 def test_reconciliation_never_resolves_a_suppressed_finding(scan_fixture: Fixture) -> None:

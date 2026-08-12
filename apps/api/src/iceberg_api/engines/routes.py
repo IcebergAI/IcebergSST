@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 
 import structlog
 from fastapi import APIRouter, HTTPException, status
-from iceberg_core.enums import ScanTaskKind, ScanTaskStatus
+from iceberg_core.enums import CoverageReason, ScanTaskKind, ScanTaskStatus
 from iceberg_core.models import (
     AUDIT_ENGINE_REGISTERED,
     AUDIT_ENGINE_TOKEN_ROTATED,
@@ -54,6 +54,7 @@ from iceberg_api.engines.schemas import (
     RulepackReport,
 )
 from iceberg_api.scans import service
+from iceberg_api.scans.coverage import failure_report
 
 router = APIRouter(tags=["engines"])
 logger = structlog.get_logger()
@@ -75,6 +76,14 @@ def _effective_outcome(body: ResultsSubmission) -> tuple[ScanTaskStatus, str | N
     """
     failed_units = body.counts.get("units_failed", 0)
     truncated_units = body.counts.get("units_truncated", 0)
+    if body.coverage is not None:
+        failed_objects = body.coverage.counts.failed
+        scope_gaps = body.coverage.scope.gaps
+        if body.status is ScanTaskStatus.COMPLETED and (failed_objects or scope_gaps):
+            return (
+                ScanTaskStatus.FAILED,
+                "coverage report contains uninspected requested content",
+            )
     if body.status is ScanTaskStatus.COMPLETED and failed_units > 0 and not truncated_units:
         noun = "unit" if failed_units == 1 else "units"
         return (
@@ -246,7 +255,11 @@ async def lease_task(
         pepper = base64.b64encode(store.get_pepper()).decode()
     except SecretStoreError as exc:
         service.complete_task(
-            db, task, status=ScanTaskStatus.FAILED, error="fingerprint pepper unavailable"
+            db,
+            task,
+            status=ScanTaskStatus.FAILED,
+            error="fingerprint pepper unavailable",
+            coverage=failure_report(task.kind, CoverageReason.CONNECTOR_ERROR),
         )
         db.commit()
         service.finalize_and_reconcile(db, task.scan_id)
@@ -275,7 +288,11 @@ async def lease_task(
             # Fail the task rather than send an engine off without a credential: a
             # scan that cannot authenticate should say so, not report zero findings.
             service.complete_task(
-                db, task, status=ScanTaskStatus.FAILED, error="source credential unreadable"
+                db,
+                task,
+                status=ScanTaskStatus.FAILED,
+                error="source credential unreadable",
+                coverage=failure_report(task.kind, CoverageReason.PERMISSION_DENIED),
             )
             db.commit()
             # The task just went terminal outside the results path, so the scan
@@ -334,6 +351,30 @@ async def submit_results(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "an engine may report completed or failed only",
         )
+    if body.coverage is not None and body.coverage.phase is not task.kind:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "coverage phase does not match the leased task kind",
+        )
+    if (
+        task.kind is ScanTaskKind.DISCOVERY
+        and body.coverage is not None
+        and body.coverage.scope.discovered != len(body.task_specs)
+    ):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "discovery coverage must reconcile to the reported task specs",
+        )
+    if task.kind is ScanTaskKind.DISCOVERY and body.findings:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "discovery tasks may report task specs but not findings",
+        )
+    if task.kind is ScanTaskKind.FETCH and body.task_specs:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "fetch tasks may report findings but not task specs",
+        )
 
     now = datetime.now(UTC)
 
@@ -390,7 +431,14 @@ async def submit_results(
     ingest.merge_scan_counts(scan, outcome, body.counts)
     if body.rulepack_version:
         scan.rulepack_version = body.rulepack_version
-    service.complete_task(db, task, status=task_status, error=task_error, now=now)
+    service.complete_task(
+        db,
+        task,
+        status=task_status,
+        error=task_error,
+        coverage=body.coverage.model_dump(mode="json") if body.coverage else None,
+        now=now,
+    )
     db.add(scan)
     db.commit()
 

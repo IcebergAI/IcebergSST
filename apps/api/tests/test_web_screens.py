@@ -14,9 +14,11 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from iceberg_api.pagination import DEFAULT_LIMIT
+from iceberg_api.scans.coverage import failure_report
 from iceberg_api.sources.routes import get_prober
 from iceberg_api.sources.schemas import ConnectivityResult
 from iceberg_core.enums import (
+    CoverageReason,
     FindingEventKind,
     FindingState,
     NotificationChannelType,
@@ -347,6 +349,99 @@ def test_a_finished_scan_stops_polling(
     assert response.status_code == 200
     assert "hx-trigger" not in response.text
     assert 'aria-valuenow="100"' in response.text
+
+
+@pytest.mark.parametrize(
+    ("status", "expected", "notice_class"),
+    [
+        (ScanStatus.COMPLETED, "Clean coverage", "notice notice--ok"),
+        (ScanStatus.PARTIAL, "Partial coverage", "notice notice--warn"),
+        (ScanStatus.FAILED, "Coverage failed", "notice notice--crit"),
+        (ScanStatus.CANCELLED, "Coverage cancelled", "notice"),
+    ],
+)
+def test_terminal_coverage_states_are_explicit_in_the_polled_fragment(
+    client: TestClient,
+    session: Session,
+    scan_with_tasks: Callable[..., Scan],
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+    status: ScanStatus,
+    expected: str,
+    notice_class: str,
+) -> None:
+    login_as(make_user(UserRole.VIEWER))
+    scan = scan_with_tasks(status, finished=2)
+    tasks = list(session.exec(select(ScanTask).where(ScanTask.scan_id == scan.id)))
+    for task in tasks:
+        if status is ScanStatus.COMPLETED:
+            task.coverage = {
+                "version": "1",
+                "phase": "fetch",
+                "counts": {
+                    "requested": 1,
+                    "discovered": 1,
+                    "scanned": 1,
+                    "skipped": 0,
+                    "failed": 0,
+                },
+                "scope": {"requested": None, "discovered": 0, "gaps": 0},
+                "reasons": [],
+                "gaps": [],
+                "gaps_omitted": 0,
+            }
+        else:
+            task.coverage = failure_report(
+                ScanTaskKind.FETCH,
+                CoverageReason.CANCELLED
+                if status is ScanStatus.CANCELLED
+                else CoverageReason.CONNECTOR_ERROR,
+            )
+    session.commit()
+
+    response = client.get(f"/scans/{scan.id}/status")
+
+    assert response.status_code == 200
+    assert expected in response.text
+    assert f'class="{notice_class}" role=' in response.text
+    assert "Coverage manifest" in response.text
+    assert f"/api/v1/scans/{scan.id}/coverage/export" in response.text
+
+
+def test_source_detail_shows_latest_coverage_summary(
+    client: TestClient,
+    session: Session,
+    scan_with_tasks: Callable[..., Scan],
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    login_as(make_user(UserRole.VIEWER))
+    scan = scan_with_tasks(ScanStatus.COMPLETED, finished=2)
+    tasks = list(session.exec(select(ScanTask).where(ScanTask.scan_id == scan.id)))
+    for task in tasks:
+        task.coverage = {
+            "version": "1",
+            "phase": "fetch",
+            "counts": {
+                "requested": 1,
+                "discovered": 1,
+                "scanned": 1,
+                "skipped": 0,
+                "failed": 0,
+            },
+            "scope": {"requested": None, "discovered": 0, "gaps": 0},
+            "reasons": [],
+            "gaps": [],
+            "gaps_omitted": 0,
+        }
+    session.commit()
+
+    response = client.get(f"/sources/{scan.source_id}")
+
+    assert response.status_code == 200
+    assert "Source coverage" in response.text
+    assert "Complete coverage" in response.text
+    assert "2 scanned" in response.text
 
 
 def test_cancelling_a_scan_drives_the_cancel_route(

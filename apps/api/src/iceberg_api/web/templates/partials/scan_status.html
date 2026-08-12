@@ -100,6 +100,84 @@
     </div>
   </section>
 
+  {% if coverage %}
+  <section class="card card-pad-lg section-gap" aria-labelledby="coverage-heading">
+    <div class="head-row">
+      <div>
+        <div class="eyebrow">Source assurance</div>
+        <h2 id="coverage-heading" class="section-title">Coverage manifest</h2>
+      </div>
+      <a class="btn btn--ghost btn--sm" href="/api/v1/scans/{{ scan.id }}/coverage/export">Export JSON</a>
+    </div>
+
+    {% if coverage.coverage_state.value == 'complete' %}
+    <div class="notice notice--ok" role="status">
+      <div><strong>Clean coverage.</strong> Every enumerated object was inspected and every task reported coverage evidence.</div>
+    </div>
+    {% elif coverage.coverage_state.value == 'partial' %}
+    <div class="notice notice--warn" role="status">
+      <div><strong>Partial coverage.</strong> Review the skipped, failed, or unknown scope below before treating absence as assurance.</div>
+    </div>
+    {% elif coverage.coverage_state.value == 'failed' %}
+    <div class="notice notice--crit" role="alert">
+      <div><strong>Coverage failed.</strong> The scan did not establish usable source coverage.</div>
+    </div>
+    {% else %}
+    <div class="notice" role="status">
+      <div><strong>Coverage cancelled.</strong> Unfinished work is recorded as a gap, not as inspected content.</div>
+    </div>
+    {% endif %}
+
+    <div class="stat-grid">
+      <div class="stat"><div class="stat-label">Requested</div><div class="stat-num">{{ coverage.counts.requested }}</div><div class="stat-foot">enumerated objects</div></div>
+      <div class="stat"><div class="stat-label">Scanned</div><div class="stat-num">{{ coverage.counts.scanned }}</div><div class="stat-foot">inspected completely</div></div>
+      <div class="stat"><div class="stat-label">Skipped</div><div class="stat-num">{{ coverage.counts.skipped }}</div><div class="stat-foot">policy exclusions</div></div>
+      <div class="stat"><div class="stat-label">Failed</div><div class="stat-num">{{ coverage.counts.failed }}</div><div class="stat-foot">{{ coverage.scope.gaps }} unknown scope gap(s)</div></div>
+    </div>
+
+    <dl class="kv">
+      <dt>Configuration version</dt><dd class="mono">{{ coverage.source_configuration_version | dt }}</dd>
+      <dt>Tasks reporting</dt><dd>{{ coverage.task_counts.reported }} of {{ coverage.task_counts.total }}</dd>
+      <dt>Gap references</dt><dd>{{ coverage.gaps | length }} retained · first 25 listed · {{ coverage.gaps_omitted }} omitted</dd>
+    </dl>
+
+    {% if coverage.reasons %}
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Outcome</th><th>Reason</th><th>Count</th></tr></thead>
+        <tbody>
+          {% for reason in coverage.reasons %}
+          <tr>
+            <td>{{ reason.outcome.value | replace('_', ' ') }}</td>
+            <td class="mono">{{ reason.reason.value }}</td>
+            <td class="mono">{{ reason.count }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    {% if coverage.gaps %}
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Object</th><th>Outcome</th><th>Reason</th><th>Opaque reference</th></tr></thead>
+        <tbody>
+          {% for gap in coverage.gaps[:25] %}
+          <tr>
+            <td>{{ gap.kind.value }}</td>
+            <td>{{ gap.outcome.value | replace('_', ' ') }}</td>
+            <td class="mono">{{ gap.reason.value }}</td>
+            <td class="mono">{{ gap.reference | short }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </section>
+  {% endif %}
+
   <section class="card section-gap">
     <div class="card-head"><h2 class="section-title">Tasks</h2></div>
     {% if tasks %}

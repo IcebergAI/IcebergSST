@@ -1,5 +1,6 @@
 """The connector protocol, task specs, and the registry (#45)."""
 
+import json
 from collections.abc import Iterator
 
 import pytest
@@ -11,9 +12,15 @@ from iceberg_connectors import (
     FakeConnector,
     FakePage,
     FetchOutcome,
+    TaskCoverage,
     TaskSpec,
     UnknownConnectorError,
     registry,
+)
+from iceberg_core.enums import (
+    CoverageObjectKind,
+    CoverageReason,
+    ScanTaskKind,
 )
 
 
@@ -71,6 +78,119 @@ def test_fetch_yields_units_and_tallies_skips_and_failures(source: FakeConnector
 
     assert [unit.locator.resource_id for unit in units] == ["page-1", "page-2"]
     assert outcome.as_counts() == {"units": 2, "units_skipped": 1, "units_failed": 1}
+
+
+def test_coverage_reconciles_every_observed_object_to_one_disposition() -> None:
+    coverage = TaskCoverage(
+        phase=ScanTaskKind.FETCH,
+        reference_key=b"coverage-reference-key",
+    )
+
+    coverage.scanned_for(CoverageObjectKind.PAGE, "page-readable")
+    coverage.skipped_for(
+        CoverageReason.EMPTY_CONTENT,
+        CoverageObjectKind.COMMENT,
+        "comment-empty",
+    )
+    coverage.failed_for(
+        CoverageReason.SIZE_LIMIT,
+        CoverageObjectKind.ATTACHMENT,
+        "attachment-too-large",
+    )
+
+    payload = coverage.as_payload()
+    counts = payload["counts"]
+    assert counts == {
+        "requested": 3,
+        "discovered": 3,
+        "scanned": 1,
+        "skipped": 1,
+        "failed": 1,
+    }
+    assert counts["requested"] == counts["scanned"] + counts["skipped"] + counts["failed"]
+    assert payload["reasons"] == [
+        {"outcome": "failed", "reason": "size_limit", "count": 1},
+        {"outcome": "skipped", "reason": "empty_content", "count": 1},
+    ]
+
+
+def test_an_incomplete_scan_replaces_the_objects_scanned_disposition() -> None:
+    coverage = TaskCoverage(phase=ScanTaskKind.FETCH)
+    coverage.scanned_for(CoverageObjectKind.ATTACHMENT, "attachment-1")
+
+    coverage.scanned_but_incomplete(
+        CoverageReason.OUTPUT_LIMIT,
+        CoverageObjectKind.ATTACHMENT,
+        "attachment-1",
+    )
+
+    payload = coverage.as_payload()
+    assert payload["counts"] == {
+        "requested": 1,
+        "discovered": 1,
+        "scanned": 0,
+        "skipped": 0,
+        "failed": 1,
+    }
+    assert payload["reasons"] == [{"outcome": "failed", "reason": "output_limit", "count": 1}]
+
+
+def test_an_unrecorded_object_cannot_be_reconciled_as_incomplete() -> None:
+    coverage = TaskCoverage(phase=ScanTaskKind.FETCH)
+
+    with pytest.raises(ValueError, match="unrecorded object"):
+        coverage.scanned_but_incomplete(
+            CoverageReason.OUTPUT_LIMIT,
+            CoverageObjectKind.ATTACHMENT,
+            "attachment-1",
+        )
+
+
+def test_reason_codes_cannot_change_meaning_between_dispositions() -> None:
+    coverage = TaskCoverage(phase=ScanTaskKind.FETCH)
+
+    with pytest.raises(ValueError, match="not a valid skipped coverage reason"):
+        coverage.skipped_for(
+            CoverageReason.PERMISSION_DENIED,
+            CoverageObjectKind.PAGE,
+            "page-1",
+        )
+
+    assert coverage.as_payload()["counts"] == {
+        "requested": 0,
+        "discovered": 0,
+        "scanned": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
+
+
+def test_gap_references_are_stable_hmacs_and_never_expose_raw_source_identity() -> None:
+    raw_reference = {
+        "page_id": "private-page-4815",
+        "filename": "customer-payroll.txt",
+    }
+
+    def reference_for(key: bytes, kind: CoverageObjectKind) -> str:
+        coverage = TaskCoverage(phase=ScanTaskKind.FETCH, reference_key=key)
+        coverage.failed_for(CoverageReason.PERMISSION_DENIED, kind, raw_reference)
+        payload = coverage.as_payload()
+        assert "private-page-4815" not in json.dumps(payload)
+        assert "customer-payroll.txt" not in json.dumps(payload)
+        reference = payload["gaps"][0]["reference"]
+        assert isinstance(reference, str)
+        return reference
+
+    first = reference_for(b"key-one", CoverageObjectKind.ATTACHMENT)
+    repeated = reference_for(b"key-one", CoverageObjectKind.ATTACHMENT)
+    other_key = reference_for(b"key-two", CoverageObjectKind.ATTACHMENT)
+    other_kind = reference_for(b"key-one", CoverageObjectKind.PAGE)
+
+    assert len(first) == 64
+    assert int(first, 16) >= 0
+    assert first == repeated
+    assert first != other_key
+    assert first != other_kind
 
 
 def test_the_outcome_is_populated_even_if_the_caller_stops_early(source: FakeConnector) -> None:

@@ -15,7 +15,7 @@ from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from iceberg_core.enums import SourceType
+from iceberg_core.enums import ACTIVE_SCAN_STATUSES, SourceType
 from iceberg_core.models import (
     AUDIT_SOURCE_CREATED,
     AUDIT_SOURCE_CREDENTIAL_ROTATED,
@@ -23,11 +23,12 @@ from iceberg_core.models import (
     AUDIT_SOURCE_DELETED,
     AUDIT_SOURCE_UPDATED,
     AUDIT_TARGET_SOURCE,
+    Scan,
     Source,
 )
 from iceberg_core.secrets import SecretStoreError
 from pydantic import SecretStr, ValidationError
-from sqlmodel import select
+from sqlmodel import col, select
 
 from iceberg_api import audit
 from iceberg_api.auth.dependencies import CsrfProtected, SecretStoreDep, SessionDep
@@ -175,7 +176,29 @@ async def update_source(
     store: SecretStoreDep,
 ) -> SourceRead:
     """Edit a source, and rotate its credential if a new one is supplied."""
-    source = _load(db, source_id)
+    source = db.exec(
+        select(Source).where(col(Source.id) == source_id).with_for_update()
+    ).one_or_none()
+    if source is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "source not found")
+    active = db.exec(
+        select(Scan)
+        .where(col(Scan.source_id) == source_id)
+        .where(col(Scan.status).in_(list(ACTIVE_SCAN_STATUSES)))
+    ).first()
+    if active is not None and any(
+        value is not None
+        for value in (
+            changes.name,
+            changes.connection,
+            changes.credential,
+            changes.enabled,
+        )
+    ):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"source has active scan {active.id}; cancel or finish it before editing",
+        )
     changed: list[str] = []
 
     if changes.name is not None and changes.name != source.name:

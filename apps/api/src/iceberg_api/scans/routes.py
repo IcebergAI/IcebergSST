@@ -13,7 +13,7 @@ import uuid
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 from iceberg_core.enums import ACTIVE_SCAN_STATUSES, ScanStatus, ScanTrigger
 from iceberg_core.models import Scan, ScanTask, Source
 from sqlmodel import col, select
@@ -23,8 +23,9 @@ from iceberg_api.auth.rbac import AnalystUser, ViewerUser
 from iceberg_api.dispatch import DispatcherDep
 from iceberg_api.engines.schemas import ScanTaskRead
 from iceberg_api.pagination import DEFAULT_LIMIT, MAX_LIMIT, after, build_page, position
+from iceberg_api.scans import coverage as coverage_service
 from iceberg_api.scans import service
-from iceberg_api.scans.schemas import ScanRead
+from iceberg_api.scans.schemas import CoverageManifest, ScanRead
 from iceberg_api.schemas import Page
 
 router = APIRouter(tags=["scans"])
@@ -108,6 +109,67 @@ async def list_scans(
 @router.get("/scans/{scan_id}")
 async def read_scan(scan_id: uuid.UUID, user: ViewerUser, db: SessionDep) -> ScanRead:
     return ScanRead.model_validate(_load(db, scan_id))
+
+
+def _coverage_for(db: SessionDep, scan: Scan) -> CoverageManifest:
+    if scan.status in ACTIVE_SCAN_STATUSES:
+        raise HTTPException(status.HTTP_409_CONFLICT, "scan coverage is available when it finishes")
+    tasks = list(
+        db.exec(
+            select(ScanTask)
+            .where(col(ScanTask.scan_id) == scan.id)
+            .order_by(col(ScanTask.created_at), col(ScanTask.id))
+        )
+    )
+    return coverage_service.frozen_or_built_manifest(scan, tasks)
+
+
+@router.get("/scans/{scan_id}/coverage")
+async def read_scan_coverage(
+    scan_id: uuid.UUID,
+    user: ViewerUser,
+    db: SessionDep,
+) -> CoverageManifest:
+    """The immutable allowlisted coverage evidence for one terminal scan."""
+    return _coverage_for(db, _load(db, scan_id))
+
+
+@router.get("/scans/{scan_id}/coverage/export")
+async def export_scan_coverage(
+    scan_id: uuid.UUID,
+    user: ViewerUser,
+    db: SessionDep,
+) -> Response:
+    """Download byte-stable JSON containing no source content or task details."""
+    manifest = _coverage_for(db, _load(db, scan_id))
+    return Response(
+        content=manifest.model_dump_json(),
+        media_type="application/json",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'attachment; filename="scan-{scan_id}-coverage.json"',
+        },
+    )
+
+
+@router.get("/sources/{source_id}/coverage")
+async def read_source_coverage(
+    source_id: uuid.UUID,
+    user: ViewerUser,
+    db: SessionDep,
+) -> CoverageManifest:
+    """Latest terminal assurance for a source, ignoring any newer active run."""
+    if db.get(Source, source_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "source not found")
+    scan = db.exec(
+        select(Scan)
+        .where(col(Scan.source_id) == source_id)
+        .where(col(Scan.status).not_in(list(ACTIVE_SCAN_STATUSES)))
+        .order_by(col(Scan.finished_at).desc(), col(Scan.created_at).desc(), col(Scan.id).desc())
+    ).first()
+    if scan is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "source has no terminal scan coverage")
+    return _coverage_for(db, scan)
 
 
 @router.get("/scans/{scan_id}/tasks")

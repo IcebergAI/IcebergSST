@@ -6,10 +6,21 @@ broker, which is why TLS on this channel is mandatory (docs/security.md).
 """
 
 import uuid
-from typing import Annotated, Any
+from collections import Counter
+from typing import Annotated, Any, Literal, Self
 
-from iceberg_core.enums import EngineStatus, ScanTaskKind, ScanTaskStatus, Severity
-from pydantic import BaseModel, ConfigDict, Field
+from iceberg_core.enums import (
+    MAX_COVERAGE_GAP_REFERENCES,
+    CoverageDisposition,
+    CoverageObjectKind,
+    CoverageReason,
+    EngineStatus,
+    ScanTaskKind,
+    ScanTaskStatus,
+    Severity,
+    coverage_reason_allowed,
+)
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from iceberg_api.schemas import UtcDatetime
 
@@ -171,6 +182,138 @@ class FindingPayload(BaseModel):
     previous_secret_hash: str | None = Field(default=None, min_length=16, max_length=64)
 
 
+class CoverageCounts(BaseModel):
+    """Per-object outcomes for one task, reconciled before ingest."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    requested: int = Field(ge=0)
+    discovered: int = Field(ge=0)
+    scanned: int = Field(ge=0)
+    skipped: int = Field(ge=0)
+    failed: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _reconciles(self) -> Self:
+        if self.requested != self.discovered:
+            raise ValueError("object requested and discovered counts must match")
+        if self.discovered != self.scanned + self.skipped + self.failed:
+            raise ValueError("object outcomes must reconcile to discovered")
+        return self
+
+
+class CoverageScope(BaseModel):
+    """Discovery or collection scopes whose object cardinality may be unknown."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    requested: int | None = Field(default=None, ge=0)
+    discovered: int = Field(ge=0)
+    gaps: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _reconciles_when_requested_is_known(self) -> Self:
+        if self.requested is not None and self.requested != self.discovered + self.gaps:
+            raise ValueError("scope requested count must equal discovered plus gaps")
+        return self
+
+
+class CoverageReasonCount(BaseModel):
+    """One stable reason subtotal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: CoverageDisposition
+    reason: CoverageReason
+    count: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _reason_matches_outcome(self) -> Self:
+        if not coverage_reason_allowed(self.outcome, self.reason):
+            raise ValueError(
+                f"{self.reason.value} is not a valid {self.outcome.value} coverage reason"
+            )
+        return self
+
+
+class CoverageGap(BaseModel):
+    """A content-free, correlatable reference to one uninspected object or scope."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: CoverageObjectKind
+    outcome: CoverageDisposition
+    reason: CoverageReason
+    reference: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _scope_kind_matches_outcome(self) -> Self:
+        is_scope_gap = self.outcome is CoverageDisposition.SCOPE_GAP
+        if is_scope_gap != (self.kind is CoverageObjectKind.SCOPE):
+            raise ValueError("only scope gaps may use the scope object kind")
+        return self
+
+
+class TaskCoverageReport(BaseModel):
+    """Versioned engine assurance report stored immutably on a terminal task."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal["1"]
+    phase: ScanTaskKind
+    counts: CoverageCounts
+    scope: CoverageScope
+    reasons: list[CoverageReasonCount] = Field(default_factory=list)
+    gaps: list[CoverageGap] = Field(
+        default_factory=list,
+        max_length=MAX_COVERAGE_GAP_REFERENCES,
+    )
+    gaps_omitted: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _reason_and_reference_totals_reconcile(self) -> Self:
+        keys = [(entry.outcome, entry.reason) for entry in self.reasons]
+        if len(keys) != len(set(keys)):
+            raise ValueError("coverage reason subtotals must be unique")
+
+        expected = {
+            CoverageDisposition.SKIPPED: self.counts.skipped,
+            CoverageDisposition.FAILED: self.counts.failed,
+            CoverageDisposition.SCOPE_GAP: self.scope.gaps,
+        }
+        actual = {
+            outcome: sum(entry.count for entry in self.reasons if entry.outcome is outcome)
+            for outcome in CoverageDisposition
+        }
+        if actual != expected:
+            raise ValueError("coverage reason subtotals must reconcile to outcomes")
+
+        total_gaps = self.counts.skipped + self.counts.failed + self.scope.gaps
+        if len(self.gaps) + self.gaps_omitted != total_gaps:
+            raise ValueError("coverage gap references must reconcile to non-scanned outcomes")
+        for gap in self.gaps:
+            if not any(
+                entry.outcome is gap.outcome and entry.reason is gap.reason
+                for entry in self.reasons
+            ):
+                raise ValueError("coverage gap has no matching reason subtotal")
+        reason_totals = {(entry.outcome, entry.reason): entry.count for entry in self.reasons}
+        gap_totals = Counter((gap.outcome, gap.reason) for gap in self.gaps)
+        if any(count > reason_totals[key] for key, count in gap_totals.items()):
+            raise ValueError("coverage gap references exceed their reason subtotal")
+        if self.phase is ScanTaskKind.DISCOVERY and any(
+            (
+                self.counts.requested,
+                self.counts.discovered,
+                self.counts.scanned,
+                self.counts.skipped,
+                self.counts.failed,
+            )
+        ):
+            raise ValueError("discovery tasks report scope coverage, not object outcomes")
+        return self
+
+
 class ResultsSubmission(BaseModel):
     """``POST /scan-tasks/{id}/results`` — the only ingress for results."""
 
@@ -196,6 +339,10 @@ class ResultsSubmission(BaseModel):
     #: Engine-side tallies: units scanned, units skipped, matches dropped below the
     #: confidence threshold.
     counts: dict[str, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
+    #: Structured assurance. Optional only for rolling compatibility with an old
+    #: engine; a missing report is surfaced as ``unreported`` in the manifest and
+    #: can never produce a clean coverage state.
+    coverage: TaskCoverageReport | None = None
 
 
 class ResultsAccepted(BaseModel):

@@ -96,6 +96,23 @@ class Scan(TimestampedModel, table=True):
     #: Units scanned, findings new/resolved/suppressed, and so on.
     counts: dict[str, Any] = Field(default_factory=dict, sa_type=json_type())
 
+    #: Immutable source configuration identity captured when the scan is launched.
+    #: Source edits are refused while a scan is active, so this timestamp names the
+    #: exact connection and credential revision every task leased.
+    source_configuration_version: datetime | None = Field(
+        default=None,
+        sa_type=utc_timestamp_type(),
+    )
+
+    #: Frozen, allowlisted terminal assurance record. Historic scans and scans from
+    #: a rolling old engine may leave this empty; readers then build an explicit
+    #: ``unreported`` manifest rather than presenting missing evidence as clean.
+    coverage_manifest: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_type=json_type(),
+        sa_column_kwargs={"server_default": text("'{}'")},
+    )
+
     started_at: datetime | None = Field(default=None, sa_type=utc_timestamp_type())
     finished_at: datetime | None = Field(default=None, sa_type=utc_timestamp_type())
     error: str | None = Field(default=None)
@@ -137,6 +154,15 @@ class ScanTask(TimestampedModel, table=True):
     #: An engine that retries after an API error presents the same key and the
     #: replay is a no-op instead of a second set of findings (ADR 0009 §2).
     result_key: str | None = Field(default=None, max_length=128)
+
+    #: The accepted versioned coverage report for this task. It is written in the
+    #: same idempotent transaction as ``result_key`` and never includes task specs,
+    #: errors, source locators, filenames, paths, or content.
+    coverage: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_type=json_type(),
+        sa_column_kwargs={"server_default": text("'{}'")},
+    )
 
     started_at: datetime | None = Field(default=None, sa_type=utc_timestamp_type())
     finished_at: datetime | None = Field(default=None, sa_type=utc_timestamp_type())

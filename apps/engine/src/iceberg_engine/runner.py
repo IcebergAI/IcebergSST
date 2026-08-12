@@ -34,11 +34,15 @@ from dramatiq.middleware import Interrupt
 from iceberg_connectors import (
     ConnectorError,
     ContentUnit,
+    CredentialError,
     FetchOutcome,
+    RateLimitError,
+    TaskCoverage,
     TaskSpec,
     registry,
 )
 from iceberg_connectors.protocol import Connector
+from iceberg_core.enums import CoverageObjectKind, CoverageReason, ScanTaskKind
 from iceberg_core.fingerprint import fingerprint, secret_hash
 from iceberg_core.metrics import (
     ENGINE_CONNECTOR_FAILURES,
@@ -96,6 +100,7 @@ class TaskReport:
     findings: list[dict[str, Any]] = field(default_factory=list)
     task_specs: list[dict[str, Any]] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
+    coverage: TaskCoverage | None = None
 
     def as_submission(self, idempotency_key: str, rulepack_version: str | None) -> dict[str, Any]:
         submission: dict[str, Any] = {
@@ -109,6 +114,8 @@ class TaskReport:
             submission["error"] = self.error
         if rulepack_version:
             submission["rulepack_version"] = rulepack_version
+        if self.coverage is not None:
+            submission["coverage"] = self.coverage.as_payload()
         return submission
 
 
@@ -177,9 +184,13 @@ def run_task(
     except ConnectorError as exc:
         # The source said no — bad credential, unreachable, unsupported type. The
         # scan should report why rather than an empty result that reads as "clean".
-        # Connector messages are our own and carry paths, not content (ADR 0004).
+        # Even connector exceptions can embed response text, paths, filenames, or
+        # credential-bearing URLs. The stable reason is enough for operators and
+        # is the only detail that crosses the engine boundary or enters its log.
         report.status = "failed"
-        report.error = f"{type(exc).__name__}: {exc}"[:2000]
+        reason = _coverage_reason(exc)
+        report.error = f"{type(exc).__name__}: {reason.value}"
+        _record_task_gap(report, lease, reason)
         log.warning("scan_task_connector_failed", error=report.error)
         ENGINE_CONNECTOR_FAILURES.labels(source_type=lease.source_type).inc()
     except Interrupt as exc:
@@ -190,6 +201,7 @@ def run_task(
         # through, then let the interrupt go on killing the thread it was raised in.
         report.status = "failed"
         report.error = type(exc).__name__
+        _record_task_gap(report, lease, CoverageReason.TIMEOUT)
         log.warning("scan_task_interrupted", error=report.error)
         _submit(client, lease, report, pack, log)
         ENGINE_TASKS_RUN.labels(kind=lease.kind, outcome="interrupted").inc()
@@ -197,11 +209,11 @@ def run_task(
     except Exception as exc:
         # A bug, or something nobody anticipated. The message may have been produced
         # by a third-party library quoting its input, which could be page content or
-        # a secret — so only the exception *type* is reported to the API and stored
-        # (ADR 0004). The full detail stays in this engine's local log.
+        # a secret — so only the exception *type* is reported or logged (ADR 0004).
         report.status = "failed"
         report.error = type(exc).__name__
-        log.exception("scan_task_failed")
+        _record_task_gap(report, lease, CoverageReason.CONNECTOR_ERROR)
+        log.error("scan_task_failed", error_type=type(exc).__name__)
 
     if not _submit(client, lease, report, pack, log):
         ENGINE_TASKS_RUN.labels(kind=lease.kind, outcome="unreported").inc()
@@ -264,6 +276,20 @@ def _discover(connector: Connector, lease: Lease, report: TaskReport) -> None:
     this one, so a crash cannot record the discovery as done yet lose what it
     found (ADR 0009).
     """
+    configured_scopes = {
+        str(value).strip().casefold()
+        for value in lease.connection.get("spaces") or ()
+        if str(value).strip()
+    }
+    coverage = TaskCoverage(
+        phase=ScanTaskKind.DISCOVERY,
+        reference_key=_coverage_key(lease),
+        # Current saves reject case-insensitive duplicates. Normalizing here keeps
+        # pre-existing rows from producing an impossible requested/discovered
+        # equation during a rolling upgrade.
+        scope_requested=len(configured_scopes) or None,
+    )
+    report.coverage = coverage
     try:
         for spec in connector.discover(lease.connection, lease.credential):
             # Append as discovery progresses so a late failure (for example one
@@ -271,6 +297,7 @@ def _discover(connector: Connector, lease: Lease, report: TaskReport) -> None:
             # matched spaces.  The failed discovery keeps the overall scan partial,
             # so fetching these specs can surface findings but cannot reconcile.
             report.task_specs.append(spec.as_payload())
+            coverage.scope_found(spec.params)
     finally:
         report.counts["specs_discovered"] = len(report.task_specs)
 
@@ -292,7 +319,7 @@ def _fetch(
     """
     pepper = _pepper(lease)
     previous_pepper = _previous_pepper(lease)
-    outcome = FetchOutcome()
+    outcome = FetchOutcome(reference_key=pepper)
     spec = TaskSpec.from_payload(lease.spec)
 
     candidates: list[Candidate] = []
@@ -307,6 +334,12 @@ def _fetch(
             result = detect(unit.text, pack, threshold=lease.confidence_threshold)
             tallies["dropped_below_threshold"] += result.dropped_below_threshold
             tallies["units_truncated"] += int(result.truncated)
+            if result.truncated and not unit.display.get("truncated", False):
+                outcome.scanned_but_incomplete(
+                    CoverageReason.OUTPUT_LIMIT,
+                    _coverage_kind(unit),
+                    unit.locator.canonical_parts(),
+                )
             candidates.extend(
                 _candidates(unit, result, pepper=pepper, previous_pepper=previous_pepper, pack=pack)
             )
@@ -327,6 +360,7 @@ def _fetch(
             **tallies,
             "prefiltered": filtered.suppressed_count,
         }
+        report.coverage = outcome.coverage
         if error := _incomplete_content_error(outcome.failed, tallies["units_truncated"]):
             # Findings from readable units are still valuable and the API ingests
             # them even for a failed task.  The status is nevertheless failed:
@@ -336,6 +370,71 @@ def _fetch(
             # the engine log and may contain attacker-controlled names.
             report.status = "failed"
             report.error = error
+
+
+def _coverage_reason(exc: ConnectorError) -> CoverageReason:
+    if isinstance(exc, CredentialError):
+        return CoverageReason.PERMISSION_DENIED
+    if isinstance(exc, RateLimitError):
+        return CoverageReason.RATE_LIMITED
+    return CoverageReason.CONNECTOR_ERROR
+
+
+def _record_task_gap(
+    report: TaskReport,
+    lease: Lease,
+    reason: CoverageReason,
+) -> None:
+    """Preserve a task-wide blind spot without inventing an object count."""
+    try:
+        phase = ScanTaskKind(lease.kind)
+    except ValueError:  # a future API task kind this engine cannot represent
+        return
+    coverage = report.coverage or TaskCoverage(
+        phase=phase,
+        reference_key=_coverage_key(lease),
+    )
+    report.coverage = coverage
+
+    if phase is ScanTaskKind.DISCOVERY and coverage.scope_requested is not None:
+        wanted = {str(value).casefold(): value for value in lease.connection.get("spaces") or ()}
+        found = {
+            str(spec.get("params", {}).get("space_key") or "").casefold()
+            for spec in report.task_specs
+        }
+        missing = [value for key, value in wanted.items() if key not in found]
+        if missing:
+            for value in missing:
+                coverage.scope_gap(reason, value)
+            return
+        # The configured scopes were enumerated, but something failed after that.
+        # Its remaining cardinality is unknown, so do not break the known-count
+        # invariant by pretending another configured scope existed.
+        coverage.scope_requested = None
+
+    reference: object = (
+        {"source_id": str(lease.source_id), "spec": lease.spec}
+        if phase is ScanTaskKind.FETCH
+        else {"source_id": str(lease.source_id), "phase": phase.value}
+    )
+    coverage.scope_gap(reason, reference)
+
+
+def _coverage_key(lease: Lease) -> bytes | None:
+    if not lease.fingerprint_pepper:
+        return None
+    try:
+        return base64.b64decode(lease.fingerprint_pepper, validate=True)
+    except ValueError, TypeError:
+        return None
+
+
+def _coverage_kind(unit: ContentUnit) -> CoverageObjectKind:
+    if unit.origin.value == "comment":
+        return CoverageObjectKind.COMMENT
+    if unit.origin.value == "attachment":
+        return CoverageObjectKind.ATTACHMENT
+    return CoverageObjectKind.PAGE
 
 
 def _candidates(

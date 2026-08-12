@@ -18,11 +18,26 @@ have to exist in memory before detection sees the first one, and a task that is
 cancelled mid-fetch should stop fetching rather than finish and discard.
 """
 
+import hashlib
+import hmac
+import json
+from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from iceberg_core.enums import (
+    MAX_COVERAGE_GAP_REFERENCES,
+    CoverageDisposition,
+    CoverageObjectKind,
+    CoverageReason,
+    ScanTaskKind,
+    coverage_reason_allowed,
+)
+
 from iceberg_connectors.units import ContentUnit
+
+_REFERENCE_DOMAIN = b"IcebergSST coverage reference v1\0"
 
 
 class ConnectorError(Exception):
@@ -43,6 +58,10 @@ class CredentialError(ConnectorError):
     credential. Retrying will not help, and the scan should say so rather than
     reporting an empty source.
     """
+
+
+class RateLimitError(ConnectorError):
+    """A source exhausted the connector's bounded throttle wait budget."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +93,160 @@ class TaskSpec:
 
 
 @dataclass(slots=True)
+class TaskCoverage:
+    """Typed, content-free coverage accumulated by one engine task.
+
+    Raw source identifiers never enter :meth:`as_payload`.  Gap references are
+    domain-separated HMACs under the scan's fingerprint pepper, so operators can
+    correlate the same blind spot across exports without learning a page id,
+    filename, path, or configured scope value from the manifest itself.
+    """
+
+    phase: ScanTaskKind
+    reference_key: bytes | None = field(default=None, repr=False)
+    requested: int = 0
+    discovered: int = 0
+    scanned: int = 0
+    skipped: int = 0
+    failed: int = 0
+    scope_requested: int | None = None
+    scope_discovered: int = 0
+    scope_gaps: int = 0
+    reason_counts: Counter[tuple[CoverageDisposition, CoverageReason]] = field(
+        default_factory=Counter
+    )
+    gaps: list[dict[str, str]] = field(default_factory=list)
+    gaps_omitted: int = 0
+
+    def scanned_for(self, kind: CoverageObjectKind, reference: object) -> None:
+        """Record one enumerated object that detection inspected completely."""
+        self._observed()
+        self.scanned += 1
+
+    def skipped_for(
+        self,
+        reason: CoverageReason,
+        kind: CoverageObjectKind,
+        reference: object | None,
+    ) -> None:
+        """Record one requested object intentionally excluded by policy."""
+        self._require_reason(CoverageDisposition.SKIPPED, reason)
+        self._observed()
+        self.skipped += 1
+        self._gap(CoverageDisposition.SKIPPED, reason, kind, reference)
+
+    def failed_for(
+        self,
+        reason: CoverageReason,
+        kind: CoverageObjectKind,
+        reference: object | None,
+    ) -> None:
+        """Record one enumerated object that could not be inspected."""
+        self._require_reason(CoverageDisposition.FAILED, reason)
+        self._observed()
+        self.failed += 1
+        self._gap(CoverageDisposition.FAILED, reason, kind, reference)
+
+    def scanned_but_incomplete(
+        self,
+        reason: CoverageReason,
+        kind: CoverageObjectKind,
+        reference: object,
+    ) -> None:
+        """Replace an already-recorded scan with one incomplete final outcome."""
+        self._require_reason(CoverageDisposition.FAILED, reason)
+        if self.scanned < 1:  # pragma: no cover - defensive connector/runner contract
+            raise ValueError("cannot mark an unrecorded object incomplete")
+        self.scanned -= 1
+        self.failed += 1
+        self._gap(CoverageDisposition.FAILED, reason, kind, reference)
+
+    def scope_found(self, reference: object) -> None:
+        """Record one configured or discoverable scope successfully enumerated."""
+        self.scope_discovered += 1
+
+    def scope_gap(self, reason: CoverageReason, reference: object | None) -> None:
+        """Record work whose object cardinality could not be enumerated honestly."""
+        self._require_reason(CoverageDisposition.SCOPE_GAP, reason)
+        self.scope_gaps += 1
+        self._gap(CoverageDisposition.SCOPE_GAP, reason, CoverageObjectKind.SCOPE, reference)
+
+    def as_payload(self) -> dict[str, Any]:
+        """Return the versioned engine/API wire shape; no raw source metadata."""
+        reasons = [
+            {"outcome": outcome.value, "reason": reason.value, "count": count}
+            for (outcome, reason), count in sorted(
+                self.reason_counts.items(), key=lambda item: (item[0][0].value, item[0][1].value)
+            )
+        ]
+        return {
+            "version": "1",
+            "phase": self.phase.value,
+            "counts": {
+                "requested": self.requested,
+                "discovered": self.discovered,
+                "scanned": self.scanned,
+                "skipped": self.skipped,
+                "failed": self.failed,
+            },
+            "scope": {
+                "requested": self.scope_requested,
+                "discovered": self.scope_discovered,
+                "gaps": self.scope_gaps,
+            },
+            "reasons": reasons,
+            "gaps": list(self.gaps),
+            "gaps_omitted": self.gaps_omitted,
+        }
+
+    def _observed(self) -> None:
+        self.requested += 1
+        self.discovered += 1
+
+    def _gap(
+        self,
+        outcome: CoverageDisposition,
+        reason: CoverageReason,
+        kind: CoverageObjectKind,
+        reference: object | None,
+    ) -> None:
+        self.reason_counts[(outcome, reason)] += 1
+        opaque = self._reference(kind, reference)
+        if opaque is None or len(self.gaps) >= MAX_COVERAGE_GAP_REFERENCES:
+            self.gaps_omitted += 1
+            return
+        self.gaps.append(
+            {
+                "kind": kind.value,
+                "outcome": outcome.value,
+                "reason": reason.value,
+                "reference": opaque,
+            }
+        )
+
+    @staticmethod
+    def _require_reason(
+        outcome: CoverageDisposition,
+        reason: CoverageReason,
+    ) -> None:
+        if not coverage_reason_allowed(outcome, reason):
+            raise ValueError(f"{reason.value} is not a valid {outcome.value} coverage reason")
+
+    def _reference(self, kind: CoverageObjectKind, reference: object | None) -> str | None:
+        if self.reference_key is None or reference is None:
+            return None
+        canonical = json.dumps(
+            reference,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode()
+        message = _REFERENCE_DOMAIN + kind.value.encode() + b"\0" + canonical
+        return hmac.new(self.reference_key, message, hashlib.sha256).hexdigest()
+
+
+@dataclass(slots=True)
 class FetchOutcome:
     """Tallies a fetch reports alongside its units.
 
@@ -82,16 +255,63 @@ class FetchOutcome:
     different, and the only place to tell them apart is here.
     """
 
+    reference_key: bytes | None = field(default=None, repr=False)
     units: int = 0
     #: Resources deliberately not scanned — an image, a binary, an unsupported
     #: format. Expected, not a problem.
     skipped: int = 0
     #: Resources that should have been readable and were not.
     failed: int = 0
+    coverage: TaskCoverage = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.coverage = TaskCoverage(phase=ScanTaskKind.FETCH, reference_key=self.reference_key)
+
+    def scanned_for(self, kind: CoverageObjectKind, reference: object) -> None:
+        self.units += 1
+        self.coverage.scanned_for(kind, reference)
+
+    def failed_for(
+        self,
+        reason: CoverageReason,
+        kind: CoverageObjectKind = CoverageObjectKind.RECORD,
+        reference: object | None = None,
+    ) -> None:
+        self.failed += 1
+        self.coverage.failed_for(reason, kind, reference)
+
+    def skipped_for(
+        self,
+        reason: CoverageReason,
+        kind: CoverageObjectKind = CoverageObjectKind.RECORD,
+        reference: object | None = None,
+    ) -> None:
+        self.skipped += 1
+        self.coverage.skipped_for(reason, kind, reference)
+
+    def scope_gap_for(self, reason: CoverageReason, reference: object | None = None) -> None:
+        """Fail the legacy task while keeping unknown object counts out of totals."""
+        self.failed += 1
+        self.coverage.scope_gap(reason, reference)
+
+    def scanned_but_incomplete(
+        self,
+        reason: CoverageReason,
+        kind: CoverageObjectKind,
+        reference: object,
+    ) -> None:
+        self.coverage.scanned_but_incomplete(reason, kind, reference)
 
     def as_counts(self) -> dict[str, int]:
         """The shape merged into the scan's counts by results ingest."""
-        return {"units": self.units, "units_skipped": self.skipped, "units_failed": self.failed}
+        return {
+            "units": self.units,
+            "units_skipped": self.skipped,
+            "units_failed": self.failed,
+        }
+
+    def as_coverage(self) -> dict[str, Any]:
+        return self.coverage.as_payload()
 
 
 @runtime_checkable
