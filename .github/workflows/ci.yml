@@ -42,6 +42,9 @@ jobs:
       - name: Type-check
         run: make type
 
+      - name: Documentation links
+        run: make docs-check
+
       - name: Test
         run: make test
 

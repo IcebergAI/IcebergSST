@@ -10,6 +10,9 @@ Design specification and reference docs. Start with [`../ARCHITECTURE.md`](../AR
 - [`rules.md`](./rules.md) — detection engine, rule packs, suppressions
 - [`security.md`](./security.md) — threat model and mitigations
 - [`deployment.md`](./deployment.md) — docker-compose (dev) + Helm (prod)
+- [`runbooks/production-install.md`](./runbooks/production-install.md) — production-oriented
+  installation and go-live checks
+- [`runbooks/backup-restore.md`](./runbooks/backup-restore.md) — isolated recovery rehearsal
 - [`backlog.md`](./backlog.md) — milestones, epics, and issues (mirrors GitHub)
 
 ## Decision records (ADRs)
