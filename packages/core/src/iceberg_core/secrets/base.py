@@ -27,6 +27,7 @@ class SecretPurpose(StrEnum):
 
     CREDENTIAL = "credential"
     PEPPER = "pepper"
+    CORRELATION = "correlation"
     GENERIC = "generic"
 
 
@@ -85,5 +86,16 @@ class SecretStore(ABC):
         under the old one and carry its triage state across — the plaintext that
         produced the identity was never stored, so recomputation is not an option
         (docs/runbooks/key-rotation.md).
+        """
+        return None
+
+    def get_correlation_key(self) -> bytes | None:
+        """The exposure-cluster correlation key (ADR 0010), or None if unset.
+
+        The API is the only role that ever holds this key — unlike the pepper it
+        is never placed in a lease, so an engine (or anyone holding a plaintext
+        secret plus a captured pepper) cannot derive a correlation id. ``None``
+        means correlation is switched off, which ingest treats as "store NULL and
+        carry on"; the id can always be derived later from the stored hash.
         """
         return None

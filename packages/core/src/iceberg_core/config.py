@@ -72,6 +72,16 @@ class SecretStoreSettings(CoreSettings):
     #: docs/runbooks/key-rotation.md is the procedure; do not set this casually.
     previous_fingerprint_pepper_ref: str | None = None
 
+    #: The exposure-cluster correlation key (ADR 0010, #140). Unset = correlation
+    #: off; ingest stores NULL and the cluster views stay empty.
+    #:
+    #: API-role-only, like the master key and unlike the pepper: it is never
+    #: placed in a lease, so nothing outside the API can mint a correlation id.
+    #: Rotating it is a recompute, not a rescan — swap the ref and run
+    #: `python -m iceberg_api reindex-correlation`; there is no previous-key
+    #: window (docs/runbooks/key-rotation.md § Correlation key).
+    correlation_key_ref: str | None = None
+
 
 class ApiSettings(SecretStoreSettings):
     """API-role settings: the only role that holds database credentials."""
