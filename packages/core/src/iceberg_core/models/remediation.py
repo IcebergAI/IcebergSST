@@ -88,3 +88,8 @@ class RemediationAction(IcebergModel, table=True):
         ondelete="SET NULL",
     )
     retracted_reason: str | None = Field(default=None)
+
+    #: When the retention window reduced the links to labels and dropped the
+    #: note. Set-once by the scrub; also what lets it find unscrubbed rows
+    #: without inspecting JSON.
+    scrubbed_at: datetime | None = Field(default=None, sa_type=utc_timestamp_type())

@@ -118,6 +118,29 @@ omitting the field leaves the assignee alone. Assigning to an unknown or disable
 Resolving by hand sets `resolution: manual`; reopening clears it, so a reopened finding never keeps
 reconciliation's `auto`.
 
+## Remediation (ADR 0011)
+- `GET  /remediation/guidance/{rule_id}` — versioned advice for one rule, split into revoke /
+  rotate / scope-reduce / remove-source steps; falls back to the `default` entry and says so in
+  `matched`. Never executed by the platform — advice for a human.
+- `GET  /findings/{id}/remediations` — the finding's actions, oldest first. Role-shaped: analysts
+  see notes and evidence-link URLs; viewers see the fact of each action with link labels only.
+- `POST /findings/{id}/remediations` (analyst+) — record what was done: kind, when it was
+  performed, a note, up to ten evidence links (http(s) only, no embedded credentials). Stamps the
+  live guidance version. Content is write-once — retract and re-record to correct.
+- `POST /findings/{id}/remediations/{rid}/verify` (analyst+) — one-way confirmation the action
+  took effect; repeating it is a `409`.
+- `POST /findings/{id}/remediations/{rid}/retract` (analyst+) — set-once, reason required;
+  a retracted action stops satisfying the evidence policy.
+
+Every mutation writes a `FindingEvent` (`remediation`, `remediation_verified`,
+`remediation_retracted`) and an audit row. The finding detail carries `remediations` alongside
+`events` in the caller's shape.
+
+**Required-evidence policy.** With `ICEBERG_REMEDIATION_EVIDENCE_MIN_SEVERITY` set, resolving a
+finding at or above that severity without a non-retracted, evidence-carrying action is a `409`
+naming the fix. Judgements (`false_positive`, `accepted_risk`) and reconciliation's auto-resolve
+are exempt by design; unset (the default) changes nothing.
+
 ## Suppressions
 - `GET  /suppressions` (paginated; `?source_id=`, `?scope=`, `?active=`) · `GET /suppressions/{id}`
 - `POST /suppressions` (analyst+) — `scope` (`path_glob` / `fingerprint` / `rule`), `pattern`,

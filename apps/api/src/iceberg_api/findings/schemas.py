@@ -29,6 +29,7 @@ from iceberg_core.enums import (
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from iceberg_api.remediation.schemas import RemediationRead, RemediationReadRedacted
 from iceberg_api.schemas import UtcDatetime
 
 
@@ -109,6 +110,11 @@ class FindingDetail(FindingRead):
     #: with no derived id. See the module docstring for why viewers do not get
     #: the comparison oracle.
     correlation: CorrelationInfo | None = None
+
+    #: Remediation actions, oldest first (#142) — full shape for analysts,
+    #: redacted (labels, no URLs or note) for viewers. Ships with the detail
+    #: for the same reason the history does.
+    remediations: list[RemediationRead | RemediationReadRedacted] = []
 
 
 class FindingUpdate(BaseModel):

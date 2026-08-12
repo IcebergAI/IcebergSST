@@ -31,6 +31,7 @@ from iceberg_core.enums import (
     FindingEventKind,
     FindingResolution,
     FindingState,
+    RemediationActionKind,
     ScanStatus,
     ScanTrigger,
     Severity,
@@ -41,6 +42,7 @@ from iceberg_core.models import (
     AuditEvent,
     Finding,
     FindingEvent,
+    RemediationAction,
     Scan,
     Source,
 )
@@ -430,3 +432,89 @@ def test_a_round_deletes_at_most_the_batch_size(
     assert first.findings == 2
     assert second.findings == 2
     assert len(list(session.exec(select(Finding)))) == 1
+
+
+# ── Remediation-evidence scrub (#142, ADR 0011) ──────────────────────────────
+
+
+def _action(session: Session, finding: Finding, **fields: Any) -> RemediationAction:
+    defaults: dict[str, Any] = {
+        "kind": RemediationActionKind.ROTATE,
+        "note": "rotated; see ticket",
+        "evidence_links": [{"url": "https://tickets.example.test/SEC-1", "label": "SEC-1"}],
+    }
+    action = RemediationAction(finding_id=finding.id, **(defaults | fields))
+    session.add(action)
+    session.commit()
+    session.refresh(action)
+    return action
+
+
+def test_evidence_urls_are_scrubbed_to_labels_after_the_window(
+    session: Session, make_finding: Callable[..., Finding]
+) -> None:
+    finding = make_finding(updated_at=LONG_AGO)
+    action = _action(session, finding)
+
+    result = retention.purge(session, _settings(retention_remediation_evidence_days=30), now=NOW)
+
+    assert result.remediation_evidence_scrubbed == 1
+    session.refresh(action)
+    assert action.evidence_links == [{"label": "SEC-1", "scrubbed": True}]
+    assert action.note is None
+    assert action.scrubbed_at is not None
+    # The decision trail survives the scrub — that is the whole design.
+    assert action.kind is RemediationActionKind.ROTATE
+
+
+def test_the_scrub_is_off_by_default(
+    session: Session, make_finding: Callable[..., Finding]
+) -> None:
+    action = _action(session, make_finding(updated_at=LONG_AGO))
+
+    result = retention.purge(session, _settings(), now=NOW)
+
+    assert result.remediation_evidence_scrubbed == 0
+    session.refresh(action)
+    assert action.evidence_links[0]["url"] == "https://tickets.example.test/SEC-1"
+
+
+def test_an_open_findings_evidence_is_never_scrubbed(
+    session: Session, make_finding: Callable[..., Finding]
+) -> None:
+    finding = make_finding(state=FindingState.OPEN, resolution=None, updated_at=LONG_AGO)
+    action = _action(session, finding)
+
+    result = retention.purge(session, _settings(retention_remediation_evidence_days=30), now=NOW)
+
+    assert result.remediation_evidence_scrubbed == 0
+    session.refresh(action)
+    assert action.evidence_links[0]["url"].startswith("https://")
+
+
+def test_a_recently_resolved_findings_evidence_is_inside_the_window(
+    session: Session, make_finding: Callable[..., Finding]
+) -> None:
+    action = _action(session, make_finding(updated_at=RECENTLY))
+
+    result = retention.purge(session, _settings(retention_remediation_evidence_days=30), now=NOW)
+
+    assert result.remediation_evidence_scrubbed == 0
+    session.refresh(action)
+    assert "url" in action.evidence_links[0]
+
+
+def test_a_scrubbed_action_is_not_scrubbed_again(
+    session: Session, make_finding: Callable[..., Finding]
+) -> None:
+    """`scrubbed_at` is what keeps every later round from re-reporting the same
+    rows — the audit trail should record one scrub, not one per beat."""
+    finding = make_finding(updated_at=LONG_AGO)
+    _action(session, finding)
+    settings = _settings(retention_remediation_evidence_days=30)
+
+    first = retention.purge(session, settings, now=NOW)
+    second = retention.purge(session, settings, now=NOW)
+
+    assert first.remediation_evidence_scrubbed == 1
+    assert second.remediation_evidence_scrubbed == 0

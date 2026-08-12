@@ -18,6 +18,7 @@ errors, and an audit log full of "open → open" is one nobody reads.
 """
 
 import uuid
+from collections.abc import Callable
 
 import structlog
 from iceberg_core.enums import FindingEventKind, FindingResolution, FindingState
@@ -52,18 +53,40 @@ class IllegalTransition(ValueError):
         self.target = target
 
 
+class EvidenceRequired(ValueError):
+    """The deployment's policy demands evidence before this resolution (#142).
+
+    Raised before anything is written, like :class:`IllegalTransition`: a
+    refused resolution must not half-apply an assignment either.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "resolving a finding of this severity requires a remediation action "
+            "with evidence; record one first (ADR 0011)"
+        )
+
+
 def apply(
     db: Session,
     finding: Finding,
     changes: FindingUpdate,
     *,
     actor_id: uuid.UUID,
+    evidence_check: Callable[[Finding], bool] | None = None,
 ) -> list[FindingEvent]:
     """Apply a triage change, writing one event per real change. Does not commit.
 
     Raises :class:`IllegalTransition` if the state move is not allowed; nothing is
     written in that case, so a rejected transition cannot leave a half-applied
     assignment behind.
+
+    ``evidence_check`` is the required-evidence policy (#142), passed by the
+    route when the deployment configured one: called only for a move to
+    ``resolved``, and a ``False`` refuses the change with
+    :class:`EvidenceRequired` — same all-or-nothing contract. The judgement
+    states are exempt by design: ``false_positive`` and ``accepted_risk`` are
+    decisions that no secret needed rotating, so there is nothing to evidence.
     """
     # A state equal to the current one is nothing to do, not a transition to check.
     moving_to = changes.state if changes.state is not finding.state else None
@@ -72,6 +95,12 @@ def apply(
     # either applies as a whole or not at all.
     if moving_to is not None and moving_to not in LEGAL_TRANSITIONS[finding.state]:
         raise IllegalTransition(finding.state, moving_to)
+    if (
+        moving_to is FindingState.RESOLVED
+        and evidence_check is not None
+        and not evidence_check(finding)
+    ):
+        raise EvidenceRequired()
 
     events: list[FindingEvent] = []
     supplied = changes.model_fields_set

@@ -22,7 +22,7 @@ from iceberg_core.models import Finding, FindingEvent, User
 from sqlalchemy import func
 from sqlmodel import col, select
 
-from iceberg_api.auth.dependencies import CsrfProtected, SessionDep
+from iceberg_api.auth.dependencies import CsrfProtected, SessionDep, SettingsDep
 from iceberg_api.auth.rbac import ROLE_RANK, AnalystUser, ViewerUser
 from iceberg_api.findings import triage
 from iceberg_api.findings.schemas import (
@@ -33,6 +33,8 @@ from iceberg_api.findings.schemas import (
     FindingUpdate,
 )
 from iceberg_api.pagination import DEFAULT_LIMIT, MAX_LIMIT, after, build_page, position
+from iceberg_api.remediation import service as remediation
+from iceberg_api.remediation.schemas import RemediationRead, RemediationReadRedacted
 from iceberg_api.schemas import Page
 
 router = APIRouter(prefix="/findings", tags=["findings"])
@@ -119,6 +121,18 @@ def _correlation_info(db: SessionDep, finding: Finding, user: User) -> Correlati
     )
 
 
+def _remediations(
+    db: SessionDep, finding_id: uuid.UUID, user: User
+) -> list[RemediationRead | RemediationReadRedacted]:
+    """The finding's actions in the caller's shape (#142): viewers get the
+    fact of each action, not its note or link URLs."""
+    redacted = ROLE_RANK[user.role] < ROLE_RANK[UserRole.ANALYST]
+    return [
+        remediation.serialize(action, redacted=redacted)
+        for action in remediation.actions_for(db, finding_id)
+    ]
+
+
 @router.get("/{finding_id}")
 async def read_finding(finding_id: uuid.UUID, user: ViewerUser, db: SessionDep) -> FindingDetail:
     """One finding and its full history — who changed it, when, and why."""
@@ -127,6 +141,7 @@ async def read_finding(finding_id: uuid.UUID, user: ViewerUser, db: SessionDep) 
         **FindingRead.model_validate(finding).model_dump(),
         events=[FindingEventRead.model_validate(event) for event in _history(db, finding_id)],
         correlation=_correlation_info(db, finding, user),
+        remediations=_remediations(db, finding_id, user),
     )
 
 
@@ -136,6 +151,7 @@ async def update_finding(
     changes: FindingUpdate,
     analyst: AnalystUser,
     db: SessionDep,
+    settings: SettingsDep,
 ) -> FindingDetail:
     """Triage a finding: change its state, assign it, or annotate it.
 
@@ -153,9 +169,19 @@ async def update_finding(
                 status.HTTP_422_UNPROCESSABLE_CONTENT, "assignee is not an active user"
             )
 
+    # The required-evidence policy (#142): built from settings here, enforced
+    # inside `apply` so a resolution can never sneak around it through another
+    # door — the web triage route reaches this same handler (invariant 4).
+    policy = remediation.EvidencePolicy(min_severity=settings.remediation_evidence_min_severity)
+
+    def _evidence(target: Finding) -> bool:
+        if not policy.applies_to(target.severity):
+            return True
+        return remediation.qualifying_action_exists(db, target.id)
+
     try:
-        triage.apply(db, finding, changes, actor_id=analyst.id)
-    except triage.IllegalTransition as exc:
+        triage.apply(db, finding, changes, actor_id=analyst.id, evidence_check=_evidence)
+    except (triage.IllegalTransition, triage.EvidenceRequired) as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
     db.commit()
@@ -164,4 +190,5 @@ async def update_finding(
         **FindingRead.model_validate(finding).model_dump(),
         events=[FindingEventRead.model_validate(event) for event in _history(db, finding_id)],
         correlation=_correlation_info(db, finding, analyst),
+        remediations=_remediations(db, finding_id, analyst),
     )

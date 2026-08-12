@@ -106,6 +106,20 @@ authoritative).
   `suppressed_at` is null; an expiring suppression returns it to the active view.
 - `first_seen_scan_id`, `last_seen_scan_id`, `created_at`, `updated_at`
 
+### RemediationAction
+What was done about an exposure, with evidence (#142, ADR 0011). Content is **write-once**;
+verification is one-way and retraction set-once — corrections are new rows, and every change
+writes `FindingEvent` + `AuditEvent` rows, which is where the immutable history lives.
+- `id`, `finding_id` (FK, CASCADE — the action is part of the finding's record), `actor_id`
+  (FK User, SET NULL — the record outlives the account)
+- `kind`: enum `revoke | rotate | scope_reduce | remove_source | other`
+- `occurred_at` (when performed, per the responder; `created_at` is when recorded), `note`
+- `evidence_links`: JSON `[{url, label}]` — links to proof, never uploaded bytes; after the
+  retention scrub, `[{label, scrubbed: true}]` with `scrubbed_at` set
+- `guidance_version` — the catalog version shown at recording time
+- `verification`: enum `unverified | verified`, `verified_by_id`, `verified_at`
+- `retracted_at`, `retracted_by_id`, `retracted_reason`
+
 ### AuditEvent
 Append-only audit trail for administrative actions — everything `FindingEvent` does not cover,
 starting with role changes (#69). "Who made this person an admin" must always have an answer.

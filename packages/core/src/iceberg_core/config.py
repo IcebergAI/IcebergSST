@@ -18,6 +18,8 @@ from typing import Literal
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from iceberg_core.enums import Severity
+
 Environment = Literal["dev", "test", "prod"]
 SecretStoreBackend = Literal["env_key", "vault"]
 
@@ -220,6 +222,19 @@ class ApiSettings(SecretStoreSettings):
     #: rows predate the key or ingest ran while it was unreadable; one bounded
     #: batch per beat keeps a large backlog from stalling the round.
     correlation_backfill_batch_size: int = Field(default=500, ge=1, le=100_000)
+
+    # ─── Remediation evidence (ADR 0011, #142) ────────────────────────────────
+    #: Findings at or above this severity cannot be resolved without a
+    #: non-retracted remediation action carrying at least one evidence link.
+    #: Unset = policy off — the shipped default, like every optional behaviour;
+    #: judgements (false_positive, accepted_risk) and reconciliation's
+    #: auto-resolve are exempt by design.
+    remediation_evidence_min_severity: Severity | None = None
+
+    #: Days after a finding is resolved before its actions' evidence-link URLs
+    #: are scrubbed to labels-only (the note goes with them). 0 = never — the
+    #: rows themselves are never deleted while their finding exists.
+    retention_remediation_evidence_days: int = Field(default=0, ge=0)
 
     @field_validator("database_url", "redis_url")
     @classmethod

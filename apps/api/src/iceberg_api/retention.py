@@ -46,6 +46,7 @@ from iceberg_core.models import (
     AuditEvent,
     Finding,
     FindingEvent,
+    RemediationAction,
 )
 from sqlmodel import Session, col, delete, select
 
@@ -60,14 +61,22 @@ PURGEABLE_RESOLUTIONS = (FindingResolution.AUTO,)
 
 @dataclass(frozen=True, slots=True)
 class PurgeResult:
-    """What one retention round deleted."""
+    """What one retention round deleted (or, for evidence links, scrubbed)."""
 
     findings: int = 0
     finding_events: int = 0
     audit_events: int = 0
+    #: Remediation actions whose evidence-link URLs were reduced to labels
+    #: (#142). The rows survive; only where-the-proof-lives is aged out.
+    remediation_evidence_scrubbed: int = 0
 
     def total(self) -> int:
-        return self.findings + self.finding_events + self.audit_events
+        return (
+            self.findings
+            + self.finding_events
+            + self.audit_events
+            + self.remediation_evidence_scrubbed
+        )
 
 
 def purge(
@@ -86,8 +95,16 @@ def purge(
     # surviving findings*, which is the number an operator is asking about.
     events = _purge_finding_events(db, settings.retention_finding_events_days, at=at, batch=batch)
     audits = _purge_audit_events(db, settings.retention_audit_events_days, at=at, batch=batch)
+    scrubbed = _scrub_remediation_evidence(
+        db, settings.retention_remediation_evidence_days, at=at, batch=batch
+    )
 
-    result = PurgeResult(findings=findings, finding_events=events, audit_events=audits)
+    result = PurgeResult(
+        findings=findings,
+        finding_events=events,
+        audit_events=audits,
+        remediation_evidence_scrubbed=scrubbed,
+    )
     if result.total() == 0:
         db.commit()
         return result
@@ -106,6 +123,7 @@ def purge(
             "resolved_findings_days": str(settings.retention_resolved_findings_days),
             "finding_events_days": str(settings.retention_finding_events_days),
             "audit_events_days": str(settings.retention_audit_events_days),
+            "remediation_evidence_days": str(settings.retention_remediation_evidence_days),
         },
     )
     db.commit()
@@ -204,6 +222,51 @@ def _purge_audit_events(db: Session, days: int, *, at: datetime, batch: int) -> 
 
     db.exec(delete(AuditEvent).where(col(AuditEvent.id).in_(eligible)))
     return len(eligible)
+
+
+def _scrub_remediation_evidence(db: Session, days: int, *, at: datetime, batch: int) -> int:
+    """Reduce evidence links to labels on long-resolved findings (#142).
+
+    A scrub, not a delete: the remediation record — that something was done, by
+    whom, of what kind, verified or not — is the decision trail and is never
+    deleted here. What ages out is *where the proof lives*: ticket and console
+    URLs name internal systems, and their value decays once the finding has
+    stayed resolved past the window. The note goes with them; it is free text
+    written about the same internals.
+
+    The window is measured from the finding's resolution (its ``updated_at``,
+    same clock `_purge_findings` reads), and re-checked row by row at write
+    time — a finding that re-opened between select and write keeps its URLs,
+    because its evidence is live again.
+    """
+    cutoff = _cutoff(days, at)
+    if cutoff is None:
+        return 0
+
+    candidates = list(
+        db.exec(
+            select(RemediationAction, Finding)
+            .join(Finding, col(RemediationAction.finding_id) == col(Finding.id))
+            .where(col(RemediationAction.scrubbed_at).is_(None))
+            .where(col(Finding.state) == FindingState.RESOLVED)
+            .where(col(Finding.updated_at) < cutoff)
+            .limit(batch)
+        )
+    )
+
+    scrubbed = 0
+    for action, finding in candidates:
+        if finding.state is not FindingState.RESOLVED:
+            continue  # re-opened since the select; its evidence is live again
+        action.evidence_links = [
+            {"label": link.get("label", "evidence"), "scrubbed": True}
+            for link in action.evidence_links
+        ]
+        action.note = None
+        action.scrubbed_at = at
+        db.add(action)
+        scrubbed += 1
+    return scrubbed
 
 
 __all__ = ["PURGEABLE_RESOLUTIONS", "PurgeResult", "purge"]

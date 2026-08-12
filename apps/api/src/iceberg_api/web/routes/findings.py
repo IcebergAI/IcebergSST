@@ -143,6 +143,7 @@ async def triage(  # one parameter per form field
     viewer: CurrentViewer,
     analyst: WebAnalyst,
     db: SessionDep,
+    settings: SettingsDep,
     state: Annotated[str, Form()],
     assignee: Annotated[str, Form()] = "",
     comment: Annotated[str, Form()] = "",
@@ -176,6 +177,7 @@ async def triage(  # one parameter per form field
             changes=FindingUpdate(**payload),
             analyst=analyst,
             db=db,
+            settings=settings,
         )
     except (HTTPException, ValidationError, ValueError) as exc:
         # A 409 is the state machine refusing a move between judgements, and

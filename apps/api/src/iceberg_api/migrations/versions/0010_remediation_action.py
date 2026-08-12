@@ -71,6 +71,7 @@ def upgrade() -> None:
         sa.Column("retracted_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("retracted_by_id", sa.Uuid(), nullable=True),
         sa.Column("retracted_reason", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("scrubbed_at", sa.DateTime(timezone=True), nullable=True),
         # CASCADE from the finding: an action is part of the finding's record,
         # and retention already refuses to purge findings whose state matters.
         # SET NULL from users: the record outlives the account that wrote it.

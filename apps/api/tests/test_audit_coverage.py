@@ -62,6 +62,9 @@ REQUIRED_ACTIONS = {
     "retention.purged",
     "correlation.reindexed",
     "correlation.cluster_exported",
+    "remediation.recorded",
+    "remediation.verified",
+    "remediation.retracted",
 }
 
 
