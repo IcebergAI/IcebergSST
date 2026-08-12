@@ -24,6 +24,7 @@ import json
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 from iceberg_core.enums import (
@@ -38,6 +39,43 @@ from iceberg_core.enums import (
 from iceberg_connectors.units import ContentUnit
 
 _REFERENCE_DOMAIN = b"IcebergSST coverage reference v1\0"
+CONNECTOR_SDK_VERSION = "1.0"
+
+
+class ConnectorCapability(StrEnum):
+    """Machine-readable behavior an engine/operator may rely on."""
+
+    DISCOVERY = "discovery"
+    PAGINATION = "pagination"
+    ATTACHMENTS = "attachments"
+    COMMENTS = "comments"
+    GAP_REPORTING = "gap_reporting"
+    CHECKPOINTS = "checkpoints"
+    ANONYMOUS_AUTH = "anonymous_auth"
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectorMetadata:
+    """Stable SDK identity and explicitly declared optional behavior."""
+
+    connector_type: str
+    sdk_version: str = CONNECTOR_SDK_VERSION
+    capabilities: frozenset[ConnectorCapability] = frozenset(
+        {ConnectorCapability.DISCOVERY, ConnectorCapability.GAP_REPORTING}
+    )
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "connector_type": self.connector_type,
+            "sdk_version": self.sdk_version,
+            "capabilities": sorted(capability.value for capability in self.capabilities),
+        }
+
+
+class ConnectorFailureCode(StrEnum):
+    CONNECTOR_ERROR = "connector_error"
+    CREDENTIAL_REJECTED = "credential_rejected"
+    RATE_LIMITED = "rate_limited"
 
 
 class ConnectorError(Exception):
@@ -50,6 +88,9 @@ class ConnectorError(Exception):
     making the scan partial and disabling reconciliation and notifications.
     """
 
+    code = ConnectorFailureCode.CONNECTOR_ERROR
+    retryable = False
+
 
 class CredentialError(ConnectorError):
     """The source rejected the credential.
@@ -59,9 +100,14 @@ class CredentialError(ConnectorError):
     reporting an empty source.
     """
 
+    code = ConnectorFailureCode.CREDENTIAL_REJECTED
+
 
 class RateLimitError(ConnectorError):
     """A source exhausted the connector's bounded throttle wait budget."""
+
+    code = ConnectorFailureCode.RATE_LIMITED
+    retryable = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,6 +372,7 @@ class Connector(Protocol):
     #: Matches `SourceType`. Recorded in every fingerprint, so it is a stable
     #: contract — renaming one invalidates every finding from that source type.
     connector_type: str
+    metadata: ConnectorMetadata
 
     def discover(self, connection: dict[str, Any], credential: str | None) -> Iterator[TaskSpec]:
         """Split a source into fetch specs.

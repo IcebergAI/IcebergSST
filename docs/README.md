@@ -7,6 +7,7 @@ Design specification and reference docs. Start with [`../ARCHITECTURE.md`](../AR
 - [`api.md`](./api.md) — REST surface (human + engine-facing)
 - [`web.md`](./web.md) — the console: HTMX/Alpine conventions, CSP, assets, design system
 - [`connectors.md`](./connectors.md) — connector interface + Confluence (MVP)
+- [`connector-sdk.md`](./connector-sdk.md) — versioned connector contract and conformance kit
 - [`rules.md`](./rules.md) — detection engine, rule packs, suppressions
 - [`security.md`](./security.md) — threat model and mitigations
 - [`deployment.md`](./deployment.md) — docker-compose (dev) + Helm (prod)

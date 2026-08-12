@@ -6,9 +6,15 @@ executed by `apps/engine`) — never in the API.
 
 ## Interface
 
+The supported authoring surface is **Connector SDK v1**. Every connector declares immutable
+metadata and capabilities, and registration rejects incompatible major versions. The concise
+author guide, compatibility policy, reference implementation, and reusable conformance test are in
+[`connector-sdk.md`](./connector-sdk.md).
+
 ```python
 class Connector(Protocol):
     connector_type: str          # matches SourceType; part of every fingerprint
+    metadata: ConnectorMetadata  # SDK version + explicit capabilities
 
     def discover(self, connection, credential) -> Iterator[TaskSpec]:
         """Split a source into scan-task units (e.g. one per Confluence space)."""

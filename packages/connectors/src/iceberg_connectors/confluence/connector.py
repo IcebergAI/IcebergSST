@@ -48,7 +48,9 @@ from iceberg_connectors.confluence.client import (
 from iceberg_connectors.confluence.storage import storage_to_text, supported_body_text
 from iceberg_connectors.extraction import ExtractionLimits, ExtractionOutcome, extract_text
 from iceberg_connectors.protocol import (
+    ConnectorCapability,
     ConnectorError,
+    ConnectorMetadata,
     CredentialError,
     FetchOutcome,
     TaskSpec,
@@ -78,6 +80,20 @@ class ConfluenceConnector:
     """
 
     connector_type: str = CONFLUENCE_CONNECTOR_TYPE
+    metadata: ConnectorMetadata = field(
+        default_factory=lambda: ConnectorMetadata(
+            connector_type=CONFLUENCE_CONNECTOR_TYPE,
+            capabilities=frozenset(
+                {
+                    ConnectorCapability.DISCOVERY,
+                    ConnectorCapability.PAGINATION,
+                    ConnectorCapability.ATTACHMENTS,
+                    ConnectorCapability.COMMENTS,
+                    ConnectorCapability.GAP_REPORTING,
+                }
+            ),
+        )
+    )
     extraction_limits: ExtractionLimits = field(default_factory=ExtractionLimits)
     rate_limit: RateLimitPolicy = field(default_factory=RateLimitPolicy)
     #: Makes the child process attachment parsers run in. A *factory*, not an

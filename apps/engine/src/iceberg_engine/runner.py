@@ -33,10 +33,9 @@ import structlog
 from dramatiq.middleware import Interrupt
 from iceberg_connectors import (
     ConnectorError,
+    ConnectorFailureCode,
     ContentUnit,
-    CredentialError,
     FetchOutcome,
-    RateLimitError,
     TaskCoverage,
     TaskSpec,
     registry,
@@ -373,9 +372,9 @@ def _fetch(
 
 
 def _coverage_reason(exc: ConnectorError) -> CoverageReason:
-    if isinstance(exc, CredentialError):
+    if exc.code is ConnectorFailureCode.CREDENTIAL_REJECTED:
         return CoverageReason.PERMISSION_DENIED
-    if isinstance(exc, RateLimitError):
+    if exc.code is ConnectorFailureCode.RATE_LIMITED:
         return CoverageReason.RATE_LIMITED
     return CoverageReason.CONNECTOR_ERROR
 
