@@ -86,7 +86,8 @@ boundary applies to what goes over the wire:
 
 - The payload is built from an **explicit field list**, never by serialising the ORM row, so a new
   column on `Finding` cannot silently start being exported. It carries the redacted snippet
-  (ADR 0004) and the peppered hash — nothing reversible — and no analyst notes or assignee.
+  (ADR 0004) and the fingerprint — nothing reversible, and not the peppered secret hash — and no
+  analyst notes or assignee.
 - Requests are **signed** (`X-Iceberg-Signature`, HMAC-SHA256 over `timestamp.body`) when the
   channel has a secret, so a receiver can distinguish a real announcement from anything else that
   can reach its URL. The timestamp is inside the MAC, so replay has a bounded window.
