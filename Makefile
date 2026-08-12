@@ -2,7 +2,7 @@ COMPOSE ?= docker compose -f deploy/compose/docker-compose.yml --env-file .env
 # Engine replica count for `make scale`.
 N ?= 2
 
-.PHONY: help sync hooks lint format type test check images images-verify \
+.PHONY: help sync hooks lint format type test check docs-check images images-verify \
         helm-verify helm-template up down destroy \
         migrate seed logs ps scale init-env secrets engine-token
 
@@ -38,6 +38,9 @@ test: ## pytest across all workspace members
 	uv run pytest
 
 check: lint type test ## Everything CI runs
+
+docs-check: ## Verify repository-local Markdown links
+	uv run python scripts/check_docs.py
 
 # ─── Images ───────────────────────────────────────────────────────────────────
 

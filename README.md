@@ -97,6 +97,10 @@ bootstrap script (which the CSP would forbid anyway).
 See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full picture and
 [`docs/adr/`](./docs/adr/) for the rationale behind each decision.
 
+Operators should start with [`docs/runbooks/production-install.md`](./docs/runbooks/production-install.md)
+and [`docs/runbooks/backup-restore.md`](./docs/runbooks/backup-restore.md). Security reports and
+contributor guidance are in [`SECURITY.md`](./SECURITY.md) and [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+
 ## Quickstart
 
 Needs [uv](https://docs.astral.sh/uv/) and Docker.
