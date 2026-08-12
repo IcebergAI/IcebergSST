@@ -47,9 +47,28 @@ whether one exists.
 - `GET  /scans` (paginated; `?source_id=`, `?status=`, `?active=`) · `GET /scans/{id}`
 - `GET  /scans/{id}/tasks` — task states for the live-status view. **Specs are omitted**: they name
   the resources being fetched.
+- `GET  /scans/{id}/coverage` — the frozen terminal coverage manifest. Active scans return `409`.
+- `GET  /scans/{id}/coverage/export` — the same manifest as byte-stable downloadable JSON, with
+  `Cache-Control: no-store` and a UUID-only filename.
+- `GET  /sources/{id}/coverage` — the source's latest terminal manifest, ignoring a newer active
+  scan. This is `404` until the source has a terminal scan.
 - `POST /scans/{id}/cancel` (analyst+) — marks the scan and its unfinished tasks. Queued tasks can
   then never be leased; a running engine finds out at its next heartbeat. Cancelling a finished scan
   is a `409`, and a cancelled scan never reconciles.
+
+The manifest separates enumerated object outcomes (`requested`, `discovered`, `scanned`, `skipped`,
+`failed`) from scope gaps whose remaining object count is unknowable (for example permission loss
+or a collection failing mid-pagination). Reason codes are a versioned enum. Per-object gaps carry
+only a domain-separated HMAC reference; the response never includes source configuration, names,
+paths, filenames, task specs/errors, finding locators, snippets, or the legacy arbitrary count map.
+An old engine that reported no structured coverage is shown as `unreported`, never as clean.
+Only a terminal manifest whose coverage state is `complete` can authorize finding reconciliation
+or completion notifications. A task set may be operationally `completed` while its manifest is
+`partial` because content was skipped or an old engine omitted evidence; that run resolves nothing.
+
+`source_configuration_version` is captured at launch. Source edits and credential rotations are
+refused while a scan is active, so every task in the run leases the configuration revision named by
+the manifest. Cancel or finish the active scan before editing its source.
 
 ## Findings
 - `GET   /findings` (filter: `?source_id=`, `?state=`, `?rule_id=`, `?severity=`, `?assignee_id=`,
@@ -175,6 +194,11 @@ engine token is ignored everywhere else.
   lease held by this engine and an **idempotency key** (`<task id>:<attempt>`): the same key replays
   as a no-op, a different key against a finished task is a `409`. An engine may report `completed`
   or `failed` only — cancellation is the API's decision.
+- Results may include a versioned `coverage` object. Its equations and reason subtotals are
+  validated before ingest and the accepted object is stored once with the task's idempotency key.
+  The field is temporarily optional for rolling upgrades; omission becomes an explicit
+  `unreported` coverage gap. Discovery's observed-scope count must equal its returned task-spec
+  count, and discovery/fetch payload types cannot cross phases.
 - Discovery tasks return `TaskSpec`s through the same results route (two-phase scans, ADR 0009).
 
 ## Ops

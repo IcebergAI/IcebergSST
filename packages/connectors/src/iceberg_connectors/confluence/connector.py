@@ -35,6 +35,7 @@ from typing import Any
 
 import httpx2
 import structlog
+from iceberg_core.enums import CoverageObjectKind, CoverageReason
 from iceberg_core.fingerprint import CoarseLocator
 
 from iceberg_connectors.confluence.client import (
@@ -45,8 +46,13 @@ from iceberg_connectors.confluence.client import (
     RateLimitPolicy,
 )
 from iceberg_connectors.confluence.storage import storage_to_text, supported_body_text
-from iceberg_connectors.extraction import ExtractionLimits, extract_text
-from iceberg_connectors.protocol import ConnectorError, CredentialError, FetchOutcome, TaskSpec
+from iceberg_connectors.extraction import ExtractionLimits, ExtractionOutcome, extract_text
+from iceberg_connectors.protocol import (
+    ConnectorError,
+    CredentialError,
+    FetchOutcome,
+    TaskSpec,
+)
 from iceberg_connectors.sandbox import ExtractionSandbox
 from iceberg_connectors.units import ContentOrigin, ContentUnit
 
@@ -101,7 +107,9 @@ class ConfluenceConnector:
         # which is the failure this codebase treats as the dangerous one.
         wanted = {str(key).casefold() for key in connection.get("spaces") or ()}
         matched: set[str] = set()
+        matched_ids: set[str] = set()
         seen = 0
+        malformed = False
 
         try:
             for space in client.paginate("/spaces", **_space_filters(connection)):
@@ -113,9 +121,21 @@ class ConfluenceConnector:
                     # Nothing can be fetched without it, and guessing would produce a
                     # task that fails later with a much less obvious message.
                     logger.warning("confluence_space_without_id", space_key=key)
+                    malformed = True
                     continue
 
-                matched.add(key.casefold())
+                normalized_key = key.casefold()
+                if normalized_key in matched or space_id in matched_ids:
+                    # Mutable cursor pagination can repeat a row, and a broken
+                    # deployment can reuse a key/id for different rows. Creating
+                    # duplicate fetch tasks would make requested/discovered scope
+                    # irreconcilable, so preserve the first spec and fail closed.
+                    logger.warning("confluence_duplicate_space")
+                    malformed = True
+                    continue
+
+                matched.add(normalized_key)
+                matched_ids.add(space_id)
                 seen += 1
                 yield TaskSpec(
                     label=f"space {key or space_id}",
@@ -134,6 +154,10 @@ class ConfluenceConnector:
                 logger.warning("confluence_spaces_not_found", spaces=missing)
                 raise ConnectorError(
                     "configured Confluence spaces were not found: " + ", ".join(missing)
+                )
+            if malformed:
+                raise ConnectorError(
+                    "Confluence discovery returned malformed or duplicate space identity"
                 )
             logger.info("confluence_discovery_complete", spaces=seen, filtered=bool(wanted))
         finally:
@@ -168,7 +192,11 @@ class ConfluenceConnector:
             for page in client.paginate(f"/spaces/{space_id}/pages", **_body_format()):
                 page_id = str(page.get("id") or "")
                 if not page_id:
-                    outcome.failed += 1
+                    outcome.failed_for(
+                        CoverageReason.INVALID_METADATA,
+                        CoverageObjectKind.PAGE,
+                        None,
+                    )
                     continue
 
                 try:
@@ -178,11 +206,6 @@ class ConfluenceConnector:
                     # one `path_glob` covers the page and its parts (#44).
                     here = context.for_page(page, page_id, client.resolve)
 
-                    yield from self._page_units(text, page_id, here, outcome)
-                    if want_comments:
-                        yield from self._comment_units(client, page_id, here, outcome)
-                    if want_attachments:
-                        yield from self._attachment_units(client, page_id, here, outcome, sandbox)
                 except CredentialError, RateLimited:
                     # Neither is about this page. A bad token is bad for the whole
                     # site, and a site throttling past `max_wait_seconds` will
@@ -193,9 +216,46 @@ class ConfluenceConnector:
                     # or run fewer engines.
                     raise
                 except ConnectorError as exc:
-                    # This page and its parts, stepped over and counted.
-                    outcome.failed += 1
+                    # The page body itself was enumerated but unreadable. Its child
+                    # collections were never requested, so they are not fabricated
+                    # into the object totals.
+                    outcome.failed_for(
+                        CoverageReason.INVALID_RESPONSE,
+                        CoverageObjectKind.PAGE,
+                        page_id,
+                    )
                     logger.warning("confluence_page_failed", page_id=page_id, error=str(exc))
+                    continue
+
+                yield from self._page_units(text, page_id, here, outcome)
+                if want_comments:
+                    try:
+                        yield from self._comment_units(client, page_id, here, outcome)
+                    except CredentialError, RateLimited:
+                        raise
+                    except ConnectorError as exc:
+                        # The collection failed before its remaining object count was
+                        # knowable. Record a scope gap, not a made-up failed comment.
+                        outcome.scope_gap_for(
+                            CoverageReason.CONNECTOR_ERROR,
+                            {"page": page_id, "collection": "comments"},
+                        )
+                        logger.warning(
+                            "confluence_comments_failed", page_id=page_id, error=str(exc)
+                        )
+                if want_attachments:
+                    try:
+                        yield from self._attachment_units(client, page_id, here, outcome, sandbox)
+                    except CredentialError, RateLimited:
+                        raise
+                    except ConnectorError as exc:
+                        outcome.scope_gap_for(
+                            CoverageReason.CONNECTOR_ERROR,
+                            {"page": page_id, "collection": "attachments"},
+                        )
+                        logger.warning(
+                            "confluence_attachments_failed", page_id=page_id, error=str(exc)
+                        )
         finally:
             # Reached on a cancelled task too: closing a generator runs this, so an
             # abandoned fetch does not leak the child process (ADR 0009 §4) or the
@@ -229,10 +289,14 @@ class ConfluenceConnector:
     ) -> Iterator[ContentUnit]:
         """The page body, if it has any text."""
         if not text:
-            outcome.skipped += 1
+            outcome.skipped_for(
+                CoverageReason.EMPTY_CONTENT,
+                CoverageObjectKind.PAGE,
+                page_id,
+            )
             return
 
-        outcome.units += 1
+        outcome.scanned_for(CoverageObjectKind.PAGE, page_id)
         yield ContentUnit(
             locator=CoarseLocator(connector_type=self.connector_type, resource_id=page_id),
             text=text,
@@ -260,7 +324,11 @@ class ConfluenceConnector:
             for comment in client.paginate(f"/pages/{page_id}/{endpoint}", **_body_format()):
                 comment_id = str(comment.get("id") or "")
                 if not comment_id:
-                    outcome.failed += 1
+                    outcome.failed_for(
+                        CoverageReason.INVALID_METADATA,
+                        CoverageObjectKind.COMMENT,
+                        None,
+                    )
                     continue
                 if comment_id in seen:
                     continue
@@ -277,13 +345,17 @@ class ConfluenceConnector:
                 supported, text = supported_body_text(comment)
 
                 if not supported:
-                    outcome.failed += 1
+                    outcome.failed_for(
+                        CoverageReason.INVALID_RESPONSE,
+                        CoverageObjectKind.COMMENT,
+                        comment_id,
+                    )
                     logger.warning(
                         "confluence_comment_missing_body",
                         comment_id=comment_id,
                     )
                 elif text:
-                    outcome.units += 1
+                    outcome.scanned_for(CoverageObjectKind.COMMENT, comment_id)
                     yield ContentUnit(
                         locator=CoarseLocator(
                             connector_type=self.connector_type,
@@ -296,13 +368,23 @@ class ConfluenceConnector:
                         origin=ContentOrigin.COMMENT,
                         display=context.display() | {"comment_id": comment_id},
                     )
+                else:
+                    outcome.skipped_for(
+                        CoverageReason.EMPTY_CONTENT,
+                        CoverageObjectKind.COMMENT,
+                        comment_id,
+                    )
 
                 for reply in client.paginate(
                     f"/{endpoint}/{comment_id}/children", **_body_format()
                 ):
                     reply_id = str(reply.get("id") or "")
                     if not reply_id:
-                        outcome.failed += 1
+                        outcome.failed_for(
+                            CoverageReason.INVALID_METADATA,
+                            CoverageObjectKind.COMMENT,
+                            None,
+                        )
                         continue
                     if reply_id in seen:
                         continue
@@ -327,8 +409,13 @@ class ConfluenceConnector:
         for attachment in client.paginate(f"/pages/{page_id}/attachments"):
             name = str(attachment.get("title") or "")
             link = attachment.get("downloadLink")
+            reference = str(attachment.get("id") or "") or name or None
             if not name or not link:
-                outcome.failed += 1
+                outcome.failed_for(
+                    CoverageReason.INVALID_METADATA,
+                    CoverageObjectKind.ATTACHMENT,
+                    reference,
+                )
                 logger.warning(
                     "confluence_attachment_missing_metadata",
                     attachment_id=str(attachment.get("id") or ""),
@@ -337,7 +424,11 @@ class ConfluenceConnector:
 
             declared = _as_int(attachment.get("fileSize"))
             if declared is not None and declared > self.extraction_limits.max_input_bytes:
-                outcome.failed += 1
+                outcome.failed_for(
+                    CoverageReason.SIZE_LIMIT,
+                    CoverageObjectKind.ATTACHMENT,
+                    reference,
+                )
                 logger.debug("confluence_attachment_too_large", name=name, bytes=declared)
                 continue
 
@@ -346,12 +437,20 @@ class ConfluenceConnector:
             except DownloadTooLarge:
                 # It lied about its size, or did not say. The cap is intentional,
                 # but unread content cannot justify source-wide reconciliation.
-                outcome.failed += 1
+                outcome.failed_for(
+                    CoverageReason.SIZE_LIMIT,
+                    CoverageObjectKind.ATTACHMENT,
+                    reference,
+                )
                 continue
             except CredentialError, RateLimited:
                 raise
             except ConnectorError as exc:
-                outcome.failed += 1
+                outcome.failed_for(
+                    CoverageReason.CONNECTOR_ERROR,
+                    CoverageObjectKind.ATTACHMENT,
+                    reference,
+                )
                 logger.warning("confluence_attachment_failed", name=name, error=str(exc))
                 continue
 
@@ -363,9 +462,17 @@ class ConfluenceConnector:
                 # bomb-like, or timed-out document was requested text that could
                 # not be read, so it makes the task incomplete instead.
                 if extracted.outcome.is_incomplete:
-                    outcome.failed += 1
+                    outcome.failed_for(
+                        _incomplete_extraction_reason(extracted.outcome),
+                        CoverageObjectKind.ATTACHMENT,
+                        reference,
+                    )
                 else:
-                    outcome.skipped += 1
+                    outcome.skipped_for(
+                        _skipped_extraction_reason(extracted.outcome),
+                        CoverageObjectKind.ATTACHMENT,
+                        reference,
+                    )
                 if extracted.outcome.is_hostile:
                     logger.warning(
                         "confluence_attachment_rejected",
@@ -377,8 +484,16 @@ class ConfluenceConnector:
             if extracted.truncated:
                 # Keep the useful prefix as a unit, but do not let the unseen tail
                 # auto-resolve a finding from an earlier complete scan.
-                outcome.failed += 1
-            outcome.units += 1
+                outcome.failed_for(
+                    CoverageReason.OUTPUT_LIMIT,
+                    CoverageObjectKind.ATTACHMENT,
+                    reference,
+                )
+                # The useful prefix still flows through detection, but the object's
+                # one coverage disposition is failed — never both scanned and failed.
+                outcome.units += 1
+            else:
+                outcome.scanned_for(CoverageObjectKind.ATTACHMENT, reference)
             yield ContentUnit(
                 locator=CoarseLocator(
                     connector_type=self.connector_type,
@@ -420,6 +535,25 @@ class ConfluenceConnector:
         if self.sleep is not None:
             kwargs["sleep"] = self.sleep
         return ConfluenceClient(**kwargs)
+
+
+def _incomplete_extraction_reason(outcome: ExtractionOutcome) -> CoverageReason:
+    """Map parser-specific values onto the stable public assurance vocabulary."""
+    if outcome is ExtractionOutcome.REJECTED_TOO_LARGE:
+        return CoverageReason.SIZE_LIMIT
+    if outcome is ExtractionOutcome.FAILED_TIMEOUT:
+        return CoverageReason.TIMEOUT
+    # Compression bombs and parser crashes are both safe parser rejection: the
+    # connector detail stays in its local log, while the manifest stays stable.
+    return CoverageReason.PARSE_ERROR
+
+
+def _skipped_extraction_reason(outcome: ExtractionOutcome) -> CoverageReason:
+    if outcome is ExtractionOutcome.SKIPPED_BINARY:
+        return CoverageReason.BINARY_CONTENT
+    if outcome is ExtractionOutcome.SKIPPED_EMPTY:
+        return CoverageReason.EMPTY_CONTENT
+    return CoverageReason.UNSUPPORTED_TYPE
 
 
 @dataclass(slots=True)

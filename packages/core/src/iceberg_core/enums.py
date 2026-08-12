@@ -60,6 +60,112 @@ class ScanTaskStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+#: Maximum opaque object references retained in either a task report or its
+#: scan-level manifest. Exact aggregate counts continue beyond this boundary.
+MAX_COVERAGE_GAP_REFERENCES = 10_000
+
+
+class CoverageReason(StrEnum):
+    """Stable, content-free explanations for scan coverage gaps.
+
+    These values are part of the public API and exported manifests.  Keep them
+    deliberately broad: connector-specific exception names and resource details
+    belong in engine logs, not in a durable report that must stay comparable
+    across connector and parser releases.
+    """
+
+    PERMISSION_DENIED = "permission_denied"
+    RATE_LIMITED = "rate_limited"
+    SIZE_LIMIT = "size_limit"
+    OUTPUT_LIMIT = "output_limit"
+    UNSUPPORTED_TYPE = "unsupported_type"
+    CONNECTOR_ERROR = "connector_error"
+    MISSING_RESOURCE = "missing_resource"
+    INVALID_METADATA = "invalid_metadata"
+    INVALID_RESPONSE = "invalid_response"
+    PARSE_ERROR = "parse_error"
+    TIMEOUT = "timeout"
+    EMPTY_CONTENT = "empty_content"
+    BINARY_CONTENT = "binary_content"
+    CANCELLED = "cancelled"
+    UNREPORTED = "unreported"
+
+
+class CoverageState(StrEnum):
+    """Operator-facing assurance state of a terminal scan manifest."""
+
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class CoverageDisposition(StrEnum):
+    """How a requested object or scope gap affected assurance."""
+
+    SKIPPED = "skipped"
+    FAILED = "failed"
+    SCOPE_GAP = "scope_gap"
+
+
+_COVERAGE_REASONS_BY_DISPOSITION: dict[CoverageDisposition, frozenset[CoverageReason]] = {
+    CoverageDisposition.SKIPPED: frozenset(
+        {
+            CoverageReason.UNSUPPORTED_TYPE,
+            CoverageReason.EMPTY_CONTENT,
+            CoverageReason.BINARY_CONTENT,
+        }
+    ),
+    CoverageDisposition.FAILED: frozenset(
+        {
+            CoverageReason.PERMISSION_DENIED,
+            CoverageReason.RATE_LIMITED,
+            CoverageReason.SIZE_LIMIT,
+            CoverageReason.OUTPUT_LIMIT,
+            CoverageReason.CONNECTOR_ERROR,
+            CoverageReason.MISSING_RESOURCE,
+            CoverageReason.INVALID_METADATA,
+            CoverageReason.INVALID_RESPONSE,
+            CoverageReason.PARSE_ERROR,
+            CoverageReason.TIMEOUT,
+        }
+    ),
+    CoverageDisposition.SCOPE_GAP: frozenset(
+        {
+            CoverageReason.PERMISSION_DENIED,
+            CoverageReason.RATE_LIMITED,
+            CoverageReason.CONNECTOR_ERROR,
+            CoverageReason.MISSING_RESOURCE,
+            CoverageReason.INVALID_METADATA,
+            CoverageReason.INVALID_RESPONSE,
+            CoverageReason.TIMEOUT,
+            CoverageReason.CANCELLED,
+            CoverageReason.UNREPORTED,
+        }
+    ),
+}
+
+
+def coverage_reason_allowed(
+    disposition: CoverageDisposition,
+    reason: CoverageReason,
+) -> bool:
+    """Whether a stable reason has the stated assurance meaning."""
+    return reason in _COVERAGE_REASONS_BY_DISPOSITION[disposition]
+
+
+class CoverageObjectKind(StrEnum):
+    """Content-free object classes shared by current and planned connectors."""
+
+    SCOPE = "scope"
+    PAGE = "page"
+    COMMENT = "comment"
+    ATTACHMENT = "attachment"
+    PROJECT = "project"
+    RECORD = "record"
+    PATH = "path"
+
+
 class FindingState(StrEnum):
     OPEN = "open"
     FALSE_POSITIVE = "false_positive"

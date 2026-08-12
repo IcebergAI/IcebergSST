@@ -148,6 +148,7 @@ def test_duplicate_names_are_refused(
     [
         {"base_url": "example.atlassian.net"},  # no scheme
         {"base_url": "https://example.test", "spaces": ["ENG", "ENG"]},  # repeated
+        {"base_url": "https://example.test", "spaces": ["DOCS", "docs"]},
         {"spaces": ["ENG"]},  # no base_url
         {"base_url": "https://example.test", "unexpected": True},  # typo'd key
     ],

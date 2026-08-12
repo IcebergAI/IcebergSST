@@ -205,6 +205,17 @@ def test_pagination_that_never_terminates_is_stopped() -> None:
         list(client.paginate("/spaces"))
 
 
+@pytest.mark.parametrize("results", [None, {"id": "s1"}, [{"id": "s1"}, "bad-entry"]])
+def test_malformed_collection_results_fail_instead_of_looking_empty(results: object) -> None:
+    def malformed(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={"results": results})
+
+    client, _ = _client(_site(), transport=httpx2.MockTransport(malformed))
+
+    with pytest.raises(ConnectorError, match="unexpected collection shape"):
+        list(client.paginate("/spaces"))
+
+
 # ─── Rate limiting ────────────────────────────────────────────────────────────
 
 

@@ -102,6 +102,27 @@ def test_discovery_returns_one_spec_per_space() -> None:
     assert specs[0].label == "space DOCS"
 
 
+def test_unfiltered_discovery_fails_when_a_space_has_no_stable_id() -> None:
+    site = FakeConfluence(spaces=[Space("", "DOCS", "Documentation")])
+
+    with pytest.raises(ConnectorError, match="malformed or duplicate"):
+        list(_connector(site).discover(site.connection, API_TOKEN))
+
+
+def test_duplicate_discovery_space_preserves_one_spec_then_fails_closed() -> None:
+    site = FakeConfluence(
+        spaces=[
+            Space("s1", "DOCS", "Documentation"),
+            Space("s1", "DOCS", "Repeated documentation"),
+        ]
+    )
+    stream = _connector(site).discover(site.connection | {"spaces": ["DOCS"]}, API_TOKEN)
+
+    assert next(stream).params["space_id"] == "s1"
+    with pytest.raises(ConnectorError, match="malformed or duplicate"):
+        next(stream)
+
+
 def test_a_spec_carries_what_fetch_needs_and_nothing_secret() -> None:
     """A spec crosses the wire twice and is persisted by the API (ADR 0009), so it
     must be plain JSON and must not carry the credential."""
@@ -370,6 +391,49 @@ def test_a_page_with_no_text_is_a_skip_not_a_failure() -> None:
 
     assert units == []
     assert (outcome.skipped, outcome.failed) == (1, 0)
+    assert outcome.as_coverage()["counts"] == {
+        "requested": 1,
+        "discovered": 1,
+        "scanned": 0,
+        "skipped": 1,
+        "failed": 0,
+    }
+    assert outcome.as_coverage()["reasons"] == [
+        {"outcome": "skipped", "reason": "empty_content", "count": 1}
+    ]
+
+
+def test_an_empty_comment_has_one_skipped_disposition() -> None:
+    site = _site(
+        spaces=[
+            Space(
+                "s1",
+                "DOCS",
+                "Docs",
+                pages=[
+                    Page(
+                        "p1",
+                        "Runbook",
+                        storage_page("readable body"),
+                        comments=[Comment("c1", storage_page(""))],
+                    )
+                ],
+            )
+        ]
+    )
+
+    units, outcome = _fetch(_connector(site), site)
+
+    assert [unit.origin for unit in units] == [ContentOrigin.BODY]
+    coverage = outcome.as_coverage()
+    assert coverage["counts"] == {
+        "requested": 2,
+        "discovered": 2,
+        "scanned": 1,
+        "skipped": 1,
+        "failed": 0,
+    }
+    assert coverage["reasons"] == [{"outcome": "skipped", "reason": "empty_content", "count": 1}]
 
 
 @pytest.mark.parametrize(
@@ -635,6 +699,9 @@ def test_an_image_is_skipped_rather_than_scanned() -> None:
 
     assert not any(unit.origin is ContentOrigin.ATTACHMENT for unit in units)
     assert outcome.skipped == 1
+    assert outcome.as_coverage()["reasons"] == [
+        {"outcome": "skipped", "reason": "unsupported_type", "count": 1}
+    ]
 
 
 def test_an_attachment_that_declares_a_huge_size_is_incomplete_without_download() -> None:
@@ -662,6 +729,9 @@ def test_an_attachment_that_declares_a_huge_size_is_incomplete_without_download(
 
     assert (outcome.skipped, outcome.failed) == (0, 1)
     assert not any("/download/" in path for path in site.paths_requested())
+    assert outcome.as_coverage()["reasons"] == [
+        {"outcome": "failed", "reason": "size_limit", "count": 1}
+    ]
 
 
 def test_an_attachment_that_lies_about_its_size_fails_closed_mid_download() -> None:
@@ -770,6 +840,18 @@ def test_a_truncated_attachment_keeps_its_partial_unit_but_fails_closed() -> Non
     attachment = next(unit for unit in units if unit.origin is ContentOrigin.ATTACHMENT)
     assert attachment.display["truncated"] is True
     assert outcome.failed == 1
+    coverage = outcome.as_coverage()
+    assert coverage["counts"] == {
+        "requested": 2,
+        "discovered": 2,
+        "scanned": 1,
+        "skipped": 0,
+        "failed": 1,
+    }
+    assert coverage["reasons"] == [{"outcome": "failed", "reason": "output_limit", "count": 1}]
+    assert coverage["counts"]["requested"] == sum(
+        coverage["counts"][outcome] for outcome in ("scanned", "skipped", "failed")
+    )
 
 
 def test_an_attachment_is_downloaded_from_the_context_base_the_site_reported() -> None:

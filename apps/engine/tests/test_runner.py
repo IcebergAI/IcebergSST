@@ -19,7 +19,15 @@ from typing import Any
 import httpx2
 import pytest
 from dramatiq.middleware import TimeLimitExceeded
-from iceberg_connectors import ConnectorError, FakeConnector, FakePage, TaskSpec, registry
+from iceberg_connectors import (
+    ConnectorError,
+    FakeConnector,
+    FakePage,
+    RateLimitError,
+    TaskSpec,
+    registry,
+)
+from iceberg_connectors.confluence import ConfluenceConnector
 from iceberg_detect import load_named_pack
 from iceberg_engine.api_client import EngineClient
 from iceberg_engine.runner import run_task
@@ -126,6 +134,17 @@ def test_a_fetch_task_reports_redacted_findings_and_counts() -> None:
     assert [f["rule_id"] for f in submission["findings"]] == ["aws-access-key-id"]
     assert submission["counts"]["units"] == 2
     assert submission["counts"]["units_skipped"] == 1
+    assert submission["coverage"]["phase"] == "fetch"
+    assert submission["coverage"]["counts"] == {
+        "requested": 3,
+        "discovered": 3,
+        "scanned": 2,
+        "skipped": 1,
+        "failed": 0,
+    }
+    assert submission["coverage"]["reasons"] == [
+        {"outcome": "skipped", "reason": "unsupported_type", "count": 1}
+    ]
 
 
 def test_no_plaintext_reaches_the_api() -> None:
@@ -137,6 +156,25 @@ def test_no_plaintext_reaches_the_api() -> None:
     assert "AKIAIOSFODNN7EXAMPLE" not in json.dumps(api.submission)
 
 
+def test_coverage_gap_references_cross_the_wire_without_raw_source_identifiers() -> None:
+    api = Api()
+
+    run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    coverage = api.submission["coverage"]
+    serialized = json.dumps(coverage)
+    assert "page-3" not in serialized
+    assert coverage["gaps"] == [
+        {
+            "kind": "record",
+            "outcome": "skipped",
+            "reason": "unsupported_type",
+            "reference": coverage["gaps"][0]["reference"],
+        }
+    ]
+    assert len(coverage["gaps"][0]["reference"]) == 64
+
+
 def test_a_discovery_task_reports_specs_rather_than_findings() -> None:
     api = Api(_lease(kind="discovery", spec={}))
 
@@ -146,6 +184,112 @@ def test_a_discovery_task_reports_specs_rather_than_findings() -> None:
     assert [spec["params"]["space"] for spec in submission["task_specs"]] == ["DOCS"]
     assert submission["findings"] == []
     assert submission["status"] == "completed"
+    assert submission["coverage"] == {
+        "version": "1",
+        "phase": "discovery",
+        "counts": {
+            "requested": 0,
+            "discovered": 0,
+            "scanned": 0,
+            "skipped": 0,
+            "failed": 0,
+        },
+        "scope": {"requested": None, "discovered": 1, "gaps": 0},
+        "reasons": [],
+        "gaps": [],
+        "gaps_omitted": 0,
+    }
+
+
+def test_legacy_duplicate_configured_scopes_are_normalized_for_coverage() -> None:
+    api = Api(
+        _lease(
+            kind="discovery",
+            spec={},
+            connection={"spaces": ["DOCS", "docs"]},
+        )
+    )
+
+    run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    assert len(api.submission["task_specs"]) == 1
+    assert api.submission["coverage"]["scope"] == {
+        "requested": 1,
+        "discovered": 1,
+        "gaps": 0,
+    }
+
+
+def test_duplicate_connector_scopes_fail_with_reconciling_partial_coverage() -> None:
+    def duplicate_spaces(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            json={
+                "results": [
+                    {"id": "s1", "key": "DOCS", "name": "Docs"},
+                    {"id": "s1", "key": "DOCS", "name": "Docs repeated"},
+                ]
+            },
+        )
+
+    registry.clear()
+    registry.register(
+        ConfluenceConnector(
+            transport=httpx2.MockTransport(duplicate_spaces),
+            sleep=lambda _seconds: None,
+            sandbox_factory=None,
+        )
+    )
+    api = Api(
+        _lease(
+            source_type="confluence",
+            kind="discovery",
+            spec={},
+            connection={"base_url": "https://wiki.test", "spaces": ["DOCS"]},
+        )
+    )
+
+    run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    assert api.submission["status"] == "failed"
+    assert len(api.submission["task_specs"]) == 1
+    assert api.submission["coverage"]["scope"] == {
+        "requested": None,
+        "discovered": 1,
+        "gaps": 1,
+    }
+    assert api.submission["coverage"]["reasons"] == [
+        {"outcome": "scope_gap", "reason": "connector_error", "count": 1}
+    ]
+
+
+def test_a_failed_configured_scope_is_reported_without_exposing_its_name() -> None:
+    class PartlyDiscoverable(FakeConnector):
+        def discover(self, *args: Any, **kwargs: Any) -> Iterator[TaskSpec]:
+            yield TaskSpec(
+                label="space DOCS",
+                params={"space": "DOCS", "space_key": "DOCS"},
+            )
+            raise ConnectorError("configured space customer-acquisition was not found")
+
+    registry.clear()
+    registry.register(PartlyDiscoverable())
+    api = Api(
+        _lease(
+            kind="discovery",
+            spec={},
+            connection={"spaces": ["DOCS", "customer-acquisition"]},
+        )
+    )
+
+    run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    coverage = api.submission["coverage"]
+    assert coverage["scope"] == {"requested": 2, "discovered": 1, "gaps": 1}
+    assert coverage["reasons"] == [
+        {"outcome": "scope_gap", "reason": "connector_error", "count": 1}
+    ]
+    assert "customer-acquisition" not in json.dumps(coverage)
 
 
 def test_a_failed_discovery_keeps_specs_found_before_the_failure() -> None:
@@ -240,7 +384,7 @@ def test_an_unsupported_task_kind_fails_the_task_rather_than_mis_running_it() ->
     run_task(TASK_ID, client=_client(api), pack=PACK)
 
     assert api.submission["status"] == "failed"
-    assert "unsupported task kind" in api.submission["error"]
+    assert api.submission["error"] == "ConnectorError: connector_error"
 
 
 def test_an_unreachable_source_is_reported_as_failed_with_a_reason() -> None:
@@ -269,7 +413,40 @@ def test_a_rejected_credential_is_reported_as_failed() -> None:
     run_task(TASK_ID, client=_client(api), pack=PACK)
 
     assert api.submission["status"] == "failed"
-    assert "CredentialError" in api.submission["error"]
+    assert api.submission["error"] == "CredentialError: permission_denied"
+    assert api.submission["coverage"]["reasons"] == [
+        {"outcome": "scope_gap", "reason": "permission_denied", "count": 1}
+    ]
+
+
+def test_rate_limit_exhaustion_is_a_stable_task_coverage_reason() -> None:
+    canary = "sensitive-resource-name-AKIAIOSFODNN7EXAMPLE"
+
+    class Throttled(FakeConnector):
+        def fetch(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
+            raise RateLimitError(canary)
+
+    registry.clear()
+    registry.register(Throttled())
+    api = Api()
+
+    with capture_logs() as events:
+        run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    coverage = api.submission["coverage"]
+    assert api.submission["status"] == "failed"
+    assert api.submission["error"] == "RateLimitError: rate_limited"
+    assert canary not in json.dumps(api.submission)
+    assert canary not in json.dumps(events)
+    assert coverage["counts"] == {
+        "requested": 0,
+        "discovered": 0,
+        "scanned": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
+    assert coverage["scope"]["gaps"] == 1
+    assert coverage["reasons"] == [{"outcome": "scope_gap", "reason": "rate_limited", "count": 1}]
 
 
 def test_a_source_type_this_engine_cannot_scan_fails_the_task() -> None:
@@ -279,7 +456,7 @@ def test_a_source_type_this_engine_cannot_scan_fails_the_task() -> None:
     run_task(TASK_ID, client=_client(api), pack=PACK)
 
     assert api.submission["status"] == "failed"
-    assert "no connector for source type" in api.submission["error"]
+    assert api.submission["error"] == "UnknownConnectorError: connector_error"
 
 
 def test_a_lease_without_a_pepper_fails_rather_than_scanning() -> None:
@@ -291,7 +468,7 @@ def test_a_lease_without_a_pepper_fails_rather_than_scanning() -> None:
     run_task(TASK_ID, client=_client(api), pack=PACK)
 
     assert api.submission["status"] == "failed"
-    assert "pepper" in api.submission["error"]
+    assert api.submission["error"] == "ConnectorError: connector_error"
     assert api.submission["findings"] == []
 
 
@@ -360,6 +537,18 @@ def test_detection_truncation_fails_closed(monkeypatch: pytest.MonkeyPatch) -> N
     assert api.submission["counts"]["units_truncated"] == 2
     assert api.submission["status"] == "failed"
     assert api.submission["error"] == "2 requested content units were truncated"
+    coverage = api.submission["coverage"]
+    assert coverage["counts"] == {
+        "requested": 3,
+        "discovered": 3,
+        "scanned": 0,
+        "skipped": 1,
+        "failed": 2,
+    }
+    assert coverage["reasons"] == [
+        {"outcome": "failed", "reason": "output_limit", "count": 2},
+        {"outcome": "skipped", "reason": "unsupported_type", "count": 1},
+    ]
 
 
 def test_a_cancelled_task_is_abandoned_without_reporting() -> None:

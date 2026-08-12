@@ -24,6 +24,8 @@ from typing import Any
 import structlog
 from iceberg_core.enums import (
     ACTIVE_SCAN_STATUSES,
+    CoverageReason,
+    CoverageState,
     ScanStatus,
     ScanTaskKind,
     ScanTaskStatus,
@@ -36,6 +38,7 @@ from sqlmodel import Session, col, select, update
 
 from iceberg_api.dispatch import Dispatcher
 from iceberg_api.notifications import dispatch as notification_dispatch
+from iceberg_api.scans import coverage as coverage_service
 from iceberg_api.scans.reconcile import reconcile_scan
 
 #: How long a lease is good for without a heartbeat. Long enough for a slow
@@ -89,11 +92,18 @@ def launch_scan(
     (#33).
     """
     started_at = now or datetime.now(UTC)
+    # Serialize launch against source edits. Every later lease reads the source row,
+    # so the configuration-version claim is truthful only if connection/credential
+    # edits cannot slip between this snapshot and the active-scan constraint.
+    locked_source = db.exec(
+        select(Source).where(col(Source.id) == source.id).with_for_update()
+    ).one()
     scan = Scan(
-        source_id=source.id,
+        source_id=locked_source.id,
         trigger=trigger,
         status=ScanStatus.QUEUED,
         started_at=started_at,
+        source_configuration_version=locked_source.updated_at,
     )
     try:
         with db.begin_nested():
@@ -296,11 +306,14 @@ def complete_task(
     *,
     status: ScanTaskStatus,
     error: str | None = None,
+    coverage: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> None:
     """Mark a task terminal. Does not commit; the caller owns the transaction."""
     task.status = status
     task.error = error
+    if coverage is not None:
+        task.coverage = coverage
     task.finished_at = now or datetime.now(UTC)
     task.lease_expires_at = None
     db.add(task)
@@ -360,7 +373,7 @@ def finalize_and_reconcile(
     *,
     now: datetime | None = None,
 ) -> ScanStatus | None:
-    """Finish the scan if its tasks are done, and reconcile if it completed. Commits.
+    """Finish the scan, then reconcile only complete coverage. Commits.
 
     All of it in **one** transaction. Split across commits, a crash between the
     status flip and the reconciliation left a ``completed`` scan that never
@@ -368,6 +381,8 @@ def finalize_and_reconcile(
     the engine-replay path are gated on the scan still being *active*. Remediated
     findings would stay open until some later scan of the source happened to
     resolve them, and the run's announcements would never be queued at all.
+    Conversely, a completed task set with skipped or unreported coverage must not
+    resolve findings: operational completion alone does not prove inspection.
 
     Safe to call from anywhere: :func:`finalize_scan_if_done` is conditional, so
     concurrent callers agree on a single winner.
@@ -376,16 +391,37 @@ def finalize_and_reconcile(
     if final is None:
         return None
 
-    if final is ScanStatus.COMPLETED:
-        scan = db.get(Scan, scan_id)
-        if scan is not None:  # pragma: no branch — the UPDATE just matched it
-            db.refresh(scan)
-            reconcile_scan(db, scan, now=now)
-            # Queue announcements for what this scan opened (#60). Written after
-            # reconciliation, so a finding auto-resolved in the same pass is not
-            # announced. Sending happens in the maintenance loop; nothing here
-            # talks to SMTP or a webhook.
-            notification_dispatch.enqueue_for_scan(db, scan, now=now)
+    # Freeze the allowlisted evidence before it authorizes reconciliation. A task
+    # can be operationally completed while still having skipped content, and an
+    # older engine can omit coverage entirely. Neither is evidence that a missing
+    # finding was remediated.
+    scan = db.get(Scan, scan_id)
+    manifest = None
+    if scan is not None:  # pragma: no branch - the status UPDATE just matched it
+        db.refresh(scan)
+        tasks = list(
+            db.exec(
+                select(ScanTask)
+                .where(col(ScanTask.scan_id) == scan_id)
+                .order_by(col(ScanTask.created_at), col(ScanTask.id))
+            )
+        )
+        manifest = coverage_service.build_manifest(scan, tasks)
+        scan.coverage_manifest = manifest.model_dump(mode="json")
+        db.add(scan)
+
+    if (
+        final is ScanStatus.COMPLETED
+        and scan is not None
+        and manifest is not None
+        and manifest.coverage_state is CoverageState.COMPLETE
+    ):
+        reconcile_scan(db, scan, now=now)
+        # Queue announcements for what this scan opened (#60). Written after
+        # reconciliation, so a finding auto-resolved in the same pass is not
+        # announced. Sending happens in the maintenance loop; nothing here
+        # talks to SMTP or a webhook.
+        notification_dispatch.enqueue_for_scan(db, scan, now=now)
 
     db.commit()
     logger.info("scan_finished", scan_id=str(scan_id), status=final.value)
@@ -551,19 +587,36 @@ def cancel_scan(db: Session, scan: Scan, *, now: datetime | None = None) -> Scan
     that completes while the cancellation is in flight keeps its completion.
     """
     at = now or datetime.now(UTC)
-    db.exec(
-        update(ScanTask)
-        .where(
-            col(ScanTask.scan_id) == scan.id,
-            col(ScanTask.status).not_in(list(TERMINAL_TASK_STATUSES)),
+    for kind in ScanTaskKind:
+        db.exec(
+            update(ScanTask)
+            .where(
+                col(ScanTask.scan_id) == scan.id,
+                col(ScanTask.kind) == kind,
+                col(ScanTask.status).not_in(list(TERMINAL_TASK_STATUSES)),
+            )
+            .values(
+                status=ScanTaskStatus.CANCELLED,
+                finished_at=at,
+                lease_expires_at=None,
+                coverage=coverage_service.failure_report(kind, CoverageReason.CANCELLED),
+            )
         )
-        .values(status=ScanTaskStatus.CANCELLED, finished_at=at, lease_expires_at=None)
-    )
     db.exec(
         update(Scan)
         .where(col(Scan.id) == scan.id, col(Scan.status).in_(list(ACTIVE_SCAN_STATUSES)))
         .values(status=ScanStatus.CANCELLED, finished_at=at)
     )
+    db.refresh(scan)
+    tasks = list(
+        db.exec(
+            select(ScanTask)
+            .where(col(ScanTask.scan_id) == scan.id)
+            .order_by(col(ScanTask.created_at), col(ScanTask.id))
+        )
+    )
+    scan.coverage_manifest = coverage_service.build_manifest(scan, tasks).model_dump(mode="json")
+    db.add(scan)
     db.commit()
     db.refresh(scan)
     logger.info("scan_cancelled", scan_id=str(scan.id))

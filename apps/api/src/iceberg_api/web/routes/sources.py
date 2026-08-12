@@ -16,7 +16,7 @@ from pydantic import SecretStr, ValidationError
 
 from iceberg_api.auth.dependencies import CsrfProtected, SecretStoreDep, SessionDep
 from iceberg_api.pagination import DEFAULT_LIMIT
-from iceberg_api.scans.routes import list_scans
+from iceberg_api.scans.routes import list_scans, read_source_coverage
 from iceberg_api.sources import routes as api
 from iceberg_api.sources.routes import ProberDep
 from iceberg_api.sources.schedule_routes import list_schedules
@@ -118,6 +118,12 @@ async def source_detail(
     scans = await list_scans(
         user=user, db=db, source_id=source_id, scan_status=None, active=None, limit=10, cursor=None
     )
+    try:
+        latest_coverage = await read_source_coverage(source_id=source_id, user=user, db=db)
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        latest_coverage = None
     return render_page(
         request,
         "sources/detail.html",
@@ -126,6 +132,7 @@ async def source_detail(
             "source": source,
             "schedules": schedules.items,
             "scans": scans.items,
+            "latest_coverage": latest_coverage,
             "form": _form_state(source, source.connection),
         },
     )

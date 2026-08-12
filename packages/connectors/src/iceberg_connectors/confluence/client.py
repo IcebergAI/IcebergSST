@@ -42,7 +42,7 @@ from urllib.parse import urlsplit
 import httpx2
 import structlog
 
-from iceberg_connectors.protocol import ConnectorError, CredentialError
+from iceberg_connectors.protocol import ConnectorError, CredentialError, RateLimitError
 
 logger = structlog.get_logger()
 
@@ -74,7 +74,7 @@ MAX_REDIRECTS = 5
 DEFAULT_MAX_JSON_BYTES = 64 * 1024 * 1024
 
 
-class RateLimited(ConnectorError):
+class RateLimited(RateLimitError):
     """The server asked to be left alone for longer than this scan can wait."""
 
 
@@ -213,7 +213,12 @@ class ConfluenceClient:
 
         for _page in range(MAX_PAGES):
             payload = self.get_json(url, params=query)
-            yield from (item for item in payload.get("results", []) if isinstance(item, dict))
+            results = payload.get("results")
+            if not isinstance(results, list) or any(not isinstance(item, dict) for item in results):
+                raise ConnectorError(
+                    f"confluence returned an unexpected collection shape for {_path_of(url)}"
+                )
+            yield from results
 
             following = _next_link(payload)
             if not following:

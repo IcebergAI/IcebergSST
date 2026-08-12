@@ -110,6 +110,10 @@ class Lease:
         return uuid.UUID(str(self.payload["scan_id"]))
 
     @property
+    def source_id(self) -> uuid.UUID:
+        return uuid.UUID(str(self.payload["source_id"]))
+
+    @property
     def kind(self) -> str:
         return str(self.payload["kind"])
 

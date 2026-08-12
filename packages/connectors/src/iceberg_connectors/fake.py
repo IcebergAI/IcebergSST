@@ -15,6 +15,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from iceberg_core.enums import CoverageObjectKind, CoverageReason
 from iceberg_core.fingerprint import CoarseLocator
 
 from iceberg_connectors.protocol import CredentialError, FetchOutcome, TaskSpec
@@ -78,15 +79,23 @@ class FakeConnector:
 
         for page in self.spaces.get(space, []):
             if page.skip:
-                outcome.skipped += 1
+                outcome.skipped_for(
+                    CoverageReason.UNSUPPORTED_TYPE,
+                    CoverageObjectKind.RECORD,
+                    page.resource_id,
+                )
                 continue
             if page.unreadable:
                 # Keep yielding readable neighbors, then let the runner turn this
                 # incomplete count into a failed task and partial scan.
-                outcome.failed += 1
+                outcome.failed_for(
+                    CoverageReason.CONNECTOR_ERROR,
+                    CoverageObjectKind.RECORD,
+                    page.resource_id,
+                )
                 continue
 
-            outcome.units += 1
+            outcome.scanned_for(CoverageObjectKind.RECORD, page.resource_id)
             yield ContentUnit(
                 locator=CoarseLocator(
                     connector_type=self.connector_type,

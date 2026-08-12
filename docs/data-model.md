@@ -56,11 +56,18 @@ One scan run of a Source. Two-phase: a discovery task fans out into fetch tasks 
 - `id`, `source_id` (FK), `trigger`: enum `manual | scheduled`
 - `status`: enum `queued | discovering | running | completed | partial | failed | cancelled`
 - `rulepack_version`, `counts`: JSON (units scanned, findings new/resolved/…)
+- `source_configuration_version`: the source's `updated_at` captured at launch. Source mutations
+  are serialized against launch and refused while the scan remains active.
+- `coverage_manifest`: frozen, allowlisted terminal assurance JSON. It contains typed counts,
+  stable reason codes, task-state totals and bounded opaque gap references — never source/task
+  content or arbitrary engine counts.
 - `started_at`, `finished_at`, `error`
 - Constraint: **one active scan per source** (partial unique index on `source_id` where status
   is active) — prevents reconciliation races.
 - Completion is detected by **atomic task counting** in the DB; the transition completing the
-  last task triggers reconciliation exactly once. Reconciliation runs **only** on `completed`.
+  last task freezes the manifest exactly once. Reconciliation runs **only** when status is
+  `completed` **and** the frozen coverage state is `complete`; skipped or unreported evidence
+  leaves findings untouched.
 
 ### ScanTask
 A unit of work leased by one engine (ADR 0009: broker message is an id-only hint; the lease is
@@ -71,6 +78,9 @@ authoritative).
 - `started_at`, `finished_at`, `error`
 - `result_key` — the idempotency key (`<task id>:<attempt>`) of the accepted submission. A retry
   presenting the same key replays as a no-op; a different key against a finished task is a conflict.
+- `coverage`: the accepted versioned task coverage JSON, written in the same transaction as
+  `result_key`. API-origin failures and cancellations write a fixed content-free report; missing
+  historic reports remain `{}` and are represented as `unreported` by the manifest builder.
 
 ## Findings & triage
 

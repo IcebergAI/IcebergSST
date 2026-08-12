@@ -90,6 +90,33 @@
 
   <div class="stack-gap">
     <section class="card card-pad">
+      <div class="head-row">
+        <div>
+          <div class="eyebrow">Latest assurance</div>
+          <h2 class="section-title">Source coverage</h2>
+        </div>
+        {% if latest_coverage %}<a class="btn-link" href="/scans/{{ latest_coverage.scan_id }}">Open scan</a>{% endif %}
+      </div>
+      {% if latest_coverage %}
+      <div class="notice {% if latest_coverage.coverage_state.value == 'complete' %}notice--ok{% elif latest_coverage.coverage_state.value == 'partial' %}notice--warn{% elif latest_coverage.coverage_state.value == 'failed' %}notice--crit{% endif %}" role="status">
+        <div>
+          <strong>{{ latest_coverage.coverage_state.value | title }} coverage.</strong>
+          {{ latest_coverage.counts.scanned }} scanned,
+          {{ latest_coverage.counts.skipped }} skipped,
+          {{ latest_coverage.counts.failed }} failed,
+          {{ latest_coverage.scope.gaps }} unknown scope gap(s).
+        </div>
+      </div>
+      <dl class="kv">
+        <dt>Finished</dt><dd class="mono">{{ latest_coverage.finalized_at | dt }}</dd>
+        <dt>Configuration</dt><dd class="mono">{{ latest_coverage.source_configuration_version | dt }}</dd>
+      </dl>
+      {% else %}
+      <div class="empty">No terminal scan has emitted coverage for this source yet.</div>
+      {% endif %}
+    </section>
+
+    <section class="card card-pad">
       <div class="eyebrow" style="margin-bottom:10px">Details</div>
       <dl class="kv">
         <dt>Id</dt><dd class="mono" style="font-size:12px">{{ source.id }}</dd>

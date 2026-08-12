@@ -13,6 +13,8 @@ Nothing here touches a database or reads the environment, which is what keeps it
 importable from an engine process.
 """
 
+from iceberg_core.enums import CoverageReason
+
 from iceberg_connectors.confluence import (
     CONFLUENCE_CONNECTOR_TYPE,
     ConfluenceConnector,
@@ -30,6 +32,8 @@ from iceberg_connectors.protocol import (
     ConnectorError,
     CredentialError,
     FetchOutcome,
+    RateLimitError,
+    TaskCoverage,
     TaskSpec,
 )
 from iceberg_connectors.registry import UnknownConnectorError
@@ -47,6 +51,7 @@ __all__ = [
     "ConnectorError",
     "ContentOrigin",
     "ContentUnit",
+    "CoverageReason",
     "CredentialError",
     "Extracted",
     "ExtractionLimits",
@@ -55,6 +60,8 @@ __all__ = [
     "FakeConnector",
     "FakePage",
     "FetchOutcome",
+    "RateLimitError",
+    "TaskCoverage",
     "TaskSpec",
     "UnknownConnectorError",
     "__version__",

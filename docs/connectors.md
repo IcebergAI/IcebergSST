@@ -32,7 +32,8 @@ will not help. Other `ConnectorError`s abort the task immediately. A per-unit fa
 engine then fails the fetch task and the API marks the scan partial; reconciliation and completion
 notifications run only after a complete scan. This makes “could not read” distinct from “secret is
 gone.” Policy exclusions such as images, unsupported formats, and genuinely empty text remain
-ordinary skips.
+ordinary skips, but they still make the coverage manifest partial and therefore cannot authorize
+reconciliation.
 
 ### ContentUnit
 Normalized input to detection:
@@ -197,6 +198,25 @@ hand it anything and get an answer back:
 
 `is_hostile` separates the ones worth an operator's attention from an ordinary PNG;
 `is_incomplete` separates outcomes that must make the scan partial from policy skips.
+
+## Coverage assurance
+
+Each fetch classifies every enumerated page, comment, attachment, record, or path exactly once as
+scanned, skipped, or failed. A collection failure whose remaining cardinality is unknowable is a
+separate scope gap; connectors must not invent an object count for it. Discovery similarly reports
+configured/discovered scopes without claiming that an unrestricted source exposed objects the
+credential could not enumerate.
+
+The engine maps connector/parser detail onto the stable public reasons in
+`iceberg_core.enums.CoverageReason` (permission denied, rate limited, size/output limits,
+unsupported/binary/empty content, invalid responses/metadata, parser timeout/failure, connector
+error, cancellation, and unreported legacy evidence). Parser enum values and exception messages do
+not cross this boundary.
+
+Skipped and failed objects receive a deterministic HMAC reference under the task's fingerprint
+pepper. This makes the same gap correlatable between manifests without exporting its page id,
+filename, path, scope value, or other source metadata. References are bounded at 10,000 per task;
+exact aggregate counts continue and `gaps_omitted` makes truncation explicit.
 
 Formats: text/code/config by extension (an allowlist, so a new binary format nobody denylisted is
 not decoded as garbage), ZIP-backed office documents through their XML parts, and PDF through its

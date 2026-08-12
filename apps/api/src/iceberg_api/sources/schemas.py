@@ -120,7 +120,7 @@ class ConfluenceConnection(BaseModel):
     @classmethod
     def _clean_spaces(cls, value: list[str]) -> list[str]:
         cleaned = [space.strip() for space in value if space.strip()]
-        if len(set(cleaned)) != len(cleaned):
+        if len({space.casefold() for space in cleaned}) != len(cleaned):
             raise ValueError("spaces must not repeat")
         return cleaned
 
