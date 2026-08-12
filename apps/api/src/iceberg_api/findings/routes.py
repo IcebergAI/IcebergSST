@@ -17,14 +17,16 @@ from typing import Annotated
 
 import structlog
 from fastapi import APIRouter, HTTPException, Query, status
-from iceberg_core.enums import FindingState, Severity
+from iceberg_core.enums import FindingState, Severity, UserRole
 from iceberg_core.models import Finding, FindingEvent, User
+from sqlalchemy import func
 from sqlmodel import col, select
 
 from iceberg_api.auth.dependencies import CsrfProtected, SessionDep
-from iceberg_api.auth.rbac import AnalystUser, ViewerUser
+from iceberg_api.auth.rbac import ROLE_RANK, AnalystUser, ViewerUser
 from iceberg_api.findings import triage
 from iceberg_api.findings.schemas import (
+    CorrelationInfo,
     FindingDetail,
     FindingEventRead,
     FindingRead,
@@ -95,6 +97,28 @@ async def list_findings(
     return build_page(rows, limit=limit, read=FindingRead.model_validate)
 
 
+def _correlation_info(db: SessionDep, finding: Finding, user: User) -> CorrelationInfo | None:
+    """The finding's cluster counts — for analysts, on findings that have an id.
+
+    Role-shaped rather than a separate route: viewers get ``null`` in the same
+    field, because the comparison oracle is scoped to the roles that remediate
+    (ADR 0010; the module docstring in `schemas.py` carries the argument).
+    """
+    if ROLE_RANK[user.role] < ROLE_RANK[UserRole.ANALYST] or finding.correlation_id is None:
+        return None
+    findings, sources = db.exec(
+        select(
+            func.count(col(Finding.id)),
+            func.count(col(Finding.source_id).distinct()),
+        ).where(col(Finding.correlation_id) == finding.correlation_id)
+    ).one()
+    return CorrelationInfo(
+        correlation_id=finding.correlation_id,
+        finding_count=int(findings),
+        source_count=int(sources),
+    )
+
+
 @router.get("/{finding_id}")
 async def read_finding(finding_id: uuid.UUID, user: ViewerUser, db: SessionDep) -> FindingDetail:
     """One finding and its full history — who changed it, when, and why."""
@@ -102,6 +126,7 @@ async def read_finding(finding_id: uuid.UUID, user: ViewerUser, db: SessionDep) 
     return FindingDetail(
         **FindingRead.model_validate(finding).model_dump(),
         events=[FindingEventRead.model_validate(event) for event in _history(db, finding_id)],
+        correlation=_correlation_info(db, finding, user),
     )
 
 
@@ -138,4 +163,5 @@ async def update_finding(
     return FindingDetail(
         **FindingRead.model_validate(finding).model_dump(),
         events=[FindingEventRead.model_validate(event) for event in _history(db, finding_id)],
+        correlation=_correlation_info(db, finding, analyst),
     )

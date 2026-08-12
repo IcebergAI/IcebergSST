@@ -42,9 +42,10 @@ AUDIT_CHANNEL_SECRET_SET = "channel.secret_set"  # noqa: S105  # an audit action
 #: Retention purges (#73). Deleting evidence is itself an administrative action,
 #: so it is recorded — with counts, and with the window that justified it.
 AUDIT_RETENTION_PURGED = "retention.purged"
-#: Correlation-id maintenance (ADR 0010, #140): a full recompute after a key
-#: rotation. The cluster-export action lives beside it once the routes exist.
+#: Exposure clusters (ADR 0010, #140): the full recompute after a key rotation,
+#: and each analyst download of a cluster's membership.
 AUDIT_CORRELATION_REINDEXED = "correlation.reindexed"
+AUDIT_CORRELATION_CLUSTER_EXPORTED = "correlation.cluster_exported"
 
 #: Values for ``target_type``.
 AUDIT_TARGET_USER = "user"

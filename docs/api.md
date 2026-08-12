@@ -81,8 +81,28 @@ the manifest. Cancel or finish the active scan before editing its source.
 - `PATCH /findings/{id}` (analyst+) — `state`, `assignee_id`, `notes`, plus an optional `comment`
   recorded on the events the change writes. Returns the detail shape, history included.
 
-Responses never carry `secret_hash`. It is not reversible, but re-emitting anything derived from
-the secret would give every viewer a comparison oracle and buy a client nothing.
+Responses never carry `secret_hash` — not reversible, but a comparison oracle nobody should be
+handed casually. The one deliberate, scoped exception to "never anything derived from the secret"
+is the **correlation id** (ADR 0010): an API-minted equality label under a key that never leaves
+the API, shown to analyst+ as `correlation` on the finding detail and served by the cluster
+routes below. Viewers get `correlation: null` — role-shaped, not merely absent.
+
+## Correlation (analyst+, ADR 0010)
+- `GET /correlation/clusters` (paginated; `?min_findings=`, `?source_id=`) — every exposure
+  cluster: the same secret value grouped across all its locations, with finding/source/open
+  counts, worst severity, first-seen and last-activity. `min_findings` defaults to 1 — the
+  endpoint hides nothing; the console's spread view sends `?min_findings=2` explicitly.
+- `GET /correlation/clusters/{correlation_id}` — the topology: members grouped by source, each
+  member in the findings-API shape so per-location remediation state rides along.
+- `GET /correlation/clusters/{correlation_id}/export` — byte-stable JSON download (versioned
+  manifest, `Content-Disposition: attachment`, `Cache-Control: no-store`). Locations and states
+  only — no snippets, no notes. Every download writes a `correlation.cluster_exported` audit
+  event.
+
+All three are analyst+ and 403 for viewers: clustering is the "same secret elsewhere" capability,
+scoped to the roles that remediate. A `source_id` filter narrows *which clusters appear* (those
+with a member in that source) without narrowing the aggregates — a spread view that hid the
+spread would defeat itself.
 
 **The state machine.** `open` → `false_positive` / `accepted_risk` / `resolved`, and any of those
 back to `open`. There is no direct move between judgements: relabelling one in place would leave an

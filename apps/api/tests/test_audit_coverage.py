@@ -61,6 +61,7 @@ REQUIRED_ACTIONS = {
     "channel.secret_set",
     "retention.purged",
     "correlation.reindexed",
+    "correlation.cluster_exported",
 }
 
 

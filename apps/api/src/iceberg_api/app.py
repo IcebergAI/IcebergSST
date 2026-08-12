@@ -26,6 +26,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from iceberg_api import ratelimit
 from iceberg_api.auth.routes import router as auth_router
+from iceberg_api.correlation.routes import router as correlation_router
 from iceberg_api.engines.routes import router as engines_router
 from iceberg_api.findings.routes import router as findings_router
 from iceberg_api.findings.suppression_routes import router as suppressions_router
@@ -110,6 +111,7 @@ def create_app(settings: ApiSettings | None = None, *, background: bool = True) 
         return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     app.include_router(auth_router, prefix=API_PREFIX)
+    app.include_router(correlation_router, prefix=API_PREFIX)
     app.include_router(engines_router, prefix=API_PREFIX)
     app.include_router(findings_router, prefix=API_PREFIX)
     app.include_router(notifications_router, prefix=API_PREFIX)

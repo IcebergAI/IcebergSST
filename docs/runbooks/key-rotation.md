@@ -224,3 +224,34 @@ without the window the same secret would have produced a duplicate.
   everyone out immediately, which is the intended blast radius, and needs no window.
 - **Neither rotates engine tokens.** Re-run `python -m iceberg_api mint-engine-token --name <name>`,
   which keeps the engine's id and replaces only the token.
+
+---
+
+## Correlation key rotation (ADR 0010)
+
+The third key, with the cheapest rotation of all: `ICEBERG_CORRELATION_KEY_REF` derives exposure-
+cluster ids from *stored* secret hashes, so a swap is a server-side recompute. No rescan, no
+window, no engine involvement.
+
+```bash
+# 1. Generate a new sealed ref (needs the master key in the environment):
+python -m iceberg_core.secrets generate-correlation-key
+
+# 2. Swap ICEBERG_CORRELATION_KEY_REF to the new ref and restart the api.
+
+# 3. Re-derive every stored id under the new key:
+python -m iceberg_api reindex-correlation
+```
+
+The command is idempotent and restartable; run it again and `updated=0` confirms the rotation is
+complete. Each run writes a `correlation.reindexed` audit event with its counts. Until the reindex
+finishes, cluster views group under a mix of old and new ids — nothing is lost, just temporarily
+split.
+
+**During a pepper rotation** the same splitting happens for a different reason: the correlation id
+is derived from `secret_hash`, which the pepper window rewrites row by row. Ingest recomputes the
+id in the same statement that re-keys the hash, so clusters re-merge as the window completes — the
+`rekeyed` counter falling to zero is the same signal it always was. No extra step is needed.
+
+- **Correlation-key rotation does not touch finding identities, credentials, or the pepper.**
+  It invalidates only the cluster grouping, which it immediately rebuilds.

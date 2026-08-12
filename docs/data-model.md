@@ -94,6 +94,10 @@ authoritative).
   display metadata (ADR 0006).
 - `redacted_snippet` (masked context; **no plaintext**)
 - `secret_hash` (salted/peppered), `entropy`, `confidence`, `severity`
+- `correlation_id` (nullable, indexed — ADR 0010): API-minted equality label derived from
+  `secret_hash` under a dedicated key; `GROUP BY` on it *is* the exposure-cluster view. Null when
+  the key is unconfigured or the row predates it; the maintenance loop backfills and
+  `reindex-correlation` rotates.
 - `state`: enum `open | false_positive | accepted_risk | resolved`
 - `resolution`: enum `null | manual | auto` (auto = disappeared on re-scan)
 - `assignee_id` (FK User, nullable), `notes`
