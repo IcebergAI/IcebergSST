@@ -6,9 +6,10 @@ nothing else changes. Below the bar, without the setting, for judgements, and
 for reconciliation's auto-resolve, triage behaves exactly as it always has.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from iceberg_core.config import ApiSettings
 from iceberg_core.enums import FindingState, Severity, UserRole
@@ -22,17 +23,13 @@ EVIDENCED = {
 }
 
 
-@pytest.fixture(name="policy_settings")
-def policy_settings_fixture(api_settings: ApiSettings) -> ApiSettings:
-    """The app fixture reads `api_settings` through a closure, and the model is
-    frozen — so the policy is switched on by rebuilding the settings object the
-    override returns."""
-    return api_settings
-
-
 @pytest.fixture(name="with_policy")
-def with_policy_fixture(app, api_settings: ApiSettings):  # type: ignore[no-untyped-def]
-    """Turn the evidence policy on (min severity: high) for one test."""
+def with_policy_fixture(app: FastAPI, api_settings: ApiSettings) -> Iterator[ApiSettings]:
+    """Turn the evidence policy on (min severity: high) for one test.
+
+    The settings model is frozen, so the policy is switched on by overriding
+    the dependency with a rebuilt copy rather than mutating in place.
+    """
     from iceberg_api.auth.dependencies import get_settings
 
     strict = api_settings.model_copy(update={"remediation_evidence_min_severity": Severity.HIGH})

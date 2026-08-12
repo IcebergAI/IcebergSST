@@ -87,13 +87,15 @@ def record(
     db.add(action)
     db.flush()  # the event and audit rows below name its id
 
+    # No free text on the event: the trail is viewer-visible, and the note is
+    # role-shaped on the action row — the event says what happened, the row
+    # (in the caller's shape) says the rest.
     db.add(
         FindingEvent(
             finding_id=finding.id,
             actor_id=actor_id,
             kind=FindingEventKind.REMEDIATION,
             to_value=payload.kind.value,
-            comment=payload.note,
         )
     )
     audit.record(
@@ -144,16 +146,17 @@ def verify(
             kind=FindingEventKind.REMEDIATION_VERIFIED,
             from_value=RemediationVerification.UNVERIFIED.value,
             to_value=RemediationVerification.VERIFIED.value,
-            comment=comment,
         )
     )
+    # The comment goes to the audit row, not the viewer-visible trail: it is
+    # analyst free text about internal systems, same rule as the note.
     audit.record(
         db,
         actor_id=actor_id,
         action=AUDIT_REMEDIATION_VERIFIED,
         target_type=AUDIT_TARGET_REMEDIATION,
         target_id=action.id,
-        detail={"finding_id": str(action.finding_id)},
+        detail={"finding_id": str(action.finding_id), **({"comment": comment} if comment else {})},
     )
     return action
 
@@ -182,7 +185,6 @@ def retract(
             actor_id=actor_id,
             kind=FindingEventKind.REMEDIATION_RETRACTED,
             from_value=action.kind.value,
-            comment=reason,
         )
     )
     audit.record(
