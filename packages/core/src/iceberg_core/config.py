@@ -215,6 +215,12 @@ class ApiSettings(SecretStoreSettings):
     #: minutes on a database that has never been purged before.
     retention_batch_size: int = Field(default=1000, ge=1, le=100_000)
 
+    # ─── Exposure clusters (ADR 0010, #140) ───────────────────────────────────
+    #: NULL correlation ids repaired per maintenance round. NULLs appear when
+    #: rows predate the key or ingest ran while it was unreadable; one bounded
+    #: batch per beat keeps a large backlog from stalling the round.
+    correlation_backfill_batch_size: int = Field(default=500, ge=1, le=100_000)
+
     @field_validator("database_url", "redis_url")
     @classmethod
     def _require_url_scheme(cls, value: str) -> str:

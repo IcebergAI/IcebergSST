@@ -60,6 +60,12 @@ class Finding(TimestampedModel, table=True):
     #: Peppered HMAC of the secret. Not reversible, not brute-forceable offline.
     secret_hash: str = Field(max_length=64)
 
+    #: API-minted equality label: same value ⇒ same id, and nothing else
+    #: (ADR 0010). Derived from ``secret_hash`` under the correlation key at
+    #: ingest — never by an engine. Null when the key is unconfigured or the row
+    #: predates it; the maintenance loop backfills, `reindex-correlation` rotates.
+    correlation_id: str | None = Field(default=None, max_length=64, index=True)
+
     entropy: float | None = Field(default=None)
     confidence: float | None = Field(default=None)
     severity: Severity = Field(sa_type=enum_type(Severity, name="severity"))

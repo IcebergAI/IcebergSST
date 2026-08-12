@@ -333,6 +333,7 @@ async def submit_results(
     db: SessionDep,
     dispatcher: DispatcherDep,
     settings: SettingsDep,
+    store: SecretStoreDep,
 ) -> ResultsAccepted:
     """The only ingress for results (#36).
 
@@ -420,12 +421,22 @@ async def submit_results(
         # work — so discarding them means they surface only if an operator re-runs
         # the whole scan. The scan's own status still records that it was partial,
         # and reconciliation still refuses to auto-resolve on it (ADR 0009 §4).
+        # Fail-open, unlike the pepper: a missing correlation key stores NULL ids
+        # that the maintenance backfill repairs from the stored hash, so losing
+        # the key transiently must not fail the task or drop findings (ADR 0010).
+        correlation_key: bytes | None = None
+        try:
+            correlation_key = store.get_correlation_key()
+        except SecretStoreError:
+            logger.warning("correlation_key_unavailable", scan_id=str(scan.id))
+
         outcome = ingest.ingest_findings(
             db,
             scan,
             body.findings,
             now=now,
             threshold=settings.confidence_threshold,
+            correlation_key=correlation_key,
         )
 
     ingest.merge_scan_counts(scan, outcome, body.counts)

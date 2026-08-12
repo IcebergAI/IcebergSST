@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import structlog
+from iceberg_core.correlation import correlation_id
 from iceberg_core.enums import FindingEventKind, FindingState
 from iceberg_core.metrics import FINDINGS_INGESTED
 from iceberg_core.models import Finding, FindingEvent, Scan
@@ -58,8 +59,14 @@ def ingest_findings(
     *,
     now: datetime | None = None,
     threshold: float = 0.0,
+    correlation_key: bytes | None = None,
 ) -> IngestOutcome:
-    """Store a task's findings. Does not commit; the route owns the transaction."""
+    """Store a task's findings. Does not commit; the route owns the transaction.
+
+    ``correlation_key`` derives each finding's ``correlation_id`` (ADR 0010).
+    None stores NULL and carries on — unlike a missing pepper this is repairable
+    later, because the input is the stored hash.
+    """
     at = now or datetime.now(UTC)
     rules = suppressions.applicable_suppressions(db, scan.source_id, now=at)
     outcome = IngestOutcome()
@@ -112,12 +119,30 @@ def ingest_findings(
             if existing is not None:
                 existing.fingerprint = payload.fingerprint
                 existing.secret_hash = payload.secret_hash
+                # The correlation id is a function of the hash, so it must move
+                # with it — a row left keyed under the old pepper's hash would
+                # sit in a cluster of one until the next reindex.
+                existing.correlation_id = (
+                    correlation_id(payload.secret_hash, key=correlation_key)
+                    if correlation_key is not None
+                    else None
+                )
                 rekeyed = True
                 outcome.rekeyed += 1
 
         if existing is None:
-            _create(db, scan, payload, suppression=suppression, at=at)
-        elif _refresh(db, existing, scan, payload, suppression=suppression, at=at):
+            _create(
+                db, scan, payload, suppression=suppression, at=at, correlation_key=correlation_key
+            )
+        elif _refresh(
+            db,
+            existing,
+            scan,
+            payload,
+            suppression=suppression,
+            at=at,
+            correlation_key=correlation_key,
+        ):
             outcome.reopened += 1
         if rekeyed:
             logger.info(
@@ -165,6 +190,7 @@ def _create(
     *,
     suppression: suppressions.SuppressionRule | None,
     at: datetime,
+    correlation_key: bytes | None,
 ) -> Finding:
     finding = Finding(
         source_id=scan.source_id,
@@ -174,6 +200,11 @@ def _create(
         resource_locator=payload.resource_locator,
         redacted_snippet=payload.redacted_snippet,
         secret_hash=payload.secret_hash,
+        correlation_id=(
+            correlation_id(payload.secret_hash, key=correlation_key)
+            if correlation_key is not None
+            else None
+        ),
         entropy=payload.entropy,
         confidence=payload.confidence,
         severity=payload.severity,
@@ -196,9 +227,15 @@ def _refresh(
     *,
     suppression: suppressions.SuppressionRule | None,
     at: datetime,
+    correlation_key: bytes | None,
 ) -> bool:
     """Update a known finding for this sighting. Returns True if it re-opened."""
     finding.last_seen_scan_id = scan.id
+
+    # A row from before the correlation key existed gets its id on next sighting;
+    # a non-null id is left alone (identity fields are never refreshed).
+    if finding.correlation_id is None and correlation_key is not None:
+        finding.correlation_id = correlation_id(finding.secret_hash, key=correlation_key)
 
     # Display metadata is refreshed — line numbers move, snippets change around the
     # secret — while identity (fingerprint, secret_hash) is by definition unchanged.

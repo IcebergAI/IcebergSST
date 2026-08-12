@@ -42,6 +42,9 @@ AUDIT_CHANNEL_SECRET_SET = "channel.secret_set"  # noqa: S105  # an audit action
 #: Retention purges (#73). Deleting evidence is itself an administrative action,
 #: so it is recorded — with counts, and with the window that justified it.
 AUDIT_RETENTION_PURGED = "retention.purged"
+#: Correlation-id maintenance (ADR 0010, #140): a full recompute after a key
+#: rotation. The cluster-export action lives beside it once the routes exist.
+AUDIT_CORRELATION_REINDEXED = "correlation.reindexed"
 
 #: Values for ``target_type``.
 AUDIT_TARGET_USER = "user"
@@ -52,6 +55,9 @@ AUDIT_TARGET_ENGINE = "engine"
 AUDIT_TARGET_CHANNEL = "channel"
 #: A purge is about the deployment, not about one row, so it has no target id.
 AUDIT_TARGET_RETENTION = "retention"
+#: A reindex is deployment-wide (no target id); an export's target id is not a
+#: row id either — the correlation id itself goes in the detail.
+AUDIT_TARGET_CORRELATION = "correlation"
 
 
 class AuditEvent(IcebergModel, table=True):

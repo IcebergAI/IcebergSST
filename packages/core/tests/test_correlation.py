@@ -64,12 +64,16 @@ def test_a_short_key_is_refused() -> None:
     "bad_hash",
     [
         "",
-        "not-hex",
-        HASH_A[:-1],  # 63 chars
-        HASH_A + "0",  # 65 chars
-        HASH_A.upper(),  # stored hashes are lowercase hex; refuse lookalikes
+        "short-hash",  # below the wire minimum of 16
+        HASH_A + "0",  # above the wire maximum of 64
     ],
 )
-def test_malformed_secret_hashes_are_refused(bad_hash: str) -> None:
-    with pytest.raises(ValueError, match="64 lowercase hex"):
+def test_hashes_outside_the_wire_contract_are_refused(bad_hash: str) -> None:
+    with pytest.raises(ValueError, match="wire contract"):
         correlation_id(bad_hash, key=KEY)
+
+
+def test_the_derivation_is_case_sensitive() -> None:
+    """The relation named is "same stored hash", byte for byte: a lookalike in
+    another case is a different stored value and must not correlate."""
+    assert correlation_id(HASH_A, key=KEY) != correlation_id(HASH_A.upper(), key=KEY)

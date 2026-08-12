@@ -29,7 +29,6 @@ one organization only" means in a single-org system (ADR 0010).
 
 import hashlib
 import hmac
-import re
 
 #: Bumping this invalidates every stored correlation id. See ADR 0010.
 CORRELATION_VERSION = 1
@@ -39,23 +38,31 @@ _CORRELATION_DOMAIN = f"iceberg.correlation.v{CORRELATION_VERSION}".encode()
 #: Below this the key is not doing its job; refuse rather than pretend.
 MIN_CORRELATION_KEY_BYTES = 32
 
-_SECRET_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+#: The wire contract for ``secret_hash`` (`FindingPayload`), mirrored here so a
+#: value that could never have been stored is refused rather than derived.
+MIN_SECRET_HASH_LENGTH = 16
+MAX_SECRET_HASH_LENGTH = 64
 
 
 def correlation_id(secret_hash: str, *, key: bytes) -> str:
     """Return the correlation id for a stored secret hash (hex).
 
-    The input is the peppered hash exactly as stored on the finding, so the same
-    secret yields the same id wherever it appears — and a different pepper (or a
-    row not yet re-keyed during a pepper rotation) yields a different id, which
-    is why the ingest re-key path recomputes this alongside ``secret_hash``.
+    The input is the peppered hash **exactly as stored** on the finding — the
+    derivation is case- and byte-sensitive, because "same stored hash" is the
+    relation being named. The same secret yields the same id wherever it
+    appears; a different pepper (or a row not yet re-keyed during a pepper
+    rotation) yields a different id, which is why the ingest re-key path
+    recomputes this alongside ``secret_hash``.
     """
     if len(key) < MIN_CORRELATION_KEY_BYTES:
         raise ValueError(
             f"correlation key must be at least {MIN_CORRELATION_KEY_BYTES} bytes, "
             f"got {len(key)}; retrieve it with SecretStore.get_correlation_key()"
         )
-    if not _SECRET_HASH_RE.fullmatch(secret_hash):
-        raise ValueError("secret_hash must be 64 lowercase hex characters")
+    if not MIN_SECRET_HASH_LENGTH <= len(secret_hash) <= MAX_SECRET_HASH_LENGTH:
+        raise ValueError(
+            f"secret_hash must be {MIN_SECRET_HASH_LENGTH}-{MAX_SECRET_HASH_LENGTH} "
+            "characters, as the results wire contract requires"
+        )
     message = _CORRELATION_DOMAIN + b"\x00" + secret_hash.encode()
     return hmac.new(key, message, hashlib.sha256).hexdigest()

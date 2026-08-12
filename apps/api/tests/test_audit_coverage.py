@@ -60,6 +60,7 @@ REQUIRED_ACTIONS = {
     "channel.deleted",
     "channel.secret_set",
     "retention.purged",
+    "correlation.reindexed",
 }
 
 
