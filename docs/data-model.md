@@ -94,7 +94,7 @@ authoritative).
   display metadata (ADR 0006).
 - `redacted_snippet` (masked context; **no plaintext**)
 - `secret_hash` (salted/peppered), `entropy`, `confidence`, `severity`
-- `correlation_id` (nullable, indexed — ADR 0010): API-minted equality label derived from
+- `correlation_id` (nullable, indexed — ADR 0011): API-minted equality label derived from
   `secret_hash` under a dedicated key; `GROUP BY` on it *is* the exposure-cluster view. Null when
   the key is unconfigured or the row predates it; the maintenance loop backfills and
   `reindex-correlation` rotates.
@@ -107,7 +107,7 @@ authoritative).
 - `first_seen_scan_id`, `last_seen_scan_id`, `created_at`, `updated_at`
 
 ### RemediationAction
-What was done about an exposure, with evidence (#142, ADR 0011). Content is **write-once**;
+What was done about an exposure, with evidence (#142, ADR 0012). Content is **write-once**;
 verification is one-way and retraction set-once — corrections are new rows, and every change
 writes `FindingEvent` + `AuditEvent` rows, which is where the immutable history lives.
 - `id`, `finding_id` (FK, CASCADE — the action is part of the finding's record), `actor_id`

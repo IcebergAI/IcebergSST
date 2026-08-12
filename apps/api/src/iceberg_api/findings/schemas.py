@@ -8,7 +8,7 @@ Two rules shape these:
   the trust anchor pepper re-keying compares against, and anyone holding the
   pepper could use it to test candidate secrets. "Is this the same secret as
   that one" *is* answered, deliberately and only for analysts, by the
-  correlation id (ADR 0010): an equality label minted under a key that never
+  correlation id (ADR 0011): an equality label minted under a key that never
   leaves the API, useless for anything but the comparison it names.
 * **Filters are explicit, never implicit.** An analyst's default view is
   ``?state=open&suppressed=false``; the API does not silently hide rows, because a
@@ -26,6 +26,8 @@ from iceberg_core.enums import (
     FindingState,
     Severity,
     SuppressionScope,
+    ValidationReason,
+    ValidationStatus,
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -52,6 +54,12 @@ class FindingRead(BaseModel):
     entropy: float | None
     confidence: float | None
     severity: Severity
+    validation_provider: str | None
+    validation_validator_id: str | None
+    validation_contract_version: str | None
+    validation_status: ValidationStatus | None
+    validation_reason: ValidationReason | None
+    validated_at: UtcDatetime | None
 
     state: FindingState
     resolution: FindingResolution | None
@@ -85,7 +93,7 @@ class FindingEventRead(BaseModel):
 
 
 class CorrelationInfo(BaseModel):
-    """Where else this secret was seen (ADR 0010). Analyst+, else null.
+    """Where else this secret was seen (ADR 0011). Analyst+, else null.
 
     The id is the API-minted equality label, never ``secret_hash``; the counts
     are the whole cluster's, so "1 finding, 1 source" reads as "only here".

@@ -13,7 +13,7 @@ The mutability contract, stated once and relied on everywhere:
   (the administrative record). The rows here are the *state*; the immutable
   audit evidence #142 requires lives in those append-only tables.
 
-Evidence is **links plus structure, never file bytes** (ADR 0011): the platform
+Evidence is **links plus structure, never file bytes** (ADR 0012): the platform
 stores where proof lives (a ticket, a provider console), not the proof itself —
 the same reasoning that keeps plaintext secrets out (ADR 0004) keeps arbitrary
 uploaded documents out. Link URLs may later be scrubbed to labels-only by the

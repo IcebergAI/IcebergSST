@@ -1,4 +1,4 @@
-"""Correlation-id upkeep (ADR 0010, #140).
+"""Correlation-id upkeep (ADR 0011, #140).
 
 Two jobs, one derivation:
 

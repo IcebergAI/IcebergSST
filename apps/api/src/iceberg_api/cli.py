@@ -69,7 +69,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     reindex_parser = commands.add_parser(
         "reindex-correlation",
-        help="re-derive every finding's correlation id under the configured key (ADR 0010)",
+        help="re-derive every finding's correlation id under the configured key (ADR 0011)",
     )
     reindex_parser.add_argument(
         "--batch",
@@ -142,7 +142,7 @@ def mint_engine_token(name: str, version: str | None) -> tuple[uuid.UUID, str]:
 def reindex_correlation(key: bytes, *, batch: int = 1000) -> reindex.ReindexOutcome:
     """Re-derive every finding's correlation id under ``key`` and audit it.
 
-    The rotation's whole migration path (ADR 0010): no rescan, no engine, one
+    The rotation's whole migration path (ADR 0011): no rescan, no engine, one
     idempotent walk of the table. Audited like the other CLI door — recomputing
     every cluster in the deployment is an administrative act worth a trail row.
     """

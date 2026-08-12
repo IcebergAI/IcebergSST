@@ -104,7 +104,7 @@ def _correlation_info(db: SessionDep, finding: Finding, user: User) -> Correlati
 
     Role-shaped rather than a separate route: viewers get ``null`` in the same
     field, because the comparison oracle is scoped to the roles that remediate
-    (ADR 0010; the module docstring in `schemas.py` carries the argument).
+    (ADR 0011; the module docstring in `schemas.py` carries the argument).
     """
     if ROLE_RANK[user.role] < ROLE_RANK[UserRole.ANALYST] or finding.correlation_id is None:
         return None

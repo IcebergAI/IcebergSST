@@ -83,11 +83,11 @@ the manifest. Cancel or finish the active scan before editing its source.
 
 Responses never carry `secret_hash` — not reversible, but a comparison oracle nobody should be
 handed casually. The one deliberate, scoped exception to "never anything derived from the secret"
-is the **correlation id** (ADR 0010): an API-minted equality label under a key that never leaves
+is the **correlation id** (ADR 0011): an API-minted equality label under a key that never leaves
 the API, shown to analyst+ as `correlation` on the finding detail and served by the cluster
 routes below. Viewers get `correlation: null` — role-shaped, not merely absent.
 
-## Correlation (analyst+, ADR 0010)
+## Correlation (analyst+, ADR 0011)
 - `GET /correlation/clusters` (paginated; `?min_findings=`, `?source_id=`) — every exposure
   cluster: the same secret value grouped across all its locations, with finding/source/open
   counts, worst severity, first-seen and last-activity. `min_findings` defaults to 1 — the
@@ -118,7 +118,7 @@ omitting the field leaves the assignee alone. Assigning to an unknown or disable
 Resolving by hand sets `resolution: manual`; reopening clears it, so a reopened finding never keeps
 reconciliation's `auto`.
 
-## Remediation (ADR 0011)
+## Remediation (ADR 0012)
 - `GET  /remediation/guidance/{rule_id}` — versioned advice for one rule, split into revoke /
   rotate / scope-reduce / remove-source steps; falls back to the `default` entry and says so in
   `matched`. Never executed by the platform — advice for a human.

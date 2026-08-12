@@ -161,6 +161,13 @@ class Lease:
         return float(self.payload.get("confidence_threshold", 0.5))
 
     @property
+    def validation_policies(self) -> list[dict[str, object]]:
+        policies = self.payload.get("validation_policies")
+        if not isinstance(policies, list):
+            return []
+        return [dict(policy) for policy in policies if isinstance(policy, dict)]
+
+    @property
     def idempotency_key(self) -> str:
         """``<task id>:<attempt>`` — what makes a results retry a replay."""
         return f"{self.task_id}:{self.attempt}"

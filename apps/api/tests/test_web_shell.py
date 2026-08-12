@@ -158,7 +158,7 @@ def test_the_analyst_screens_refuse_a_viewer(
     login_as: Callable[[User], dict[str, str]],
     path: str,
 ) -> None:
-    """The cluster view is the "same secret elsewhere" capability (ADR 0010) —
+    """The cluster view is the "same secret elsewhere" capability (ADR 0011) —
     scoped to the roles that remediate, and enforced here, not by the rail."""
     login_as(make_user(UserRole.VIEWER))
 

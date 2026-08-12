@@ -1,4 +1,4 @@
-"""Recording, verifying, and retracting remediation actions (#142, ADR 0011).
+"""Recording, verifying, and retracting remediation actions (#142, ADR 0012).
 
 Every mutation here writes two trail rows — a ``FindingEvent`` (the finding's
 history an analyst reads) and an ``AuditEvent`` (the administrative record) —

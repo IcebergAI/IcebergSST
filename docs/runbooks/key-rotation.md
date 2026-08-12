@@ -227,7 +227,7 @@ without the window the same secret would have produced a duplicate.
 
 ---
 
-## Correlation key rotation (ADR 0010)
+## Correlation key rotation (ADR 0011)
 
 The third key, with the cheapest rotation of all: `ICEBERG_CORRELATION_KEY_REF` derives exposure-
 cluster ids from *stored* secret hashes, so a swap is a server-side recompute. No rescan, no

@@ -1,4 +1,4 @@
-"""Remediation actions over the API (#142, ADR 0011).
+"""Remediation actions over the API (#142, ADR 0012).
 
 Pinned here: recording is analyst-only and stamps the guidance version;
 verification is one-way and retraction set-once, each leaving trail rows;
@@ -309,3 +309,66 @@ def test_reappearance_reopens_with_remediation_history_intact(
     kinds = [event["kind"] for event in detail["events"]]
     assert "remediation" in kinds
     assert "reopened" in kinds
+
+
+def test_a_live_validated_credential_reopens_through_the_same_path(
+    client: TestClient,
+    api: str,
+    session: Session,
+    make_finding: Callable[..., Finding],
+    analyst: tuple[User, dict[str, str]],
+) -> None:
+    """#142 asks that "reappearing **or live**" credentials reopen. Validation
+    (ADR 0010) only ever reaches ingest attached to a sighting, so the existing
+    reopen covers both halves — this pins that the two features compose rather
+    than needing a second reopen branch."""
+    from iceberg_api.engines.ingest import ingest_findings
+    from iceberg_api.engines.schemas import CredentialValidationResult, FindingPayload
+    from iceberg_core.enums import (
+        FindingState,
+        ScanStatus,
+        ScanTrigger,
+        ValidationReason,
+        ValidationStatus,
+    )
+    from iceberg_core.models import Scan
+
+    _, headers = analyst
+    finding = make_finding(state=FindingState.RESOLVED)
+    _record(client, api, finding, headers)
+
+    scan = Scan(source_id=finding.source_id, trigger=ScanTrigger.MANUAL, status=ScanStatus.RUNNING)
+    session.add(scan)
+    session.commit()
+    ingest_findings(
+        session,
+        scan,
+        [
+            FindingPayload(
+                fingerprint=finding.fingerprint,
+                rule_id=finding.rule_id,
+                rulepack_version=finding.rulepack_version,
+                resource_locator=finding.resource_locator,
+                redacted_snippet=finding.redacted_snippet,
+                secret_hash=finding.secret_hash,
+                severity=finding.severity,
+                validation=CredentialValidationResult(
+                    provider="aws",
+                    validator_id="aws-sts-get-caller-identity",
+                    contract_version="1",
+                    status=ValidationStatus.LIVE,
+                    reason=ValidationReason.CREDENTIAL_ACCEPTED,
+                ),
+            )
+        ],
+    )
+    session.commit()
+
+    session.refresh(finding)
+    assert finding.state is FindingState.OPEN
+    assert finding.validation_status is ValidationStatus.LIVE
+
+    detail = client.get(f"{api}/findings/{finding.id}").json()
+    assert len(detail["remediations"]) == 1  # remediation history intact
+    kinds = [event["kind"] for event in detail["events"]]
+    assert {"remediation", "reopened", "validation"} <= set(kinds)

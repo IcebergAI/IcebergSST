@@ -8,7 +8,7 @@ The bootstrap tooling an operator needs before the stack will start (see
   ref for ``ICEBERG_FINGERPRINT_PEPPER_REF``. The pepper itself is never
   displayed; it is not something a human needs to see or store.
 * ``generate-correlation-key`` — a fresh exposure-cluster correlation key
-  (ADR 0010), printed only as a sealed ref for ``ICEBERG_CORRELATION_KEY_REF``.
+  (ADR 0011), printed only as a sealed ref for ``ICEBERG_CORRELATION_KEY_REF``.
 * ``seal`` — seal a connector credential read from **stdin**, printing its ref.
 
 Secrets are read from stdin, never from arguments: process arguments are visible

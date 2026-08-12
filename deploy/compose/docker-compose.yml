@@ -74,7 +74,7 @@ services:
       ICEBERG_FINGERPRINT_PEPPER_REF: ${ICEBERG_FINGERPRINT_PEPPER_REF:?generate one with `make secrets`}
       # Empty except during a pepper rotation (#64, docs/runbooks/key-rotation.md).
       ICEBERG_PREVIOUS_FINGERPRINT_PEPPER_REF: ${ICEBERG_PREVIOUS_FINGERPRINT_PEPPER_REF:-}
-      # Optional (ADR 0010): unset disables exposure clusters; api role only.
+      # Optional (ADR 0011): unset disables exposure clusters; api role only.
       ICEBERG_CORRELATION_KEY_REF: ${ICEBERG_CORRELATION_KEY_REF:-}
       # Authentication (ADR 0005) — api role only, like everything above.
       ICEBERG_SESSION_SECRET: ${ICEBERG_SESSION_SECRET:?generate one with `make secrets`}
@@ -89,6 +89,7 @@ services:
       # api-only on purpose: engines receive the threshold in their lease, the
       # same way they receive the pepper and the suppressions (#70).
       ICEBERG_CONFIDENCE_THRESHOLD: ${ICEBERG_CONFIDENCE_THRESHOLD:-0.5}
+      ICEBERG_SECRET_VALIDATION_ENABLED: ${ICEBERG_SECRET_VALIDATION_ENABLED:-false}
       # Notification dispatch (#60) — api-only for the same reason: delivery runs
       # in the maintenance loop, which needs the database (docs/notifications.md).
       ICEBERG_SMTP_HOST: ${ICEBERG_SMTP_HOST:-}
@@ -114,7 +115,7 @@ services:
       ICEBERG_RETENTION_FINDING_EVENTS_DAYS: ${ICEBERG_RETENTION_FINDING_EVENTS_DAYS:-0}
       ICEBERG_RETENTION_AUDIT_EVENTS_DAYS: ${ICEBERG_RETENTION_AUDIT_EVENTS_DAYS:-0}
       ICEBERG_RETENTION_REMEDIATION_EVIDENCE_DAYS: ${ICEBERG_RETENTION_REMEDIATION_EVIDENCE_DAYS:-0}
-      # Empty = evidence policy off (ADR 0011).
+      # Empty = evidence policy off (ADR 0012).
       ICEBERG_REMEDIATION_EVIDENCE_MIN_SEVERITY: ${ICEBERG_REMEDIATION_EVIDENCE_MIN_SEVERITY:-}
     ports:
       - "${ICEBERG_API_PORT:-8000}:8000"

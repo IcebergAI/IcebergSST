@@ -9,6 +9,7 @@ Design specification and reference docs. Start with [`../ARCHITECTURE.md`](../AR
 - [`connectors.md`](./connectors.md) — connector interface + Confluence (MVP)
 - [`connector-sdk.md`](./connector-sdk.md) — versioned connector contract and conformance kit
 - [`rules.md`](./rules.md) — detection engine, rule packs, suppressions
+- [`secret-validation.md`](./secret-validation.md) — opt-in credential liveness contracts and controls
 - [`security.md`](./security.md) — threat model and mitigations
 - [`deployment.md`](./deployment.md) — docker-compose (dev) + Helm (prod)
 - [`runbooks/production-install.md`](./runbooks/production-install.md) — production-oriented
@@ -26,3 +27,6 @@ Design specification and reference docs. Start with [`../ARCHITECTURE.md`](../AR
 - [0007 — Secret store: pluggable, env-key default](./adr/0007-secret-store.md)
 - [0008 — Rule management: code rules + DB suppressions](./adr/0008-rule-management.md)
 - [0009 — Task lifecycle: two-phase scans, API-authoritative leases](./adr/0009-task-lifecycle.md)
+- [0010 — Credential liveness validation](./adr/0010-secret-liveness-validation.md)
+- [0011 — Credential correlation & exposure clusters](./adr/0011-credential-correlation.md)
+- [0012 — Rotation guidance & remediation evidence](./adr/0012-remediation-evidence.md)

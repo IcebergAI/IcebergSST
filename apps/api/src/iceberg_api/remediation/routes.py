@@ -1,4 +1,4 @@
-"""Guidance and remediation-action routes (#142, ADR 0011).
+"""Guidance and remediation-action routes (#142, ADR 0012).
 
 Reads are viewer+ like the findings they hang off — with the *shape* of an
 action role-shaped down for viewers (labels, not URLs; no note). Writes are

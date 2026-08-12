@@ -83,7 +83,7 @@
     <table>
       <thead>
         <tr>
-          <th>Severity</th><th>State</th><th>Rule</th><th>Source</th><th>Where</th>
+          <th>Severity</th><th>State</th><th>Liveness</th><th>Rule</th><th>Source</th><th>Where</th>
           <th>Assignee</th><th>First seen</th>
         </tr>
       </thead>
@@ -95,6 +95,7 @@
             <span class="tag tag--c state-{{ finding.state.value }}"><span class="dot"></span>{{ finding.state.value | humanize }}</span>
             {% if finding.suppressed_at %}<span class="tag tag--c is-neutral">suppressed</span>{% endif %}
           </td>
+          <td>{% if finding.validation_status %}<span class="tag tag--c is-neutral">{{ finding.validation_status.value }}</span>{% else %}—{% endif %}</td>
           <td><a class="mono" href="/findings/{{ finding.id }}">{{ finding.rule_id }}</a></td>
           <td class="truncate">{{ source_names.get(finding.source_id, finding.source_id | short) }}</td>
           <td class="truncate mono" style="font-size:12px;max-width:360px">

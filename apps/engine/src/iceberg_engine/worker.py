@@ -41,6 +41,7 @@ from iceberg_engine import __version__
 from iceberg_engine.api_client import EngineClient
 from iceberg_engine.heartbeat import Heartbeat, TaskRegistry
 from iceberg_engine.runner import run_task
+from iceberg_engine.validation import RateLimiter, RedisMinuteLimiter
 
 logger = structlog.get_logger()
 
@@ -52,6 +53,12 @@ TASKS = TaskRegistry()
 #: keeps a burst of first messages from building more than one.
 _CLIENT: EngineClient | None = None
 _CLIENT_LOCK = threading.Lock()
+
+
+@lru_cache(maxsize=1)
+def validation_limiter(redis_url: str) -> RateLimiter:
+    """The fleet-wide credential-validation budget shared by all replicas."""
+    return RedisMinuteLimiter.from_url(redis_url)
 
 
 @lru_cache(maxsize=1)
@@ -221,6 +228,7 @@ def run_scan_task(task_id: str) -> None:
         client=api_client(),
         pack=rulepack(),
         tasks=TASKS,
+        validation_limiter=validation_limiter(get_engine_settings().redis_url),
     )
 
 

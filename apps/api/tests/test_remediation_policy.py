@@ -1,4 +1,4 @@
-"""The required-evidence policy (#142, ADR 0011).
+"""The required-evidence policy (#142, ADR 0012).
 
 The property under test: with a minimum severity configured, resolving a
 finding at or above it demands a live remediation action with evidence — and

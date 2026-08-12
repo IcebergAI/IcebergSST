@@ -1,4 +1,4 @@
-"""Correlation-id derivation (ADR 0010, #140): equality and nothing else."""
+"""Correlation-id derivation (ADR 0011, #140): equality and nothing else."""
 
 import secrets
 

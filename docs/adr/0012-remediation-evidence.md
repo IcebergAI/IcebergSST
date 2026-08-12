@@ -1,4 +1,4 @@
-# ADR 0011 — Rotation guidance & remediation evidence
+# ADR 0012 — Rotation guidance & remediation evidence
 
 **Status:** Accepted
 
@@ -55,9 +55,13 @@ window, marking `scrubbed_at`. The record of who did what survives; only where-t
 ages out. Rows are deleted solely by the cascade when retention purges their finding under its
 own rules.
 
-**Liveness is out of scope, with the hook named.** No credential-validation subsystem exists;
-"reappearing credentials reopen" is live today via ingest, and a future liveness check should
-reopen through the same path.
+**"Reappearing or live credentials reopen" needs no separate liveness path.** Credential
+validation landed alongside this work (ADR 0010), and a validation result only ever reaches the
+API *attached to a sighting* — the engine validates what it just detected, so `_record_validation`
+is only reached from the ingest path that already reopens a resolved finding. A live credential is
+therefore a re-sighted one, and the existing reopen covers both halves of the criterion with the
+remediation history intact. A validator that could report on a credential nobody re-detected would
+change that, and should reopen through the same branch rather than growing a second one.
 
 ## Alternatives considered
 - **Guidance in rule packs.** Couples advice to engine rollouts; forces the `extra="forbid"`

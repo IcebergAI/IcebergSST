@@ -74,7 +74,7 @@ class SecretStoreSettings(CoreSettings):
     #: docs/runbooks/key-rotation.md is the procedure; do not set this casually.
     previous_fingerprint_pepper_ref: str | None = None
 
-    #: The exposure-cluster correlation key (ADR 0010, #140). Unset = correlation
+    #: The exposure-cluster correlation key (ADR 0011, #140). Unset = correlation
     #: off; ingest stores NULL and the cluster views stay empty.
     #:
     #: API-role-only, like the master key and unlike the pepper: it is never
@@ -129,6 +129,11 @@ class ApiSettings(SecretStoreSettings):
     #: Kept in step with `iceberg_detect.DEFAULT_CONFIDENCE_THRESHOLD` by a test —
     #: core cannot import detect, which depends on core.
     confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+
+    #: Deployment-wide kill switch for the only feature that deliberately sends
+    #: a detected credential to its provider (ADR 0010). Database policies are a
+    #: second, independent opt-in; neither can enable validation alone.
+    secret_validation_enabled: bool = False
 
     #: OIDC-only auth needs a seed administrator (docs/security.md § Bootstrap).
     #: Matched at user creation, so a later demotion is not undone by re-login.
@@ -217,13 +222,13 @@ class ApiSettings(SecretStoreSettings):
     #: minutes on a database that has never been purged before.
     retention_batch_size: int = Field(default=1000, ge=1, le=100_000)
 
-    # ─── Exposure clusters (ADR 0010, #140) ───────────────────────────────────
+    # ─── Exposure clusters (ADR 0011, #140) ───────────────────────────────────
     #: NULL correlation ids repaired per maintenance round. NULLs appear when
     #: rows predate the key or ingest ran while it was unreadable; one bounded
     #: batch per beat keeps a large backlog from stalling the round.
     correlation_backfill_batch_size: int = Field(default=500, ge=1, le=100_000)
 
-    # ─── Remediation evidence (ADR 0011, #142) ────────────────────────────────
+    # ─── Remediation evidence (ADR 0012, #142) ────────────────────────────────
     #: Findings at or above this severity cannot be resolved without a
     #: non-retracted remediation action carrying at least one evidence link.
     #: Unset = policy off — the shipped default, like every optional behaviour;

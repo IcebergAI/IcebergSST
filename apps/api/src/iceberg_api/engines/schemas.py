@@ -5,6 +5,8 @@ heartbeat, lease, report. Everything sensitive travels here rather than through 
 broker, which is why TLS on this channel is mandatory (docs/security.md).
 """
 
+from __future__ import annotations
+
 import uuid
 from collections import Counter
 from typing import Annotated, Any, Literal, Self
@@ -18,6 +20,8 @@ from iceberg_core.enums import (
     ScanTaskKind,
     ScanTaskStatus,
     Severity,
+    ValidationReason,
+    ValidationStatus,
     coverage_reason_allowed,
 )
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -152,6 +156,37 @@ class LeaseResponse(BaseModel):
     #: so an engine running a stale one cannot flood the queue (#70).
     confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
 
+    #: Enabled policy snapshot at lease time. An empty list is the default and
+    #: authorizes no outbound credential validation.
+    validation_policies: list[LeaseValidationPolicy] = Field(default_factory=list)
+
+
+class LeaseValidationPolicy(BaseModel):
+    """The bounded authorization an engine receives for one task."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    policy_id: uuid.UUID
+    rule_id: str = Field(min_length=1, max_length=128)
+    validator_id: str = Field(min_length=1, max_length=128)
+    timeout_seconds: float = Field(ge=0.1, le=30.0)
+    requests_per_minute: int = Field(ge=1, le=10_000)
+    max_attempts_per_task: int = Field(ge=1, le=10)
+
+
+class CredentialValidationResult(BaseModel):
+    """Content-free result produced while a credential exists in engine memory."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str = Field(min_length=1, max_length=64)
+    validator_id: str = Field(min_length=1, max_length=128)
+    contract_version: str = Field(min_length=1, max_length=64)
+    status: ValidationStatus
+    # Stable machine reason, not a provider body or exception string. Keeping
+    # this vocabulary-shaped prevents accidental response/credential capture.
+    reason: ValidationReason
+
 
 class FindingPayload(BaseModel):
     """One redacted finding, as an engine reports it (ADR 0004).
@@ -172,6 +207,7 @@ class FindingPayload(BaseModel):
     entropy: float | None = None
     confidence: float | None = None
     severity: Severity
+    validation: CredentialValidationResult | None = None
 
     #: The same finding's identity under the outgoing pepper, sent only during a
     #: rotation window (#64). Ingest looks this up when the primary fingerprint

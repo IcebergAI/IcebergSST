@@ -43,7 +43,7 @@ def test_a_response_never_carries_the_secret_hash(
     """The hash is not reversible, but the API still never re-emits it (ADR 0004).
 
     The correlation id an analyst sees is a different value under a different
-    key (ADR 0010) — asserted here so the two can never quietly converge.
+    key (ADR 0011) — asserted here so the two can never quietly converge.
     """
     login_as(make_user(UserRole.VIEWER))
     finding = make_finding(correlation_id="c0" * 32)

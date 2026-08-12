@@ -1,4 +1,4 @@
-"""Cluster queries: GROUP BY over ``finding.correlation_id`` (ADR 0010, #140).
+"""Cluster queries: GROUP BY over ``finding.correlation_id`` (ADR 0011, #140).
 
 Clusters are derived on read rather than materialized. A cluster table would be
 one more thing for ingest, re-key, backfill, and reindex to keep consistent;

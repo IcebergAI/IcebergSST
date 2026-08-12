@@ -160,7 +160,7 @@ class EnvKeyBackend(SecretStore):
 
         Rotating this key only invalidates correlation ids, which can be
         re-derived from stored hashes (`reindex-correlation`) — far cheaper than
-        a pepper rotation, and the reason the two are separate keys (ADR 0010).
+        a pepper rotation, and the reason the two are separate keys (ADR 0011).
         """
         return self.seal_bytes(
             _secrets.token_bytes(CORRELATION_KEY_BYTES), purpose=SecretPurpose.CORRELATION

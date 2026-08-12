@@ -35,6 +35,7 @@ data:
   # ── api role ──────────────────────────────────────────────────────────────
   ICEBERG_SECRET_STORE_BACKEND: {{ .Values.config.secretStoreBackend | quote }}
   ICEBERG_CONFIDENCE_THRESHOLD: {{ .Values.config.confidenceThreshold | quote }}
+  ICEBERG_SECRET_VALIDATION_ENABLED: {{ .Values.config.secretValidationEnabled | quote }}
 
   ICEBERG_OIDC_ISSUER: {{ .Values.config.oidc.issuer | quote }}
   ICEBERG_OIDC_CLIENT_ID: {{ .Values.config.oidc.clientId | quote }}

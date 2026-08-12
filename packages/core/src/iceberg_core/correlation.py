@@ -1,4 +1,4 @@
-"""Exposure-cluster correlation identifiers (ADR 0010, #140).
+"""Exposure-cluster correlation identifiers (ADR 0011, #140).
 
 A correlation id names the relation "these findings hold the same secret value"
 and nothing else::
@@ -24,13 +24,13 @@ window here; the runbook has the procedure.
 
 **Deployment-scoped.** Two deployments with different correlation keys can
 never correlate values — which is what "the same credential correlates within
-one organization only" means in a single-org system (ADR 0010).
+one organization only" means in a single-org system (ADR 0011).
 """
 
 import hashlib
 import hmac
 
-#: Bumping this invalidates every stored correlation id. See ADR 0010.
+#: Bumping this invalidates every stored correlation id. See ADR 0011.
 CORRELATION_VERSION = 1
 
 _CORRELATION_DOMAIN = f"iceberg.correlation.v{CORRELATION_VERSION}".encode()

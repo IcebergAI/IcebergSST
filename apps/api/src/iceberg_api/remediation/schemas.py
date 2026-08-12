@@ -1,4 +1,4 @@
-"""Request and response shapes for remediation actions (#142, ADR 0011).
+"""Request and response shapes for remediation actions (#142, ADR 0012).
 
 Two rules shape these:
 

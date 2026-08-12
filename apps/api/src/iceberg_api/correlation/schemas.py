@@ -1,4 +1,4 @@
-"""Response shapes for exposure clusters (ADR 0010, #140).
+"""Response shapes for exposure clusters (ADR 0011, #140).
 
 A cluster is derived, not stored: the rows are findings, the grouping is
 ``correlation_id``. These shapes carry the id itself — an API-minted equality

@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 
 import structlog
 from iceberg_core.correlation import correlation_id
-from iceberg_core.enums import FindingEventKind, FindingState
+from iceberg_core.enums import FindingEventKind, FindingState, ValidationStatus
 from iceberg_core.metrics import FINDINGS_INGESTED
 from iceberg_core.models import Finding, FindingEvent, Scan
 from sqlmodel import Session, col, select
@@ -63,7 +63,7 @@ def ingest_findings(
 ) -> IngestOutcome:
     """Store a task's findings. Does not commit; the route owns the transaction.
 
-    ``correlation_key`` derives each finding's ``correlation_id`` (ADR 0010).
+    ``correlation_key`` derives each finding's ``correlation_id`` (ADR 0011).
     None stores NULL and carries on — unlike a missing pepper this is repairable
     later, because the input is the stored hash.
     """
@@ -214,6 +214,7 @@ def _create(
     )
     db.add(finding)
     db.flush()
+    _record_validation(db, finding, payload, from_status=None, at=at)
     if suppression is not None:
         suppressions.suppress(db, finding, suppression, at=at)
     return finding
@@ -245,6 +246,24 @@ def _refresh(
     finding.entropy = payload.entropy
     finding.confidence = payload.confidence
     finding.severity = payload.severity
+    prior_validation = finding.validation_status
+    prior_validation_identity = (
+        finding.validation_provider,
+        finding.validation_validator_id,
+        finding.validation_contract_version,
+        finding.validation_status,
+        finding.validation_reason,
+    )
+    if payload.validation is not None:
+        current_validation_identity = (
+            payload.validation.provider,
+            payload.validation.validator_id,
+            payload.validation.contract_version,
+            payload.validation.status,
+            payload.validation.reason,
+        )
+        if current_validation_identity != prior_validation_identity:
+            _record_validation(db, finding, payload, from_status=prior_validation, at=at)
 
     reopened = False
     if finding.state is FindingState.RESOLVED:
@@ -277,6 +296,41 @@ def _refresh(
 
     db.add(finding)
     return reopened
+
+
+def _record_validation(
+    db: Session,
+    finding: Finding,
+    payload: FindingPayload,
+    *,
+    from_status: ValidationStatus | None,
+    at: datetime,
+) -> None:
+    """Persist structured metadata and its content-free status transition."""
+    result = payload.validation
+    if result is None:
+        return
+    finding.validation_provider = result.provider
+    finding.validation_validator_id = result.validator_id
+    finding.validation_contract_version = result.contract_version
+    finding.validation_status = result.status
+    finding.validation_reason = result.reason
+    finding.validated_at = at
+    db.add(finding)
+    db.add(
+        FindingEvent(
+            finding_id=finding.id,
+            actor_id=None,
+            kind=FindingEventKind.VALIDATION,
+            from_value=getattr(from_status, "value", None),
+            to_value=result.status.value,
+            # All components are bounded identifiers or a schema-constrained
+            # machine reason. Provider response bodies never enter the payload.
+            comment=(
+                f"{result.provider}:{result.validator_id}:{result.contract_version}:{result.reason}"
+            ),
+        )
+    )
 
 
 def merge_scan_counts(scan: Scan, outcome: IngestOutcome, engine_counts: dict[str, int]) -> None:

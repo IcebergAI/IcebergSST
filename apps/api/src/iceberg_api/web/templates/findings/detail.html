@@ -14,7 +14,7 @@
       <span class="tag tag--c state-{{ finding.state.value }}"><span class="dot"></span>{{ finding.state.value | humanize }}</span>
       {% if finding.resolution %}<span class="tag">{{ finding.resolution.value }} resolution</span>{% endif %}
       {% if finding.suppressed_at %}<span class="tag tag--c is-neutral"><span class="dot"></span>suppressed</span>{% endif %}
-      {#- Role-shaped by the API (ADR 0010): viewers receive correlation=null,
+      {#- Role-shaped by the API (ADR 0011): viewers receive correlation=null,
           so this renders only for the roles that can open the cluster page. -#}
       {% if finding.correlation and finding.correlation.finding_count > 1 %}
       <a class="tag tag--c is-neutral" href="/clusters/{{ finding.correlation.correlation_id }}">
@@ -49,11 +49,28 @@
             somebody else's Confluence. -#}
         <pre class="snippet">{{ finding.redacted_snippet }}</pre>
         <p class="field-hint" style="margin-top:8px">
-          The secret itself was never transmitted or stored — only this mask and a peppered hash,
-          which is what makes the finding identifiable across re-scans without being reversible.
+          The secret itself was never stored or sent to the API — only this mask and a peppered
+          hash. If an administrator enabled liveness validation, the engine disclosed it once to
+          the named provider under the reviewed contract shown below.
         </p>
       </div>
     </section>
+
+    {% if finding.validation_status %}
+    <section class="card card-pad">
+      <div class="eyebrow" style="margin-bottom:8px">Credential liveness</div>
+      <div class="row-inline">
+        <span class="tag tag--c is-neutral"><span class="dot"></span>{{ finding.validation_status.value | humanize }}</span>
+        <strong>{{ finding.validation_provider }}</strong>
+      </div>
+      <p class="field-hint" style="margin-top:10px">
+        {{ finding.validation_reason.value | humanize }} · validator
+        <span class="mono">{{ finding.validation_validator_id }}</span> contract
+        <span class="mono">{{ finding.validation_contract_version }}</span> · checked
+        {{ finding.validated_at | dt }}
+      </p>
+    </section>
+    {% endif %}
 
     <section class="card">
       <div class="card-head"><h2 class="section-title">Where it is</h2></div>

@@ -1,4 +1,4 @@
-"""Exposure-cluster reads and export (ADR 0010, #140).
+"""Exposure-cluster reads and export (ADR 0011, #140).
 
 Analyst+, deliberately stricter than the findings queue a viewer can read. A
 cluster view is the one place the API answers "is this the same secret as

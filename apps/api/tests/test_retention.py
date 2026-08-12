@@ -434,7 +434,7 @@ def test_a_round_deletes_at_most_the_batch_size(
     assert len(list(session.exec(select(Finding)))) == 1
 
 
-# ── Remediation-evidence scrub (#142, ADR 0011) ──────────────────────────────
+# ── Remediation-evidence scrub (#142, ADR 0012) ──────────────────────────────
 
 
 def _action(session: Session, finding: Finding, **fields: Any) -> RemediationAction:

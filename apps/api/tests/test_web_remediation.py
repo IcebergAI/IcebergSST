@@ -1,4 +1,4 @@
-"""The remediation panel on the finding detail (#142, ADR 0011).
+"""The remediation panel on the finding detail (#142, ADR 0012).
 
 The shared suites already assert the invariants (CSRF on every mutating web
 route, no ORM in `iceberg_api.web`, no inline script); this file covers what

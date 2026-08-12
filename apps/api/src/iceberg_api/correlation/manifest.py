@@ -1,4 +1,4 @@
-"""The cluster export manifest, built pure for byte-stability (ADR 0010).
+"""The cluster export manifest, built pure for byte-stability (ADR 0011).
 
 Mirrors the coverage-manifest split (`scans/coverage.py`): the route loads
 rows, this module shapes them, and a test can assert two builds of the same

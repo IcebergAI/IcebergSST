@@ -1,4 +1,4 @@
-# ADR 0010 — Credential correlation & exposure clusters
+# ADR 0011 — Credential correlation & exposure clusters
 
 **Status:** Accepted
 

@@ -238,7 +238,7 @@ def test_the_results_route_derives_the_correlation_id(
     scan_fixture: Fixture, secret_store: EnvKeyBackend
 ) -> None:
     """The submit route reads the key API-side and derives the id at ingest
-    (ADR 0010) — the payload has no correlation field for an engine to fill."""
+    (ADR 0011) — the payload has no correlation field for an engine to fill."""
     fixture = scan_fixture
     task = fixture.fetch_task()
 

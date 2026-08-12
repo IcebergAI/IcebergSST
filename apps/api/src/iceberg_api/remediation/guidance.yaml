@@ -1,4 +1,4 @@
-# Remediation guidance (#142, ADR 0011). Versioned like a rule pack: reviewed
+# Remediation guidance (#142, ADR 0012). Versioned like a rule pack: reviewed
 # as text in a PR, validated at startup (guidance.py), and the version below is
 # stamped onto every remediation action recorded while it is live — so "what
 # were they told to do" stays answerable after this file changes.

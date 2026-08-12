@@ -101,7 +101,7 @@ def run_once(
         # gets retried on the next beat instead of losing the alert.
         with session_scope() as db:
             notification_dispatch.deliver_pending(db, resolved, secret_store, now=at)
-        # Correlation-id repair (ADR 0010). A no-op unless the key is configured
+        # Correlation-id repair (ADR 0011). A no-op unless the key is configured
         # and some row is missing its id — which happens whenever rows predate
         # the key or ingest ran while the secret store was unreadable. Runs in
         # the round rather than at request time because it is a table walk, and

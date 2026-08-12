@@ -1,4 +1,4 @@
-"""Correlation ids at ingest, backfill, and reindex (ADR 0010, #140).
+"""Correlation ids at ingest, backfill, and reindex (ADR 0011, #140).
 
 The claims that make clusters trustworthy: the same secret gets the same id
 wherever it lands, a missing key degrades to NULL instead of failing the task,

@@ -63,7 +63,7 @@ class EvidenceRequired(ValueError):
     def __init__(self) -> None:
         super().__init__(
             "resolving a finding of this severity requires a remediation action "
-            "with evidence; record one first (ADR 0011)"
+            "with evidence; record one first (ADR 0012)"
         )
 
 

@@ -109,7 +109,7 @@ def _seed_finding(session: Session, *, correlation: str | None) -> Finding:
 
 
 def test_reindex_correlation_rederives_and_audits(session: Session) -> None:
-    """The key-rotation move (ADR 0010): every id re-derived under the new key
+    """The key-rotation move (ADR 0011): every id re-derived under the new key
     from stored data alone, and the recompute itself lands in the trail."""
     stale = _seed_finding(session, correlation="0" * 64)
     missing = _seed_finding(session, correlation=None)

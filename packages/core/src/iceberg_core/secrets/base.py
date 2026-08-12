@@ -90,7 +90,7 @@ class SecretStore(ABC):
         return None
 
     def get_correlation_key(self) -> bytes | None:
-        """The exposure-cluster correlation key (ADR 0010), or None if unset.
+        """The exposure-cluster correlation key (ADR 0011), or None if unset.
 
         The API is the only role that ever holds this key — unlike the pepper it
         is never placed in a lease, so an engine (or anyone holding a plaintext

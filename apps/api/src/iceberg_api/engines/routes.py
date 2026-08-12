@@ -55,6 +55,7 @@ from iceberg_api.engines.schemas import (
 )
 from iceberg_api.scans import service
 from iceberg_api.scans.coverage import failure_report
+from iceberg_api.validation import service as validation_service
 
 router = APIRouter(tags=["engines"])
 logger = structlog.get_logger()
@@ -322,6 +323,9 @@ async def lease_task(
             rule.as_payload() for rule in suppressions.applicable_suppressions(db, source.id)
         ],
         confidence_threshold=settings.confidence_threshold,
+        validation_policies=validation_service.enabled_lease_snapshot(
+            db, deployment_enabled=settings.secret_validation_enabled
+        ),
     )
 
 
@@ -377,6 +381,15 @@ async def submit_results(
             "fetch tasks may report findings but not task specs",
         )
 
+    try:
+        validation_service.require_authorized_results(
+            db,
+            body.findings,
+            deployment_enabled=settings.secret_validation_enabled,
+        )
+    except validation_service.UnauthorizedValidation as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+
     now = datetime.now(UTC)
 
     # Claiming result_key is a conditional UPDATE: of two concurrent submissions,
@@ -423,7 +436,7 @@ async def submit_results(
         # and reconciliation still refuses to auto-resolve on it (ADR 0009 §4).
         # Fail-open, unlike the pepper: a missing correlation key stores NULL ids
         # that the maintenance backfill repairs from the stored hash, so losing
-        # the key transiently must not fail the task or drop findings (ADR 0010).
+        # the key transiently must not fail the task or drop findings (ADR 0011).
         correlation_key: bytes | None = None
         try:
             correlation_key = store.get_correlation_key()

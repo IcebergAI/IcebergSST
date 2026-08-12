@@ -1,4 +1,4 @@
-"""The cluster API (ADR 0010, #140): analyst-scoped reads and an audited export.
+"""The cluster API (ADR 0011, #140): analyst-scoped reads and an audited export.
 
 What is pinned here: clustering answers "same secret elsewhere" for analysts
 and nobody below; the aggregates describe whole clusters; the export is

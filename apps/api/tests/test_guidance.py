@@ -1,4 +1,4 @@
-"""The remediation-guidance catalog (#142, ADR 0011): valid, complete, honest."""
+"""The remediation-guidance catalog (#142, ADR 0012): valid, complete, honest."""
 
 import pytest
 import yaml

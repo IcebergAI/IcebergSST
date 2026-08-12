@@ -1,4 +1,4 @@
-"""The packaged guidance catalog: loading, validation, lookup (#142, ADR 0011).
+"""The packaged guidance catalog: loading, validation, lookup (#142, ADR 0012).
 
 Guidance lives beside the API rather than inside rule packs: rule packs ship in
 engine images, so guidance riding them would couple advice releases to engine
