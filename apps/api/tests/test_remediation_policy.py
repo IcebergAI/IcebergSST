@@ -6,14 +6,15 @@ nothing else changes. Below the bar, without the setting, for judgements, and
 for reconciliation's auto-resolve, triage behaves exactly as it always has.
 """
 
+import uuid
 from collections.abc import Callable, Iterator
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from iceberg_core.config import ApiSettings
-from iceberg_core.enums import FindingState, Severity, UserRole
-from iceberg_core.models import Finding, User
+from iceberg_core.enums import FindingEventKind, FindingState, Severity, UserRole
+from iceberg_core.models import Finding, FindingEvent, RemediationAction, User
 from sqlmodel import Session
 
 RESOLVE = {"state": "resolved"}
@@ -172,6 +173,87 @@ def test_below_the_bar_resolution_stays_free(
     response = client.patch(f"{api}/findings/{finding.id}", json=RESOLVE, headers=analyst_headers)
 
     assert response.status_code == 200
+
+
+def test_a_reopened_finding_needs_fresh_evidence(
+    client: TestClient,
+    api: str,
+    session: Session,
+    with_policy: ApiSettings,
+    make_finding: Callable[..., Finding],
+    analyst_headers: dict[str, str],
+) -> None:
+    """The credential came back, so what was done before did not close it.
+
+    Remediation history survives a reopen deliberately — it is what makes the
+    trail worth reading — but counting it towards the policy would let a
+    re-sighted secret be closed again instantly on the strength of the attempt
+    that demonstrably failed.
+    """
+    finding = make_finding(severity=Severity.HIGH)
+    record = f"{api}/findings/{finding.id}/remediations"
+    client.post(record, json=EVIDENCED, headers=analyst_headers)
+    first = client.patch(f"{api}/findings/{finding.id}", json=RESOLVE, headers=analyst_headers)
+    assert first.status_code == 200, first.text
+
+    _reopen(session, finding)
+
+    refused = client.patch(f"{api}/findings/{finding.id}", json=RESOLVE, headers=analyst_headers)
+    assert refused.status_code == 409
+
+    # The history is still there — it just no longer answers for this cycle.
+    assert len(client.get(f"{api}/findings/{finding.id}/remediations").json()) == 1
+
+    client.post(record, json=EVIDENCED, headers=analyst_headers)
+    again = client.patch(f"{api}/findings/{finding.id}", json=RESOLVE, headers=analyst_headers)
+    assert again.status_code == 200, again.text
+
+
+def test_scrubbed_evidence_stops_qualifying(
+    client: TestClient,
+    api: str,
+    session: Session,
+    with_policy: ApiSettings,
+    make_finding: Callable[..., Finding],
+    analyst_headers: dict[str, str],
+) -> None:
+    """Retention reduces aged links to labels. A label is a name for proof that
+    is no longer reachable, and the list stays non-empty — so a length check
+    would let the platform's own ageing satisfy its own policy."""
+    from iceberg_api.remediation import service as remediation
+
+    finding = make_finding(severity=Severity.HIGH)
+    action_id = client.post(
+        f"{api}/findings/{finding.id}/remediations", json=EVIDENCED, headers=analyst_headers
+    ).json()["id"]
+
+    action = session.get(RemediationAction, uuid.UUID(action_id))
+    assert action is not None
+    action.evidence_links = [{"label": "SEC-9", "scrubbed": True}]
+    session.add(action)
+    session.commit()
+
+    assert remediation.qualifying_action_exists(session, finding.id) is False
+    response = client.patch(f"{api}/findings/{finding.id}", json=RESOLVE, headers=analyst_headers)
+    assert response.status_code == 409
+
+
+def _reopen(session: Session, finding: Finding) -> None:
+    """The reopen ingest writes when a resolved finding is seen again."""
+    session.refresh(finding)
+    finding.state = FindingState.OPEN
+    finding.resolution = None
+    session.add(finding)
+    session.add(
+        FindingEvent(
+            finding_id=finding.id,
+            actor_id=None,
+            kind=FindingEventKind.REOPENED,
+            from_value=FindingState.RESOLVED.value,
+            to_value=FindingState.OPEN.value,
+        )
+    )
+    session.commit()
 
 
 @pytest.mark.parametrize("judgement", ["false_positive", "accepted_risk"])

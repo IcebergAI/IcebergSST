@@ -97,12 +97,16 @@ routes below. Viewers get `correlation: null` — role-shaped, not merely absent
 - `GET /correlation/clusters/{correlation_id}/export` — byte-stable JSON download (versioned
   manifest, `Content-Disposition: attachment`, `Cache-Control: no-store`). Locations and states
   only — no snippets, no notes. Every download writes a `correlation.cluster_exported` audit
-  event.
+  event. The manifest's counts are computed from the members it lists, and the export is
+  **complete or refused**: a cluster larger than the export bound answers `409` naming
+  `GET /findings?correlation_id=…`, which pages. A short work order reads as the full list of
+  places the secret lives, so it is never produced.
 
 All three are analyst+ and 403 for viewers: clustering is the "same secret elsewhere" capability,
 scoped to the roles that remediate. A `source_id` filter narrows *which clusters appear* (those
 with a member in that source) without narrowing the aggregates — a spread view that hid the
-spread would defeat itself.
+spread would defeat itself. `GET /findings?correlation_id=…` is the paginated way to walk one
+cluster of any size, and carries the same analyst+ gate for the same reason.
 
 **The state machine.** `open` → `false_positive` / `accepted_risk` / `resolved`, and any of those
 back to `open`. There is no direct move between judgements: relabelling one in place would leave an

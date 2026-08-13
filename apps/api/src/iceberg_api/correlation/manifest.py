@@ -4,32 +4,37 @@ Mirrors the coverage-manifest split (`scans/coverage.py`): the route loads
 rows, this module shapes them, and a test can assert two builds of the same
 state serialize identically — the property that makes an export diffable and
 worth attaching to a remediation ticket.
+
+Every summary number is derived from the members handed in, deliberately: an
+export whose header is computed separately from its body can disagree with it,
+and a work order that under-lists the places a secret lives is worse than no
+export at all. The route's job is to hand over the complete membership or
+refuse; this function's job is to describe exactly what it was given.
 """
 
+from iceberg_core.enums import SEVERITY_RANK, FindingState, Severity
 from iceberg_core.models import Finding
 
 from iceberg_api.correlation.schemas import ClusterExportManifest, ClusterExportMember
-from iceberg_api.correlation.service import ClusterAggregate
 
 
 def build_cluster_manifest(
-    aggregate: ClusterAggregate,
+    correlation_id: str,
     members: list[tuple[Finding, str]],
 ) -> ClusterExportManifest:
     """Shape one cluster as its export. Pure — no session, no clock.
 
-    ``members_omitted`` is derived from the gap between the aggregate's count
-    and the rows actually loaded, so a truncated export says so in the file.
+    ``members`` must be the cluster's whole membership; it is never a page.
     """
+    findings = [finding for finding, _ in members]
     return ClusterExportManifest(
-        members_omitted=max(0, aggregate.finding_count - len(members)),
-        correlation_id=aggregate.correlation_id,
-        finding_count=aggregate.finding_count,
-        source_count=aggregate.source_count,
-        open_count=aggregate.open_count,
-        max_severity=aggregate.max_severity,
-        first_seen=aggregate.first_seen,
-        last_activity=aggregate.last_activity,
+        correlation_id=correlation_id,
+        finding_count=len(findings),
+        source_count=len({finding.source_id for finding in findings}),
+        open_count=sum(1 for finding in findings if finding.state is FindingState.OPEN),
+        max_severity=_max_severity(findings),
+        first_seen=min(finding.created_at for finding in findings),
+        last_activity=max(finding.updated_at for finding in findings),
         members=[
             ClusterExportMember(
                 finding_id=finding.id,
@@ -46,3 +51,11 @@ def build_cluster_manifest(
             for finding, source_name in members
         ],
     )
+
+
+def _max_severity(findings: list[Finding]) -> Severity:
+    """The worst severity in the cluster, ranked rather than compared as text."""
+    return max(findings, key=lambda finding: SEVERITY_RANK[finding.severity]).severity
+
+
+__all__ = ["build_cluster_manifest"]

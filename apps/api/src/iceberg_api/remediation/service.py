@@ -241,11 +241,60 @@ def actions_for(db: Session, finding_id: uuid.UUID) -> list[RemediationAction]:
     )
 
 
+def _naive_utc(value: datetime) -> datetime:
+    """Timestamps as the database hands them back, so two are comparable.
+
+    Rows loaded from PostgreSQL carry a zone and rows loaded from SQLite do
+    not; both are UTC, and this is only ever used to order two stored
+    timestamps against each other.
+    """
+    return value.astimezone(UTC).replace(tzinfo=None) if value.tzinfo else value
+
+
+def last_reopened_at(db: Session, finding_id: uuid.UUID) -> datetime | None:
+    """When the finding was last re-opened by a re-sighting, if it ever was.
+
+    Read from the append-only trail rather than a column: reopening is already
+    recorded there by ingest, and the trail is the thing #142 calls immutable.
+    """
+    event = db.exec(
+        select(col(FindingEvent.created_at))
+        .where(col(FindingEvent.finding_id) == finding_id)
+        .where(col(FindingEvent.kind) == FindingEventKind.REOPENED)
+        .order_by(col(FindingEvent.created_at).desc())
+        .limit(1)
+    ).first()
+    return None if event is None else _naive_utc(event)
+
+
+def _carries_usable_evidence(action: RemediationAction) -> bool:
+    """At least one link that still points at something.
+
+    ``len(evidence_links) > 0`` is not the same test: retention rewrites links
+    to ``{label, scrubbed}`` once a finding has stayed resolved past the
+    window, and a label alone is a name for evidence that is no longer
+    reachable. Accepting it would let the policy be satisfied by a record whose
+    proof the platform itself aged out.
+    """
+    return any(str(link.get("url", "")).strip() for link in action.evidence_links)
+
+
 def qualifying_action_exists(db: Session, finding_id: uuid.UUID) -> bool:
-    """Whether the finding carries an action the evidence policy accepts:
-    not retracted, with at least one evidence link."""
+    """Whether the finding carries an action the evidence policy accepts.
+
+    Not retracted, carrying a link that still has a URL, and — this is the part
+    that is easy to miss — recorded **since the finding was last re-opened**.
+    Remediation history deliberately survives a reopen (that is what makes the
+    trail worth reading), but a credential that reappeared is evidence that
+    whatever was done before did not close this exposure. Counting the old
+    action would let a re-sighted secret be closed again instantly on the
+    strength of the attempt that demonstrably failed.
+    """
+    since = last_reopened_at(db, finding_id)
     return any(
-        action.retracted_at is None and len(action.evidence_links) > 0
+        action.retracted_at is None
+        and _carries_usable_evidence(action)
+        and (since is None or _naive_utc(action.created_at) >= since)
         for action in actions_for(db, finding_id)
     )
 

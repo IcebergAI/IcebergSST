@@ -47,6 +47,7 @@ from iceberg_core.models import (
     Source,
 )
 from pydantic import SecretStr
+from sqlalchemy.sql.dml import Update
 from sqlmodel import Session, col, select, update
 
 NOW = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
@@ -526,41 +527,43 @@ def test_a_finding_reopened_mid_scrub_keeps_its_evidence(
     """The race the review found, reproduced at the point it happens.
 
     The scrub selects an old resolved finding; ingest commits a reopen in
-    another session *after* that select; the scrub then writes. The old code
-    re-read `finding.state` from the object its own select had loaded — a value
-    that cannot change no matter what another session commits — so it erased the
-    URLs off a finding that was live again. The predicates now ride on the
-    UPDATE, the way `_purge_findings` has always carried them, so the write
-    simply matches nothing.
+    another session *after* that select; the scrub then writes. The original
+    code re-read `finding.state` off the object its own select had loaded — a
+    value no other session's commit can change — and erased the URLs from a
+    finding that was live again.
 
-    The reopen is injected through the per-row `db.get`, which the scrub calls
-    between selecting and writing: that is exactly the window, and it is the one
-    place a single-threaded SQLite suite can stand in for a second session.
+    Two things stop it now. The eligibility predicates ride on the UPDATE, so a
+    reopen already visible matches nothing; and the findings are selected
+    ``FOR UPDATE`` first, so on PostgreSQL a reopen cannot slip in behind the
+    statement snapshot at all. This asserts the first — SQLite has no row locks,
+    and a single-writer database does not need them.
+
+    The reopen is injected immediately before the scrub's write, which is
+    exactly the window a second session would use.
     """
     finding = make_finding(updated_at=LONG_AGO)
     action = _action(session, finding)
     settings = _settings(retention_remediation_evidence_days=30)
 
-    original_get = session.get
+    original_exec = session.exec
     reopened = False
 
-    def reopen_then_get(model: Any, primary_key: Any) -> Any:
+    def reopen_before_writing(statement: Any, *args: Any, **kwargs: Any) -> Any:
         nonlocal reopened
-        if not reopened:
+        if not reopened and isinstance(statement, Update):
+            # Set first: the injected write goes back through this same hook.
             reopened = True
-            # synchronize_session=False is what makes this a faithful stand-in
-            # for another session's commit: the row changes, the object this
-            # session already loaded does not. That stale object is precisely
-            # what the old Python-side re-check consulted.
+            # synchronize_session=False stands in for another session's commit —
+            # the row changes, the object this session loaded does not.
             session.exec(
                 update(Finding)
                 .where(col(Finding.id) == finding.id)
                 .values(state=FindingState.OPEN, resolution=None)
                 .execution_options(synchronize_session=False)
             )
-        return original_get(model, primary_key)
+        return original_exec(statement, *args, **kwargs)
 
-    monkeypatch.setattr(session, "get", reopen_then_get)
+    monkeypatch.setattr(session, "exec", reopen_before_writing)
 
     result = retention.purge(session, settings, now=NOW)
 

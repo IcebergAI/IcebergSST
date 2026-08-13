@@ -75,6 +75,12 @@ class ClusterExportManifest(BaseModel):
 
     Built by a pure function and byte-stable for the same database state, so two
     exports of an unchanged cluster diff clean.
+
+    **The header describes the body.** Every count here is computed from
+    ``members``, not from a separate aggregate query, so the file cannot claim a
+    membership it does not list — the failure mode that makes a work order
+    dangerous rather than merely incomplete. A cluster too large to list is
+    refused by the route; it is never summarised over.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -88,8 +94,3 @@ class ClusterExportManifest(BaseModel):
     first_seen: UtcDatetime
     last_activity: UtcDatetime
     members: list[ClusterExportMember]
-    #: Members beyond the export ceiling, counted rather than dropped in
-    #: silence — ``finding_count`` describes the whole cluster, so without this
-    #: a reader could not tell a complete export from a truncated one. Zero for
-    #: every cluster small enough to fit, which is nearly all of them.
-    members_omitted: int = 0

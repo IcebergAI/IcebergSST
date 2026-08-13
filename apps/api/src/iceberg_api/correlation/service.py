@@ -21,11 +21,12 @@ from sqlmodel import Session, col, select
 #: via ``finding_count`` rather than silently truncating.
 MAX_DETAIL_MEMBERS = 500
 
-#: The export's own, much larger ceiling. An export is a work order rather than
-#: a screen, so it carries far more — but it is still bounded, and what it drops
-#: is *counted* in the manifest (``members_omitted``) rather than silently lost,
-#: the same contract the coverage manifest's ``gaps_omitted`` keeps.
-MAX_EXPORT_MEMBERS = 10_000
+#: The largest cluster that can be exported as one file. An export is a work
+#: order somebody remediates from, so a *short* one is worse than none: it reads
+#: as the full list of places the secret lives. The export therefore never
+#: truncates — past this bound it refuses and points at the paginated findings
+#: query instead (`routes.export_cluster`).
+MAX_EXPORT_MEMBERS = 25_000
 
 #: Severity ordered for SQL aggregation — the enum is stored as text, and
 #: ``max('critical', 'low')`` in collation order would elect the wrong one.
@@ -139,10 +140,11 @@ def cluster_members(
 ) -> list[tuple[Finding, str]]:
     """Members with their source names, `(created_at, id)` order, capped.
 
-    The cap is a parameter rather than a constant because the two callers want
-    different ones: the detail screen renders a page, the export is a work order
-    somebody remediates from. Passing the screen's cap into the export was how
-    a 501-member cluster came to export 500 members under a header claiming 501.
+    The cap is a parameter rather than a constant because the two callers mean
+    different things by it. The detail screen's is a rendering budget: it shows
+    a page and says so. The export's is a refusal threshold — it asks for one
+    row more than it will accept, so that "the cluster is too big" and "here is
+    the whole cluster" are distinguishable without a second count query.
     """
     return list(
         db.exec(

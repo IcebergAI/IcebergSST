@@ -9,6 +9,7 @@ hash, and a key rotation converges to ``updated=0`` without any rescan.
 import secrets
 import uuid
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 from iceberg_api.correlation.reindex import fill_missing, reindex_all
@@ -18,7 +19,8 @@ from iceberg_core.correlation import correlation_id
 from iceberg_core.enums import ScanStatus, ScanTrigger, Severity, SourceType
 from iceberg_core.fingerprint import CoarseLocator, fingerprint, secret_hash
 from iceberg_core.models import Finding, Scan, Source
-from sqlmodel import Session, col, select
+from sqlalchemy.sql.dml import Update
+from sqlmodel import Session, col, select, update
 
 PEPPER = b"the-active-pepper-32-bytes-long!"
 OLD_PEPPER = b"the-outgoing-pepper-32-bytes-ok!"
@@ -221,3 +223,84 @@ def test_reindex_preserves_clusters_under_the_new_key(
 
     first, second = _findings(session)
     assert first.correlation_id == second.correlation_id
+
+
+def _rekey_before_the_next_write(
+    session: Session, finding: Finding, *, new_hash: str, new_key: bytes
+) -> Callable[[], bool]:
+    """Stand in for ingest's pepper re-key committing in another session.
+
+    Fires once, immediately before maintenance's own UPDATE — the window the
+    review identified. ``synchronize_session=False`` is what makes it faithful:
+    the row moves on, the object maintenance already loaded does not, so the id
+    it is about to write was derived from a hash that no longer exists.
+    """
+    original = session.exec
+    state = {"fired": False}
+
+    def hook(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        if not state["fired"] and isinstance(statement, Update):
+            state["fired"] = True  # set first: the injected write re-enters here
+            session.exec(
+                update(Finding)
+                .where(col(Finding.id) == finding.id)
+                .values(
+                    secret_hash=new_hash,
+                    correlation_id=correlation_id(new_hash, key=new_key),
+                )
+                .execution_options(synchronize_session=False)
+            )
+        return original(statement, *args, **kwargs)
+
+    session.exec = hook  # type: ignore[method-assign]
+    return lambda: bool(state["fired"])
+
+
+def test_backfill_loses_a_race_with_a_pepper_rekey_rather_than_winning_it(
+    session: Session, make_scan: Callable[[], Scan]
+) -> None:
+    """An id is only right with respect to one hash.
+
+    Maintenance reads a hash, derives an id, and writes. If ingest re-keys the
+    same row in between, an unconditional write would leave a *populated* id
+    derived from a hash that is gone — which backfill never revisits (it selects
+    NULLs) and a re-sighting never repairs (it leaves populated ids alone). So
+    the write carries the hash it came from and matches nothing when it moved.
+    """
+    ingest_findings(session, make_scan(), [_payload(SECRET, "page-1")])
+    session.commit()
+    (finding,) = _findings(session)
+    assert finding.correlation_id is None
+    new_hash = "f" * 64
+
+    fired = _rekey_before_the_next_write(session, finding, new_hash=new_hash, new_key=KEY)
+    filled = fill_missing(session, KEY, batch=10)
+    session.commit()
+
+    assert fired(), "the interleaving never fired; backfill did not reach its write"
+    assert filled == 0  # the round reports what it actually changed
+    session.expire_all()
+    (after,) = _findings(session)
+    # The id belongs to the hash that is stored, not to the one maintenance read.
+    assert after.secret_hash == new_hash
+    assert after.correlation_id == correlation_id(new_hash, key=KEY)
+
+
+def test_reindex_loses_the_same_race(session: Session, make_scan: Callable[[], Scan]) -> None:
+    """`reindex_all` walks the same select/derive/write shape, so it needs the
+    same guard — a rotation running while ingest re-keys must not undo it."""
+    ingest_findings(session, make_scan(), [_payload(SECRET, "page-1")], correlation_key=KEY)
+    session.commit()
+    (finding,) = _findings(session)
+    new_key = secrets.token_bytes(32)
+    new_hash = "e" * 64
+
+    fired = _rekey_before_the_next_write(session, finding, new_hash=new_hash, new_key=new_key)
+    outcome = reindex_all(session, new_key, batch=10)
+    session.commit()
+
+    assert fired()
+    assert outcome.updated == 0
+    session.expire_all()
+    (after,) = _findings(session)
+    assert after.correlation_id == correlation_id(new_hash, key=new_key)

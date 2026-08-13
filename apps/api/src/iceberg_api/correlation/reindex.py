@@ -16,6 +16,15 @@ Two jobs, one derivation:
 
 Both run in id order with the select-then-update batch shape retention uses,
 and neither commits — the caller owns the transaction.
+
+**Every write re-asserts the hash it derived from.** An id is only correct with
+respect to a particular ``secret_hash``, and ingest's pepper re-key
+(`engines/ingest.py`) rewrites hash and id together in another session. A plain
+ORM write here would derive from the hash this session read, then flush after
+that re-key committed, leaving a *populated* id derived from a hash that no
+longer exists — which neither `fill_missing` (it only selects NULLs) nor an
+ordinary re-sighting would ever repair. Conditioning the UPDATE on the hash
+means the loser of that race simply updates nothing.
 """
 
 import uuid
@@ -24,9 +33,30 @@ from dataclasses import dataclass
 import structlog
 from iceberg_core.correlation import correlation_id
 from iceberg_core.models import Finding
-from sqlmodel import Session, col, select
+from sqlmodel import Session, col, select, update
 
 logger = structlog.get_logger()
+
+
+def _claim(db: Session, finding: Finding, derived: str, *, only_when_null: bool) -> bool:
+    """Write ``derived`` only while the row still holds the hash it came from.
+
+    Returns whether the row was written. ``only_when_null`` additionally keeps
+    the backfill from overwriting an id another writer has meanwhile set — the
+    repair pass exists to fill gaps, never to have an opinion about a populated
+    value.
+    """
+    statement = (
+        update(Finding)
+        .where(col(Finding.id) == finding.id)
+        .where(col(Finding.secret_hash) == finding.secret_hash)
+    )
+    if only_when_null:
+        statement = statement.where(col(Finding.correlation_id).is_(None))
+    result = db.exec(
+        statement.values(correlation_id=derived).execution_options(synchronize_session="fetch")
+    )
+    return int(result.rowcount) > 0
 
 
 @dataclass(slots=True)
@@ -52,12 +82,14 @@ def fill_missing(db: Session, key: bytes, *, batch: int) -> int:
             .limit(batch)
         )
     )
+    filled = 0
     for finding in rows:
-        finding.correlation_id = correlation_id(finding.secret_hash, key=key)
-        db.add(finding)
-    if rows:
-        logger.info("correlation_backfilled", filled=len(rows))
-    return len(rows)
+        derived = correlation_id(finding.secret_hash, key=key)
+        if _claim(db, finding, derived, only_when_null=True):
+            filled += 1
+    if filled:
+        logger.info("correlation_backfilled", filled=filled)
+    return filled
 
 
 def reindex_all(db: Session, key: bytes, *, batch: int) -> ReindexOutcome:
@@ -80,9 +112,9 @@ def reindex_all(db: Session, key: bytes, *, batch: int) -> ReindexOutcome:
         for finding in rows:
             outcome.scanned += 1
             derived = correlation_id(finding.secret_hash, key=key)
-            if finding.correlation_id != derived:
-                finding.correlation_id = derived
-                db.add(finding)
+            if finding.correlation_id != derived and _claim(
+                db, finding, derived, only_when_null=False
+            ):
                 outcome.updated += 1
         last_id = rows[-1].id
     logger.info("correlation_reindexed", scanned=outcome.scanned, updated=outcome.updated)

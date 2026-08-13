@@ -36,14 +36,30 @@ recorded, and every mutation writes a `FindingEvent` (the finding's history) plu
 
 **The required-evidence policy is enforced in the one triage choke point.**
 `ICEBERG_REMEDIATION_EVIDENCE_MIN_SEVERITY` (unset = off, the shipped default) makes
-`triage.apply` refuse `open → resolved` on findings at or above the bar unless a non-retracted
-action with at least one evidence link exists — before anything is written, all-or-nothing like
-`IllegalTransition`, surfaced as a 409. A recorded action with a link qualifies; verification is
+`triage.apply` refuse `open → resolved` on findings at or above the bar unless a **qualifying
+action for the current exposure cycle** exists — before anything is written, all-or-nothing like
+`IllegalTransition`, surfaced as a 409. Qualifying means three things, and the last two are the
+ones that are easy to get wrong: not retracted; carrying a link that still has a URL (retention
+reduces aged links to labels, and a label is a name for proof that is no longer reachable, so a
+non-empty list is not the test); and recorded **since the finding was last re-opened**. History
+survives a reopen deliberately — it is what makes the trail worth reading — but a credential that
+came back is evidence that what was done before did not close this exposure, so counting it would
+let a re-sighted secret be closed again on the strength of the attempt that failed. The reopen
+instant is read from the append-only `FindingEvent` trail rather than a new column. A recorded
+action with a live link qualifies; verification is
 a stronger signal, deliberately not required, so solo-analyst deployments are not forced into
 four-eyes flows. Exempt by design: `false_positive` and `accepted_risk` (judgements that no
 secret needed rotating) and reconciliation's auto-resolve (an inference from absence — and a
 reappearing credential reopens the finding with its remediation history intact, which ingest
-already guarantees).
+already guarantees — and, per the paragraph above, with the closure bar reset).
+
+**Scrubbing and the policy interact, so retention is checked against a lock.** The scrub writes
+`remediation_action` rows on the strength of a predicate that lives on `finding`; repeating the
+predicate in the UPDATE is necessary but not sufficient, because under READ COMMITTED the
+subquery sees the statement's own snapshot. The eligible findings are therefore selected
+`FOR UPDATE` first, so a reopen in flight blocks until the round commits and one that commits
+first drops out of the batch. Open findings keep their evidence, whichever order the two
+transactions arrive in.
 
 **Redaction is role-shaped.** Viewers see that an action happened — kind, actor, times,
 verification, link *labels* — but not the note or URLs, which responders write about internal

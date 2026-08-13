@@ -130,14 +130,23 @@ async def export_cluster(
     No snippet, no notes, no ``secret_hash`` — locations and states only. The
     download is audited with who and how much, because membership leaving the
     API as a file is worth a trail row.
+
+    **Complete or refused, never short.** Somebody works down this file to
+    decide the exposure is closed, so a truncated one is a wrong answer wearing
+    the shape of a right one. Past `MAX_EXPORT_MEMBERS` the route says so and
+    names the paginated query that can walk a cluster of any size.
     """
     aggregate = _load_cluster(db, correlation_id)
-    manifest = build_cluster_manifest(
-        aggregate,
-        # The export's own ceiling, not the screen's: this file is what somebody
-        # remediates from, and anything it drops is counted in `members_omitted`.
-        service.cluster_members(db, correlation_id, limit=service.MAX_EXPORT_MEMBERS),
-    )
+    # One row past the ceiling: enough to tell "too big" from "all of it".
+    members = service.cluster_members(db, correlation_id, limit=service.MAX_EXPORT_MEMBERS + 1)
+    if len(members) > service.MAX_EXPORT_MEMBERS:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"cluster has more than {service.MAX_EXPORT_MEMBERS} members and cannot be "
+            f"exported as one work order; walk it with "
+            f"GET /findings?correlation_id={correlation_id}",
+        )
+    manifest = build_cluster_manifest(correlation_id, members)
 
     audit.record(
         db,

@@ -69,11 +69,23 @@ async def list_findings(
     severity: Annotated[Severity | None, Query()] = None,
     assignee_id: Annotated[uuid.UUID | None, Query()] = None,
     suppressed: Annotated[bool | None, Query()] = None,
+    correlation_id: Annotated[str | None, Query(pattern=r"^[0-9a-f]{64}$")] = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
     cursor: Annotated[str | None, Query()] = None,
 ) -> Page[FindingRead]:
-    """The findings queue, filtered and in stable `(created_at, id)` order."""
+    """The findings queue, filtered and in stable `(created_at, id)` order.
+
+    ``correlation_id`` is the analyst-only one: it answers "everywhere this same
+    secret is", the capability the cluster routes gate to the roles that
+    remediate, and it is how a cluster too large to export as one file is walked
+    (`correlation/routes.py`). A viewer asking for it is refused rather than
+    quietly given an unfiltered queue.
+    """
     statement = select(Finding)
+    if correlation_id is not None:
+        if ROLE_RANK[user.role] < ROLE_RANK[UserRole.ANALYST]:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "correlation filtering is analyst-only")
+        statement = statement.where(col(Finding.correlation_id) == correlation_id)
     if source_id is not None:
         statement = statement.where(col(Finding.source_id) == source_id)
     if state is not None:

@@ -40,6 +40,12 @@ correlation_id = HMAC-SHA256(correlation_key, "iceberg.correlation.v1" ‖ secre
   is allowlisted (locations and states — no snippet, no notes) and each download is audited.
   `secret_hash` itself remains unexposed to every role, and a structural test pins that no
   engine-facing schema or engine setting ever grows a correlation field.
+- **The export is complete or refused, never short.** Its summary numbers are computed from the
+  members it lists, so the file cannot describe a membership it does not carry, and a cluster
+  past the export bound answers 409 pointing at `GET /findings?correlation_id=…`, which pages.
+  The detail screen's cap is a different thing — a rendering budget that says so on the page.
+  Somebody works down an export to decide an exposure is closed; a truncated one is a wrong
+  answer wearing the shape of a right one.
 
 **Scope.** This deployment is single-org by design (`CLAUDE.md` invariant 5), so "correlate
 within one organization only" reduces to: correlation is scoped to *this deployment's
@@ -55,6 +61,13 @@ The command is idempotent and restartable; a second run reporting `updated=0` is
 signal. There is deliberately **no previous-key window** — unlike fingerprints, nothing must
 *match across* the swap; clusters are simply recomputed. The reindex is audited
 (`correlation.reindexed`).
+
+Both maintenance paths — the backfill and the rotation walk — write **conditioned on the hash
+they derived from**. An id is only correct with respect to one `secret_hash`, and ingest's pepper
+re-key rewrites hash and id together in another session; an unconditional write could land after
+that commit and leave a *populated* id derived from a hash that no longer exists, which the
+backfill (it selects NULLs) and ordinary re-sighting (it leaves populated ids alone) would both
+skip forever. Conditioned, the loser of that race simply updates nothing and the re-key stands.
 
 **Interaction with pepper rotation (#64).** `correlation_id` is a function of `secret_hash`,
 so the ingest re-key branch recomputes it in the same statement that rewrites the hash. While a

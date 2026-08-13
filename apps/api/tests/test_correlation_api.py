@@ -251,48 +251,74 @@ def test_no_engine_facing_schema_mentions_correlation() -> None:
     assert [f for f in EngineSettings.model_fields if "correlation" in f.lower()] == []
 
 
-def test_the_export_counts_what_it_had_to_leave_out(
+def test_an_oversized_cluster_is_refused_rather_than_truncated(
     client: TestClient,
     api: str,
     clustered: dict[str, Any],
     analyst_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A truncated export must say so in the file. `finding_count` describes the
-    whole cluster, so without `members_omitted` a reader cannot tell a complete
-    export from one that silently stopped at the ceiling."""
+    """Somebody works down this file to decide an exposure is closed, so a short
+    one is a wrong answer in the shape of a right one. Refuse, and name the
+    query that can walk a cluster of any size."""
     from iceberg_api.correlation import service
 
     # The route reads the ceiling off the module at call time, so patching it
     # here is the same knob a deployment-sized cluster would hit.
     monkeypatch.setattr(service, "MAX_EXPORT_MEMBERS", 2)
 
-    manifest = client.get(
-        f"{api}/correlation/clusters/{CLUSTER_A}/export", headers=analyst_headers
-    ).json()
+    response = client.get(f"{api}/correlation/clusters/{CLUSTER_A}/export", headers=analyst_headers)
 
-    assert manifest["finding_count"] == 3  # the cluster is still described whole
-    assert len(manifest["members"]) == 2  # …but only two rows fitted
-    assert manifest["members_omitted"] == 1
+    assert response.status_code == 409
+    assert f"/findings?correlation_id={CLUSTER_A}" in response.json()["detail"]
 
 
-def test_a_complete_export_omits_nothing(
+def test_the_export_header_is_computed_from_the_body(
     client: TestClient, api: str, clustered: dict[str, Any], analyst_headers: dict[str, str]
 ) -> None:
+    """The counts are derived from the members listed, not from a separate
+    aggregate query, so the file cannot describe a membership it does not
+    carry — the failure that made a truncated work order dangerous."""
     manifest = client.get(
         f"{api}/correlation/clusters/{CLUSTER_A}/export", headers=analyst_headers
     ).json()
 
     assert len(manifest["members"]) == manifest["finding_count"] == 3
-    assert manifest["members_omitted"] == 0
+    assert manifest["source_count"] == len({m["source_id"] for m in manifest["members"]}) == 2
+    assert manifest["open_count"] == sum(1 for m in manifest["members"] if m["state"] == "open")
+    assert manifest["max_severity"] == "critical"
 
 
-def test_the_export_ceiling_is_larger_than_the_screens(
-    client: TestClient, api: str, analyst_headers: dict[str, str]
+def test_the_oversized_fallback_walks_the_cluster_a_page_at_a_time(
+    client: TestClient, api: str, clustered: dict[str, Any], analyst_headers: dict[str, str]
 ) -> None:
-    """The screen's cap is a rendering budget; the export's is a work-order
-    budget. Sharing one was how a 501-member cluster exported 500 rows under a
-    header claiming 501."""
-    from iceberg_api.correlation import service
+    """The 409 names `/findings?correlation_id=…`; that filter has to exist, be
+    paginated, and cover exactly the cluster."""
+    first = client.get(
+        f"{api}/findings",
+        params={"correlation_id": CLUSTER_A, "limit": 2},
+        headers=analyst_headers,
+    ).json()
 
-    assert service.MAX_EXPORT_MEMBERS > service.MAX_DETAIL_MEMBERS
+    assert len(first["items"]) == 2
+    rest = client.get(
+        f"{api}/findings",
+        params={"correlation_id": CLUSTER_A, "limit": 2, "cursor": first["next_cursor"]},
+        headers=analyst_headers,
+    ).json()
+    walked = {item["id"] for item in first["items"] + rest["items"]}
+    assert walked == {str(clustered[key].id) for key in ("a1", "a2", "a3")}
+
+
+def test_the_correlation_filter_is_analyst_only(
+    client: TestClient, api: str, clustered: dict[str, Any], viewer_headers: dict[str, str]
+) -> None:
+    """It answers "everywhere this same secret is" — the same capability the
+    cluster routes gate, so the queue must not be a side door into it."""
+    refused = client.get(
+        f"{api}/findings", params={"correlation_id": CLUSTER_A}, headers=viewer_headers
+    )
+    unfiltered = client.get(f"{api}/findings", headers=viewer_headers)
+
+    assert refused.status_code == 403
+    assert unfiltered.status_code == 200  # the queue itself stays open to viewers

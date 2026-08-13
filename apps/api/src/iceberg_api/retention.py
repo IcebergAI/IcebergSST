@@ -235,43 +235,58 @@ def _scrub_remediation_evidence(db: Session, days: int, *, at: datetime, batch: 
     written about the same internals.
 
     The window is measured from the finding's resolution (its ``updated_at``,
-    the same clock `_purge_findings` reads), and the eligibility predicates are
-    **repeated on the write** — a finding that re-opened between the select and
-    the update keeps its URLs, because its evidence is live again.
+    the same clock `_purge_findings` reads).
+
+    **The finding is locked, not merely re-read.** The scrub writes
+    ``remediation_action`` rows while the predicate that justifies it lives on
+    ``finding`` — two different rows, so repeating the predicate in the UPDATE
+    is not enough on its own: under READ COMMITTED the subquery is evaluated
+    against the statement's own snapshot, and a reopen committed just after that
+    snapshot is taken would still be invisible. Selecting the findings
+    ``FOR UPDATE`` first closes it from both sides: a reopen already in flight
+    blocks until this round commits, and one that commits first is re-evaluated
+    against the lock's predicates and drops out of the batch. (SQLite has no row
+    locks and its dialect omits the clause; there the re-select alone is the
+    guard, which is all a single-writer database needs.)
     """
     cutoff = _cutoff(days, at)
     if cutoff is None:
         return 0
 
-    # The finding this action belongs to must *still* be resolved and still be
-    # older than the window at write time. Repeated on the UPDATE rather than
-    # re-read from the selected object: the object was loaded by this statement,
-    # so a Python-side re-check would only ever see the value it was loaded
-    # with, and a concurrent reopen committed in the ingest session would not
-    # refresh it. Same reasoning, and the same shape, as `_purge_findings`.
-    eligible = (
-        select(col(RemediationAction.id))
-        .join(Finding, col(RemediationAction.finding_id) == col(Finding.id))
-        .where(col(RemediationAction.scrubbed_at).is_(None))
-        .where(col(Finding.state) == FindingState.RESOLVED)
-        .where(col(Finding.updated_at) < cutoff)
+    unscrubbed = select(col(RemediationAction.finding_id)).where(
+        col(RemediationAction.scrubbed_at).is_(None)
     )
-    candidates = list(db.exec(eligible.limit(batch)))
-    if not candidates:
+    locked = list(
+        db.exec(
+            select(col(Finding.id))
+            .where(col(Finding.state) == FindingState.RESOLVED)
+            .where(col(Finding.updated_at) < cutoff)
+            .where(col(Finding.id).in_(unscrubbed))
+            .order_by(col(Finding.id))
+            .limit(batch)
+            .with_for_update()
+        )
+    )
+    if not locked:
         return 0
 
+    candidates = list(
+        db.exec(
+            select(RemediationAction)
+            .where(col(RemediationAction.finding_id).in_(locked))
+            .where(col(RemediationAction.scrubbed_at).is_(None))
+        )
+    )
+
     scrubbed = 0
-    for action_id in candidates:
+    for action in candidates:
         # One statement per action: the scrubbed content is derived from the
-        # row's own JSON, so it cannot be expressed as a single bulk UPDATE —
-        # but each write still carries the predicates, and a row that stopped
-        # qualifying since the select simply updates nothing.
-        action = db.get(RemediationAction, action_id)
-        if action is None:
-            continue
+        # row's own JSON, so it cannot be expressed as a single bulk UPDATE.
+        # The predicates ride along anyway — cheap, and it keeps the write
+        # self-justifying rather than relying on the lock held above.
         result = db.exec(
             update(RemediationAction)
-            .where(col(RemediationAction.id) == action_id)
+            .where(col(RemediationAction.id) == action.id)
             .where(col(RemediationAction.scrubbed_at).is_(None))
             .where(
                 col(RemediationAction.finding_id).in_(
