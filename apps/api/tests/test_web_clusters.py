@@ -109,3 +109,33 @@ def test_finding_detail_shows_no_badge_to_a_viewer(
 
     assert "/clusters/" not in body
     assert "same secret in" not in body
+
+
+def test_a_source_off_the_end_of_the_page_still_appears(
+    client: TestClient,
+    make_source: Callable[..., Source],
+    make_finding: Callable[..., Finding],
+    as_analyst: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The topology's whole job is to show where the secret reached.
+
+    Building the sections from the member page meant a source with nothing
+    among the first `MAX_DETAIL_MEMBERS` rows disappeared from the page, and
+    each badge counted page rows while reading as a source total.
+    """
+    from iceberg_api.correlation import service
+
+    wiki = make_source(name="confluence-wiki")
+    share = make_source(name="finance-share")
+    make_finding(wiki, secret_hash=HASH, correlation_id=CLUSTER)
+    make_finding(wiki, secret_hash=HASH, correlation_id=CLUSTER)
+    make_finding(share, secret_hash=HASH, correlation_id=CLUSTER)
+
+    # Order is `(created_at, id)`, so a one-row page holds only the wiki's first.
+    monkeypatch.setattr(service, "MAX_DETAIL_MEMBERS", 1)
+    body = client.get(f"/clusters/{CLUSTER}").text
+
+    assert "finance-share" in body  # the source with no row on this page
+    assert "2 findings" in body  # the wiki's cluster count, not its page count
+    assert "Listing 1 of 2" in body  # …and the page says which it is showing

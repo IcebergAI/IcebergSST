@@ -8,6 +8,7 @@ console's default — "show me secrets that have actually spread" — is a
 the URL always says what the table shows.
 """
 
+import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Query, Request, Response
@@ -84,15 +85,24 @@ async def cluster_detail(
     analyst: WebAnalyst,
     db: SessionDep,
 ) -> Response:
-    """One exposure: every location of the same secret, grouped by source."""
+    """One exposure: every location of the same secret, grouped by source.
+
+    The sections come from the API's **source aggregates**, not from the member
+    page. Rebuilding them from the members was wrong twice over on a large
+    cluster: a source with nothing among the first `MAX_DETAIL_MEMBERS` rows
+    vanished from a topology whose whole job is to show where the secret
+    reached, and each badge counted page rows while reading as a source total.
+    The counts are now the cluster's; the rows under them are the page.
+    """
     cluster = await api.read_cluster(correlation_id=correlation_id, analyst=analyst, db=db)
 
-    members_by_source: dict[str, list[FindingRead]] = {}
-    names = {group.source_id: group.source_name for group in cluster.sources}
+    on_page: dict[uuid.UUID, list[FindingRead]] = {}
     for member in cluster.members:
-        members_by_source.setdefault(names.get(member.source_id, str(member.source_id)), []).append(
-            member
-        )
+        on_page.setdefault(member.source_id, []).append(member)
+
+    sections = [
+        {"source": group, "members": on_page.get(group.source_id, [])} for group in cluster.sources
+    ]
 
     return render_page(
         request,
@@ -100,7 +110,7 @@ async def cluster_detail(
         viewer,
         {
             "cluster": cluster,
-            "members_by_source": members_by_source,
+            "sections": sections,
             "truncated": len(cluster.members) < cluster.finding_count,
             "export_url": f"/api/v1/correlation/clusters/{cluster.correlation_id}/export",
         },

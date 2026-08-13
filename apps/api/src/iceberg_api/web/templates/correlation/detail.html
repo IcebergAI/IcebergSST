@@ -46,12 +46,20 @@
 </div>
 {% endif %}
 
-{% for source_name, members in members_by_source.items() %}
+{% for section in sections %}
 <section class="card section-gap">
   <div class="card-head">
-    <h2 class="section-title">{{ source_name }}</h2>
-    <span class="tag">{{ members | length }} finding{{ 's' if members | length != 1 }}</span>
+    <h2 class="section-title">{{ section.source.source_name }}</h2>
+    {#- The cluster's count for this source, not the page's: a source can have
+        findings here that the capped member list below does not reach. -#}
+    <span class="tag">{{ section.source.finding_count }} finding{{ 's' if section.source.finding_count != 1 }}</span>
+    {% if section.source.open_count %}
+    <span class="tag tag--c state-open"><span class="dot"></span>{{ section.source.open_count }} open</span>
+    {% endif %}
   </div>
+  {% if section.members | length < section.source.finding_count %}
+  <p class="hint">Listing {{ section.members | length }} of {{ section.source.finding_count }} here — the export carries every one.</p>
+  {% endif %}
   <div class="table-scroll">
     <table>
       <thead>
@@ -60,7 +68,7 @@
         </tr>
       </thead>
       <tbody>
-        {% for member in members %}
+        {% for member in section.members %}
         <tr>
           <td><span class="tag tag--c sev-{{ member.severity.value }}"><span class="dot"></span>{{ member.severity.value }}</span></td>
           <td>

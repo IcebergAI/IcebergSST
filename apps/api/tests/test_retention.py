@@ -593,3 +593,27 @@ def test_the_scrub_is_bounded_by_the_configured_batch(
 
     assert first.remediation_evidence_scrubbed == 1
     assert second.remediation_evidence_scrubbed == 1  # the rest, next beat
+
+
+def test_the_audit_row_quantifies_every_mutation_the_round_made(
+    session: Session, make_finding: Callable[..., Finding]
+) -> None:
+    """The trail is what an operator reads a year later, so a round that only
+    scrubbed evidence has to be countable from it. The detail is spread from
+    `PurgeResult` rather than listed by hand, so a future counter arrives in
+    the audit row and the CLI summary together or not at all."""
+    from dataclasses import fields
+
+    finding = make_finding(updated_at=LONG_AGO)
+    _action(session, finding)
+
+    result = retention.purge(session, _settings(retention_remediation_evidence_days=30), now=NOW)
+
+    assert result.remediation_evidence_scrubbed == 1
+    assert result.findings == 0  # nothing was deleted; the round is scrub-only
+    event = session.exec(
+        select(AuditEvent).where(col(AuditEvent.action) == AUDIT_RETENTION_PURGED)
+    ).one()
+    for field in fields(retention.PurgeResult):
+        assert field.name in event.detail, field.name
+    assert event.detail["remediation_evidence_scrubbed"] == "1"
