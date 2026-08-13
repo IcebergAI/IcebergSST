@@ -270,11 +270,18 @@ def _scrub_remediation_evidence(db: Session, days: int, *, at: datetime, batch: 
     if not locked:
         return 0
 
+    # Bounded by the same batch as everything else here. The lock above counts
+    # findings, but the rows this function *writes* are actions, and one finding
+    # can carry many: without this limit a `retention_batch_size` of 1 could
+    # still issue an unbounded number of updates in a round that is supposed to
+    # be the small one. The remainder is picked up on the next beat.
     candidates = list(
         db.exec(
             select(RemediationAction)
             .where(col(RemediationAction.finding_id).in_(locked))
             .where(col(RemediationAction.scrubbed_at).is_(None))
+            .order_by(col(RemediationAction.id))
+            .limit(batch)
         )
     )
 

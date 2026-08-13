@@ -574,3 +574,22 @@ def test_a_finding_reopened_mid_scrub_keeps_its_evidence(
     assert action.evidence_links[0]["url"] == "https://tickets.example.test/SEC-1"
     assert action.note is not None
     assert action.scrubbed_at is None
+
+
+def test_the_scrub_is_bounded_by_the_configured_batch(
+    session: Session, make_finding: Callable[..., Finding]
+) -> None:
+    """The lock counts findings, but the rows this pass *writes* are actions,
+    and one finding can carry many. Without a limit on the action query a
+    `retention_batch_size` of 1 still issued an unbounded number of updates in
+    the round that is meant to be the small one."""
+    finding = make_finding(updated_at=LONG_AGO)
+    for _ in range(3):
+        _action(session, finding)
+    settings = _settings(retention_remediation_evidence_days=30, retention_batch_size=1)
+
+    first = retention.purge(session, settings, now=NOW)
+    second = retention.purge(session, settings, now=NOW)
+
+    assert first.remediation_evidence_scrubbed == 1
+    assert second.remediation_evidence_scrubbed == 1  # the rest, next beat

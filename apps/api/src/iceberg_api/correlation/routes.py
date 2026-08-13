@@ -16,7 +16,6 @@ from typing import Annotated
 
 import structlog
 from fastapi import APIRouter, HTTPException, Path, Query, Response, status
-from iceberg_core.enums import FindingState
 from iceberg_core.models import (
     AUDIT_CORRELATION_CLUSTER_EXPORTED,
     AUDIT_TARGET_CORRELATION,
@@ -81,13 +80,6 @@ async def list_clusters(
     return Page(items=[_summary(a) for a in aggregates], next_cursor=next_cursor)
 
 
-def _load_cluster(db: SessionDep, correlation_id: str) -> service.ClusterAggregate:
-    aggregate = service.cluster_aggregate(db, correlation_id)
-    if aggregate is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "cluster not found")
-    return aggregate
-
-
 @router.get("/clusters/{correlation_id}")
 async def read_cluster(
     correlation_id: CorrelationIdPath,
@@ -96,39 +88,34 @@ async def read_cluster(
 ) -> ClusterDetail:
     """One cluster's topology: members grouped by source, each triageable.
 
-    The summary here describes the **whole** cluster and ``members`` is a page
-    of it (`MAX_DETAIL_MEMBERS`) — two statements, deliberately, because the
-    counts an analyst needs are of the cluster, not of the page. So the header
-    can legitimately exceed the list, and the console says so rather than
-    implying the page is the membership. A member purged between the two reads
-    is the same skew as one beyond the cap, and reads the same way. The export
-    is where that gap matters, and it has no aggregate at all.
-    """
-    aggregate = _load_cluster(db, correlation_id)
-    members = service.cluster_members(db, correlation_id)
-    if not members:
-        # Every member purged since the aggregate: the cluster stopped existing,
-        # and a page describing a cluster with no rows in it is a worse answer
-        # than the "not found" an unknown id already gets.
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "cluster not found")
+    **The summary and the breakdown are one statement.** Both come from the
+    per-source grouping, the header rolled up from the rows beneath it, so they
+    cannot describe different snapshots — and the per-source counts are of the
+    whole cluster rather than of whatever fitted on the page, which they were
+    not when derived from the member list.
 
-    groups: dict[uuid.UUID, ClusterSourceGroup] = {}
-    for finding, source_name in members:
-        group = groups.get(finding.source_id)
-        if group is None:
-            groups[finding.source_id] = group = ClusterSourceGroup(
-                source_id=finding.source_id,
-                source_name=source_name,
-                finding_count=0,
-                open_count=0,
-            )
-        group.finding_count += 1
-        if finding.state is FindingState.OPEN:
-            group.open_count += 1
+    ``members`` is deliberately still a page (`MAX_DETAIL_MEMBERS`): the counts
+    an analyst needs are of the cluster, not of the page, so the header can
+    exceed the list and the console renders "showing the first N of M". The
+    export is where completeness matters, and it reads no aggregate at all.
+    """
+    groups = service.cluster_source_aggregates(db, correlation_id)
+    if not groups:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "cluster not found")
+    aggregate = service.roll_up(correlation_id, groups)
+    members = service.cluster_members(db, correlation_id, limit=service.MAX_DETAIL_MEMBERS)
 
     return ClusterDetail(
         **_summary(aggregate).model_dump(),
-        sources=list(groups.values()),
+        sources=[
+            ClusterSourceGroup(
+                source_id=group.source_id,
+                source_name=group.source_name,
+                finding_count=group.finding_count,
+                open_count=group.open_count,
+            )
+            for group in groups
+        ],
         members=[FindingRead.model_validate(finding) for finding, _ in members],
     )
 

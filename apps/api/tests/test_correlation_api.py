@@ -390,3 +390,36 @@ def test_the_export_audit_counts_what_the_file_carried(
     ).one()
     assert manifest["finding_count"] == 2  # one member was purged mid-request
     assert event.detail["finding_count"] == "2"  # …and the trail agrees
+
+
+def test_the_detail_summary_and_its_breakdown_are_one_statement(
+    client: TestClient, api: str, clustered: dict[str, Any], analyst_headers: dict[str, str]
+) -> None:
+    """The header is rolled up from the per-source rows under it, so the two
+    cannot describe different snapshots — and the per-source counts are of the
+    whole cluster, not of whatever fitted on the member page."""
+    detail = client.get(f"{api}/correlation/clusters/{CLUSTER_A}", headers=analyst_headers).json()
+
+    assert detail["finding_count"] == sum(g["finding_count"] for g in detail["sources"])
+    assert detail["open_count"] == sum(g["open_count"] for g in detail["sources"])
+    assert detail["source_count"] == len(detail["sources"])
+
+
+def test_the_breakdown_counts_the_cluster_not_the_page(
+    client: TestClient,
+    api: str,
+    clustered: dict[str, Any],
+    analyst_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deriving the groups from the member list meant a cluster past the page
+    cap reported the page's per-source counts under a whole-cluster header."""
+    from iceberg_api.correlation import service
+
+    monkeypatch.setattr(service, "MAX_DETAIL_MEMBERS", 1)
+
+    detail = client.get(f"{api}/correlation/clusters/{CLUSTER_A}", headers=analyst_headers).json()
+
+    assert len(detail["members"]) == 1  # the page is capped…
+    assert detail["finding_count"] == 3  # …the counts are not
+    assert sum(g["finding_count"] for g in detail["sources"]) == 3

@@ -127,24 +127,88 @@ def list_clusters(
     return page, page[-1].correlation_id if has_more and page else None
 
 
-def cluster_aggregate(db: Session, correlation_id: str) -> ClusterAggregate | None:
-    """The whole-cluster aggregate, or None when no finding carries the id."""
-    row = db.execute(
-        _aggregate_query().where(col(Finding.correlation_id) == correlation_id)
-    ).first()
-    return None if row is None else _to_aggregate(row)
+@dataclass(frozen=True, slots=True)
+class SourceAggregate:
+    """A cluster's footprint in one source, over the whole cluster."""
+
+    source_id: uuid.UUID
+    source_name: str
+    finding_count: int
+    open_count: int
+    severity_rank: int
+    first_seen: datetime
+    last_activity: datetime
 
 
-def cluster_members(
-    db: Session, correlation_id: str, *, limit: int = MAX_DETAIL_MEMBERS
-) -> list[tuple[Finding, str]]:
+def cluster_source_aggregates(db: Session, correlation_id: str) -> list[SourceAggregate]:
+    """Per-source counts for the whole cluster, in one statement.
+
+    Two things follow from this being cluster-wide rather than derived from the
+    member page, and both were wrong before. A cluster larger than
+    `MAX_DETAIL_MEMBERS` used to report the *page's* per-source counts under a
+    whole-cluster header; and the header and the groups came from two separate
+    statements, so a concurrent purge could leave them disagreeing. Rolling the
+    header up from these rows (`roll_up`) makes one query the source of both.
+    """
+    rows = db.execute(
+        sa_select(
+            col(Finding.source_id),
+            col(Source.name),
+            func.count(col(Finding.id)),
+            func.sum(_OPEN),
+            func.max(_SEVERITY_RANK),
+            func.min(col(Finding.created_at)),
+            func.max(col(Finding.updated_at)),
+        )
+        .join(Source, col(Finding.source_id) == col(Source.id))
+        .where(col(Finding.correlation_id) == correlation_id)
+        .group_by(col(Finding.source_id), col(Source.name))
+        .order_by(col(Source.name))
+    )
+    return [_to_source_aggregate(row) for row in rows]
+
+
+def _to_source_aggregate(row: Any) -> SourceAggregate:
+    source_id, source_name, findings, open_count, severity_rank, first_seen, last_activity = row
+    return SourceAggregate(
+        source_id=source_id,
+        source_name=source_name,
+        finding_count=int(findings),
+        open_count=int(open_count),
+        severity_rank=int(severity_rank),
+        first_seen=first_seen,
+        last_activity=last_activity,
+    )
+
+
+def roll_up(correlation_id: str, groups: list[SourceAggregate]) -> ClusterAggregate:
+    """The cluster summary as the sum of its per-source rows.
+
+    Pure, and derived from the same statement the groups came from, so the
+    header can never describe a different snapshot than the breakdown under it.
+    Every field is expressible this way — that is why one grouped query can
+    serve both.
+    """
+    return ClusterAggregate(
+        correlation_id=correlation_id,
+        finding_count=sum(group.finding_count for group in groups),
+        source_count=len(groups),
+        open_count=sum(group.open_count for group in groups),
+        max_severity=_SEVERITY_BY_RANK[max(group.severity_rank for group in groups)],
+        first_seen=min(group.first_seen for group in groups),
+        last_activity=max(group.last_activity for group in groups),
+    )
+
+
+def cluster_members(db: Session, correlation_id: str, *, limit: int) -> list[tuple[Finding, str]]:
     """Members with their source names, `(created_at, id)` order, capped.
 
-    The cap is a parameter rather than a constant because the two callers mean
-    different things by it. The detail screen's is a rendering budget: it shows
-    a page and says so. The export's is a refusal threshold — it asks for one
-    row more than it will accept, so that "the cluster is too big" and "here is
-    the whole cluster" are distinguishable without a second count query.
+    The cap is a required parameter rather than a default because the two
+    callers mean different things by it, and neither should inherit the other's
+    silently. The detail screen's is a rendering budget: it shows a page and
+    says so. The export's is a refusal threshold — it asks for one row more
+    than it will accept, so that "the cluster is too big" and "here is the
+    whole cluster" are distinguishable without a second count query.
     """
     return list(
         db.exec(

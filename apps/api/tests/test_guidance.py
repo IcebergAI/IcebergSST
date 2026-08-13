@@ -1,5 +1,7 @@
 """The remediation-guidance catalog (#142, ADR 0012): valid, complete, honest."""
 
+from pathlib import Path
+
 import pytest
 import yaml
 from iceberg_api.remediation.guidance import (
@@ -66,3 +68,21 @@ def test_lookup_reports_which_entry_was_served() -> None:
     assert matched_specific == "rule"
     assert matched_default == "default"
     assert fallback is catalog.entries["default"]
+
+
+def test_a_malformed_catalog_stops_the_app_from_starting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ADR 0012 says loud failure, and lazily loud is not loud: validating on
+    the first request that happens to need guidance means a packaging mistake
+    passes the deploy's health check and surfaces as a 500 on somebody's
+    finding page. `create_app` loads the catalog itself."""
+    from iceberg_api.app import create_app
+    from iceberg_api.remediation import guidance
+
+    guidance.load_catalog.cache_clear()
+    monkeypatch.setattr(guidance, "CATALOG_PATH", Path("/nonexistent/guidance.yaml"))
+    monkeypatch.setattr("iceberg_api.app.load_catalog", guidance.load_catalog)
+    try:
+        with pytest.raises(guidance.GuidanceError, match="unreadable"):
+            create_app(background=False)
+    finally:
+        guidance.load_catalog.cache_clear()
