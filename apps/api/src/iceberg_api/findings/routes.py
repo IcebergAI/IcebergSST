@@ -17,20 +17,24 @@ from typing import Annotated
 
 import structlog
 from fastapi import APIRouter, HTTPException, Query, status
-from iceberg_core.enums import FindingState, Severity
+from iceberg_core.enums import FindingState, Severity, UserRole
 from iceberg_core.models import Finding, FindingEvent, User
+from sqlalchemy import func
 from sqlmodel import col, select
 
-from iceberg_api.auth.dependencies import CsrfProtected, SessionDep
-from iceberg_api.auth.rbac import AnalystUser, ViewerUser
+from iceberg_api.auth.dependencies import CsrfProtected, SessionDep, SettingsDep
+from iceberg_api.auth.rbac import ROLE_RANK, AnalystUser, ViewerUser
 from iceberg_api.findings import triage
 from iceberg_api.findings.schemas import (
+    CorrelationInfo,
     FindingDetail,
     FindingEventRead,
     FindingRead,
     FindingUpdate,
 )
 from iceberg_api.pagination import DEFAULT_LIMIT, MAX_LIMIT, after, build_page, position
+from iceberg_api.remediation import service as remediation
+from iceberg_api.remediation.schemas import RemediationRead, RemediationReadRedacted
 from iceberg_api.schemas import Page
 
 router = APIRouter(prefix="/findings", tags=["findings"])
@@ -65,11 +69,23 @@ async def list_findings(
     severity: Annotated[Severity | None, Query()] = None,
     assignee_id: Annotated[uuid.UUID | None, Query()] = None,
     suppressed: Annotated[bool | None, Query()] = None,
+    correlation_id: Annotated[str | None, Query(pattern=r"^[0-9a-f]{64}$")] = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
     cursor: Annotated[str | None, Query()] = None,
 ) -> Page[FindingRead]:
-    """The findings queue, filtered and in stable `(created_at, id)` order."""
+    """The findings queue, filtered and in stable `(created_at, id)` order.
+
+    ``correlation_id`` is the analyst-only one: it answers "everywhere this same
+    secret is", the capability the cluster routes gate to the roles that
+    remediate, and it is how a cluster too large to export as one file is walked
+    (`correlation/routes.py`). A viewer asking for it is refused rather than
+    quietly given an unfiltered queue.
+    """
     statement = select(Finding)
+    if correlation_id is not None:
+        if ROLE_RANK[user.role] < ROLE_RANK[UserRole.ANALYST]:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "correlation filtering is analyst-only")
+        statement = statement.where(col(Finding.correlation_id) == correlation_id)
     if source_id is not None:
         statement = statement.where(col(Finding.source_id) == source_id)
     if state is not None:
@@ -95,6 +111,40 @@ async def list_findings(
     return build_page(rows, limit=limit, read=FindingRead.model_validate)
 
 
+def _correlation_info(db: SessionDep, finding: Finding, user: User) -> CorrelationInfo | None:
+    """The finding's cluster counts — for analysts, on findings that have an id.
+
+    Role-shaped rather than a separate route: viewers get ``null`` in the same
+    field, because the comparison oracle is scoped to the roles that remediate
+    (ADR 0011; the module docstring in `schemas.py` carries the argument).
+    """
+    if ROLE_RANK[user.role] < ROLE_RANK[UserRole.ANALYST] or finding.correlation_id is None:
+        return None
+    findings, sources = db.exec(
+        select(
+            func.count(col(Finding.id)),
+            func.count(col(Finding.source_id).distinct()),
+        ).where(col(Finding.correlation_id) == finding.correlation_id)
+    ).one()
+    return CorrelationInfo(
+        correlation_id=finding.correlation_id,
+        finding_count=int(findings),
+        source_count=int(sources),
+    )
+
+
+def _remediations(
+    db: SessionDep, finding_id: uuid.UUID, user: User
+) -> list[RemediationRead | RemediationReadRedacted]:
+    """The finding's actions in the caller's shape (#142): viewers get the
+    fact of each action, not its note or link URLs."""
+    redacted = ROLE_RANK[user.role] < ROLE_RANK[UserRole.ANALYST]
+    return [
+        remediation.serialize(action, redacted=redacted)
+        for action in remediation.actions_for(db, finding_id)
+    ]
+
+
 @router.get("/{finding_id}")
 async def read_finding(finding_id: uuid.UUID, user: ViewerUser, db: SessionDep) -> FindingDetail:
     """One finding and its full history — who changed it, when, and why."""
@@ -102,6 +152,8 @@ async def read_finding(finding_id: uuid.UUID, user: ViewerUser, db: SessionDep) 
     return FindingDetail(
         **FindingRead.model_validate(finding).model_dump(),
         events=[FindingEventRead.model_validate(event) for event in _history(db, finding_id)],
+        correlation=_correlation_info(db, finding, user),
+        remediations=_remediations(db, finding_id, user),
     )
 
 
@@ -111,6 +163,7 @@ async def update_finding(
     changes: FindingUpdate,
     analyst: AnalystUser,
     db: SessionDep,
+    settings: SettingsDep,
 ) -> FindingDetail:
     """Triage a finding: change its state, assign it, or annotate it.
 
@@ -128,9 +181,19 @@ async def update_finding(
                 status.HTTP_422_UNPROCESSABLE_CONTENT, "assignee is not an active user"
             )
 
+    # The required-evidence policy (#142): built from settings here, enforced
+    # inside `apply` so a resolution can never sneak around it through another
+    # door — the web triage route reaches this same handler (invariant 4).
+    policy = remediation.EvidencePolicy(min_severity=settings.remediation_evidence_min_severity)
+
+    def _evidence(target: Finding) -> bool:
+        if not policy.applies_to(target.severity):
+            return True
+        return remediation.qualifying_action_exists(db, target.id)
+
     try:
-        triage.apply(db, finding, changes, actor_id=analyst.id)
-    except triage.IllegalTransition as exc:
+        triage.apply(db, finding, changes, actor_id=analyst.id, evidence_check=_evidence)
+    except (triage.IllegalTransition, triage.EvidenceRequired) as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
     db.commit()
@@ -138,4 +201,6 @@ async def update_finding(
     return FindingDetail(
         **FindingRead.model_validate(finding).model_dump(),
         events=[FindingEventRead.model_validate(event) for event in _history(db, finding_id)],
+        correlation=_correlation_info(db, finding, analyst),
+        remediations=_remediations(db, finding_id, analyst),
     )

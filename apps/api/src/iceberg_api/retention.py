@@ -46,8 +46,9 @@ from iceberg_core.models import (
     AuditEvent,
     Finding,
     FindingEvent,
+    RemediationAction,
 )
-from sqlmodel import Session, col, delete, select
+from sqlmodel import Session, col, delete, select, update
 
 from iceberg_api import audit
 
@@ -60,14 +61,22 @@ PURGEABLE_RESOLUTIONS = (FindingResolution.AUTO,)
 
 @dataclass(frozen=True, slots=True)
 class PurgeResult:
-    """What one retention round deleted."""
+    """What one retention round deleted (or, for evidence links, scrubbed)."""
 
     findings: int = 0
     finding_events: int = 0
     audit_events: int = 0
+    #: Remediation actions whose evidence-link URLs were reduced to labels
+    #: (#142). The rows survive; only where-the-proof-lives is aged out.
+    remediation_evidence_scrubbed: int = 0
 
     def total(self) -> int:
-        return self.findings + self.finding_events + self.audit_events
+        return (
+            self.findings
+            + self.finding_events
+            + self.audit_events
+            + self.remediation_evidence_scrubbed
+        )
 
 
 def purge(
@@ -86,8 +95,16 @@ def purge(
     # surviving findings*, which is the number an operator is asking about.
     events = _purge_finding_events(db, settings.retention_finding_events_days, at=at, batch=batch)
     audits = _purge_audit_events(db, settings.retention_audit_events_days, at=at, batch=batch)
+    scrubbed = _scrub_remediation_evidence(
+        db, settings.retention_remediation_evidence_days, at=at, batch=batch
+    )
 
-    result = PurgeResult(findings=findings, finding_events=events, audit_events=audits)
+    result = PurgeResult(
+        findings=findings,
+        finding_events=events,
+        audit_events=audits,
+        remediation_evidence_scrubbed=scrubbed,
+    )
     if result.total() == 0:
         db.commit()
         return result
@@ -106,6 +123,7 @@ def purge(
             "resolved_findings_days": str(settings.retention_resolved_findings_days),
             "finding_events_days": str(settings.retention_finding_events_days),
             "audit_events_days": str(settings.retention_audit_events_days),
+            "remediation_evidence_days": str(settings.retention_remediation_evidence_days),
         },
     )
     db.commit()
@@ -204,6 +222,98 @@ def _purge_audit_events(db: Session, days: int, *, at: datetime, batch: int) -> 
 
     db.exec(delete(AuditEvent).where(col(AuditEvent.id).in_(eligible)))
     return len(eligible)
+
+
+def _scrub_remediation_evidence(db: Session, days: int, *, at: datetime, batch: int) -> int:
+    """Reduce evidence links to labels on long-resolved findings (#142).
+
+    A scrub, not a delete: the remediation record — that something was done, by
+    whom, of what kind, verified or not — is the decision trail and is never
+    deleted here. What ages out is *where the proof lives*: ticket and console
+    URLs name internal systems, and their value decays once the finding has
+    stayed resolved past the window. The note goes with them; it is free text
+    written about the same internals.
+
+    The window is measured from the finding's resolution (its ``updated_at``,
+    the same clock `_purge_findings` reads).
+
+    **The finding is locked, not merely re-read.** The scrub writes
+    ``remediation_action`` rows while the predicate that justifies it lives on
+    ``finding`` — two different rows, so repeating the predicate in the UPDATE
+    is not enough on its own: under READ COMMITTED the subquery is evaluated
+    against the statement's own snapshot, and a reopen committed just after that
+    snapshot is taken would still be invisible. Selecting the findings
+    ``FOR UPDATE`` first closes it from both sides: a reopen already in flight
+    blocks until this round commits, and one that commits first is re-evaluated
+    against the lock's predicates and drops out of the batch. (SQLite has no row
+    locks and its dialect omits the clause; there the re-select alone is the
+    guard, which is all a single-writer database needs.)
+    """
+    cutoff = _cutoff(days, at)
+    if cutoff is None:
+        return 0
+
+    unscrubbed = select(col(RemediationAction.finding_id)).where(
+        col(RemediationAction.scrubbed_at).is_(None)
+    )
+    locked = list(
+        db.exec(
+            select(col(Finding.id))
+            .where(col(Finding.state) == FindingState.RESOLVED)
+            .where(col(Finding.updated_at) < cutoff)
+            .where(col(Finding.id).in_(unscrubbed))
+            .order_by(col(Finding.id))
+            .limit(batch)
+            .with_for_update()
+        )
+    )
+    if not locked:
+        return 0
+
+    # Bounded by the same batch as everything else here. The lock above counts
+    # findings, but the rows this function *writes* are actions, and one finding
+    # can carry many: without this limit a `retention_batch_size` of 1 could
+    # still issue an unbounded number of updates in a round that is supposed to
+    # be the small one. The remainder is picked up on the next beat.
+    candidates = list(
+        db.exec(
+            select(RemediationAction)
+            .where(col(RemediationAction.finding_id).in_(locked))
+            .where(col(RemediationAction.scrubbed_at).is_(None))
+            .order_by(col(RemediationAction.id))
+            .limit(batch)
+        )
+    )
+
+    scrubbed = 0
+    for action in candidates:
+        # One statement per action: the scrubbed content is derived from the
+        # row's own JSON, so it cannot be expressed as a single bulk UPDATE.
+        # The predicates ride along anyway — cheap, and it keeps the write
+        # self-justifying rather than relying on the lock held above.
+        result = db.exec(
+            update(RemediationAction)
+            .where(col(RemediationAction.id) == action.id)
+            .where(col(RemediationAction.scrubbed_at).is_(None))
+            .where(
+                col(RemediationAction.finding_id).in_(
+                    select(col(Finding.id))
+                    .where(col(Finding.state) == FindingState.RESOLVED)
+                    .where(col(Finding.updated_at) < cutoff)
+                )
+            )
+            .values(
+                evidence_links=[
+                    {"label": link.get("label", "evidence"), "scrubbed": True}
+                    for link in action.evidence_links
+                ],
+                note=None,
+                scrubbed_at=at,
+            )
+            .execution_options(synchronize_session="fetch")
+        )
+        scrubbed += int(result.rowcount)
+    return scrubbed
 
 
 __all__ = ["PURGEABLE_RESOLUTIONS", "PurgeResult", "purge"]

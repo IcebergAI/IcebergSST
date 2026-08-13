@@ -26,10 +26,11 @@ import structlog
 from iceberg_core.config import ApiSettings, get_api_settings
 from iceberg_core.db import session_scope
 from iceberg_core.metrics import QUEUE_DEPTH
-from iceberg_core.secrets import SecretStore, build_secret_store
+from iceberg_core.secrets import SecretStore, SecretStoreError, build_secret_store
 from iceberg_core.tasks import SCAN_TASK_QUEUE
 
 from iceberg_api import retention, suppressions
+from iceberg_api.correlation import reindex
 from iceberg_api.dispatch import Dispatcher, build_dispatcher
 from iceberg_api.engines import fleet
 from iceberg_api.notifications import dispatch as notification_dispatch
@@ -100,6 +101,21 @@ def run_once(
         # gets retried on the next beat instead of losing the alert.
         with session_scope() as db:
             notification_dispatch.deliver_pending(db, resolved, secret_store, now=at)
+        # Correlation-id repair (ADR 0011). A no-op unless the key is configured
+        # and some row is missing its id — which happens whenever rows predate
+        # the key or ingest ran while the secret store was unreadable. Runs in
+        # the round rather than at request time because it is a table walk, and
+        # because ingest deliberately fails open rather than waiting on it.
+        try:
+            correlation_key = secret_store.get_correlation_key()
+        except SecretStoreError:
+            logger.warning("maintenance_correlation_key_unavailable")
+            correlation_key = None
+        if correlation_key is not None:
+            with session_scope() as db:
+                reindex.fill_missing(
+                    db, correlation_key, batch=resolved.correlation_backfill_batch_size
+                )
         # Retention (#73). A no-op unless the deployment configured a window —
         # this database is evidence, so deleting any of it is opt-in. Last in the
         # round because it is the only job that can be slow on a database that has

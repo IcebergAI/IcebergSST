@@ -54,6 +54,11 @@
           <div class="rail-group-label">Workspace</div>
           {{ nav_link('/', 'ic-home', 'Overview', path == '/') }}
           {{ nav_link('/findings', 'ic-finding', 'Findings', path.startswith('/findings')) }}
+          {#- Clusters is analyst+: the routes behind it 403 a viewer, so the
+              link would only offer them an error page (see rbac note below). -#}
+          {% if role in ('analyst', 'admin') %}
+          {{ nav_link('/clusters', 'ic-cluster', 'Clusters', path.startswith('/clusters')) }}
+          {% endif %}
           {{ nav_link('/scans', 'ic-scan', 'Scans', path.startswith('/scans')) }}
         </div>
         <div class="rail-group">

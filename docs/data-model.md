@@ -94,6 +94,10 @@ authoritative).
   display metadata (ADR 0006).
 - `redacted_snippet` (masked context; **no plaintext**)
 - `secret_hash` (salted/peppered), `entropy`, `confidence`, `severity`
+- `correlation_id` (nullable, indexed — ADR 0011): API-minted equality label derived from
+  `secret_hash` under a dedicated key; `GROUP BY` on it *is* the exposure-cluster view. Null when
+  the key is unconfigured or the row predates it; the maintenance loop backfills and
+  `reindex-correlation` rotates.
 - `state`: enum `open | false_positive | accepted_risk | resolved`
 - `resolution`: enum `null | manual | auto` (auto = disappeared on re-scan)
 - `assignee_id` (FK User, nullable), `notes`
@@ -101,6 +105,20 @@ authoritative).
   **recorded, not discarded** (ADR 0008). A finding is *active* when it is `open` and
   `suppressed_at` is null; an expiring suppression returns it to the active view.
 - `first_seen_scan_id`, `last_seen_scan_id`, `created_at`, `updated_at`
+
+### RemediationAction
+What was done about an exposure, with evidence (#142, ADR 0012). Content is **write-once**;
+verification is one-way and retraction set-once — corrections are new rows, and every change
+writes `FindingEvent` + `AuditEvent` rows, which is where the immutable history lives.
+- `id`, `finding_id` (FK, CASCADE — the action is part of the finding's record), `actor_id`
+  (FK User, SET NULL — the record outlives the account)
+- `kind`: enum `revoke | rotate | scope_reduce | remove_source | other`
+- `occurred_at` (when performed, per the responder; `created_at` is when recorded), `note`
+- `evidence_links`: JSON `[{url, label}]` — links to proof, never uploaded bytes; after the
+  retention scrub, `[{label, scrubbed: true}]` with `scrubbed_at` set
+- `guidance_version` — the catalog version shown at recording time
+- `verification`: enum `unverified | verified`, `verified_by_id`, `verified_at`
+- `retracted_at`, `retracted_by_id`, `retracted_reason`
 
 ### AuditEvent
 Append-only audit trail for administrative actions — everything `FindingEvent` does not cover,

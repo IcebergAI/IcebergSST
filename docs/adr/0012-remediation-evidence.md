@@ -1,0 +1,104 @@
+# ADR 0012 — Rotation guidance & remediation evidence
+
+**Status:** Accepted
+
+## Context
+Closing a finding records a state change and, optionally, a comment. Nothing distinguishes "the
+key was revoked, here is the ticket" from an administrative click, which makes closure reporting
+untrustworthy and gives responders no provider-aware advice at the moment they need it (#142).
+
+Three constraints shape the design: the platform must never execute rotation itself (non-goal),
+must never store replacement credentials (non-goal), and has no file/blob storage anywhere — a
+deliberate absence this feature should not quietly reverse.
+
+## Decision
+
+**Guidance is a versioned catalog shipped with the API**, not with rule packs.
+`apps/api/src/iceberg_api/remediation/guidance.yaml` maps rule ids to advice split into the four
+actions the issue names — **revoke, rotate, scope-reduce, remove-source** — with a required
+`default` entry for rules without specific advice (`GET /remediation/guidance/{rule_id}` says
+which entry answered). Rule packs live in engine images and report over a closed wire schema;
+guidance riding them would couple advice releases to engine rollouts for content only the API
+renders. The catalog is data in the invariant-3 sense — versioned and reviewed in git like a
+rule pack — and its `version` is stamped onto every action recorded while it is live, so "what
+were they told to do" survives catalog changes. A DB-backed, admin-editable catalog is named
+future work, not built.
+
+**A remediation action is a structured record with evidence links, not uploads.**
+`remediation_action` rows carry: kind (the four verbs plus `other`), actor, when it was
+performed vs when recorded, a note, up to ten evidence links (`{url, label}` — http(s) only, no
+embedded userinfo, because a credential-bearing URL submitted as evidence would be this
+product's own finding), the guidance version, a one-way verification (who/when), and a set-once
+retraction (who/when/why). **Content is write-once**: a wrong record is retracted and a new one
+recorded, and every mutation writes a `FindingEvent` (the finding's history) plus an
+`AuditEvent` (`remediation.recorded|verified|retracted`) — the append-only trail is the
+"immutable audit events" the acceptance criteria require, so the row itself can stay simple.
+
+**The required-evidence policy is enforced in the one triage choke point.**
+`ICEBERG_REMEDIATION_EVIDENCE_MIN_SEVERITY` (unset = off, the shipped default) makes
+`triage.apply` refuse `open → resolved` on findings at or above the bar unless a **qualifying
+action for the current exposure cycle** exists — before anything is written, all-or-nothing like
+`IllegalTransition`, surfaced as a 409. Qualifying means three things, and the last two are the
+ones that are easy to get wrong: not retracted; carrying a link that still has a URL (retention
+reduces aged links to labels, and a label is a name for proof that is no longer reachable, so a
+non-empty list is not the test); and recorded **since the finding was last re-opened**. History
+survives a reopen deliberately — it is what makes the trail worth reading — but a credential that
+came back is evidence that what was done before did not close this exposure, so counting it would
+let a re-sighted secret be closed again on the strength of the attempt that failed. The reopen
+instant is read from the append-only `FindingEvent` trail rather than a new column. A recorded
+action with a live link qualifies; verification is
+a stronger signal, deliberately not required, so solo-analyst deployments are not forced into
+four-eyes flows. Exempt by design: `false_positive` and `accepted_risk` (judgements that no
+secret needed rotating) and reconciliation's auto-resolve (an inference from absence — and a
+reappearing credential reopens the finding with its remediation history intact, which ingest
+already guarantees — and, per the paragraph above, with the closure bar reset).
+
+**The policy check locks the evidence it relies on.** It authorises a write to a *different*
+row — the finding's state — so an ordinary read leaves a window in which a retraction commits
+between the check and the resolution, and the finding lands resolved on evidence that no longer
+qualifies. The qualifying actions are selected `FOR UPDATE`, which orders the two: a retraction
+arriving first is seen by the check, and one arriving second waits and lands after a resolution
+that was correct at the moment it committed.
+
+**Scrubbing and the policy interact, so retention is checked against a lock.** The scrub writes
+`remediation_action` rows on the strength of a predicate that lives on `finding`; repeating the
+predicate in the UPDATE is necessary but not sufficient, because under READ COMMITTED the
+subquery sees the statement's own snapshot. The eligible findings are therefore selected
+`FOR UPDATE` first, so a reopen in flight blocks until the round commits and one that commits
+first drops out of the batch. Open findings keep their evidence, whichever order the two
+transactions arrive in.
+
+**Redaction is role-shaped.** Viewers see that an action happened — kind, actor, times,
+verification, link *labels* — but not the note or URLs, which responders write about internal
+systems. Analysts see everything. One route serves both shapes.
+
+**Retention scrubs, never deletes.** `ICEBERG_RETENTION_REMEDIATION_EVIDENCE_DAYS` (off by
+default) reduces links to labels and drops the note once a finding has stayed resolved past the
+window, marking `scrubbed_at`. The record of who did what survives; only where-the-proof-lives
+ages out. Rows are deleted solely by the cascade when retention purges their finding under its
+own rules.
+
+**"Reappearing or live credentials reopen" needs no separate liveness path.** Credential
+validation landed alongside this work (ADR 0010), and a validation result only ever reaches the
+API *attached to a sighting* — the engine validates what it just detected, so `_record_validation`
+is only reached from the ingest path that already reopens a resolved finding. A live credential is
+therefore a re-sighted one, and the existing reopen covers both halves of the criterion with the
+remediation history intact. A validator that could report on a credential nobody re-detected would
+change that, and should reopen through the same branch rather than growing a second one.
+
+## Alternatives considered
+- **Guidance in rule packs.** Couples advice to engine rollouts; forces the `extra="forbid"`
+  wire schema to grow; puts operator-facing prose in every engine image. Rejected.
+- **File uploads for evidence.** The first blob store in the system: a new deployment surface,
+  a redaction problem (screenshots of consoles full of other secrets), and its own retention
+  regime. Rejected in favour of links; revisit only as an explicit decision.
+- **Fully event-sourced actions.** The append-only trail already exists (`FindingEvent`,
+  `AuditEvent`); a second temporal model for the same facts buys nothing.
+
+## Consequences
+- Closure reporting can distinguish evidenced remediation from administrative closure, and
+  reviewers can follow the links while they live.
+- The evidence bar is opt-in; enabling it changes analyst workflow for high-severity findings
+  (record first, then resolve) and is refused with an actionable 409 until then.
+- Guidance quality is a documentation concern with a review process (PRs against the YAML),
+  not a code path.

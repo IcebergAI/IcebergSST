@@ -7,6 +7,7 @@ import pytest
 from conftest import RecordingDispatcher
 from fastapi.testclient import TestClient
 from iceberg_api.scans import service
+from iceberg_core.correlation import correlation_id
 from iceberg_core.enums import (
     FindingResolution,
     FindingState,
@@ -231,6 +232,23 @@ def test_findings_are_stored_with_no_place_for_a_plaintext_secret(
     assert finding.state is FindingState.OPEN
     assert finding.first_seen_scan_id == finding.last_seen_scan_id == fixture.scan.id
     assert finding.redacted_snippet.endswith("[16 chars redacted]")
+
+
+def test_the_results_route_derives_the_correlation_id(
+    scan_fixture: Fixture, secret_store: EnvKeyBackend
+) -> None:
+    """The submit route reads the key API-side and derives the id at ingest
+    (ADR 0011) — the payload has no correlation field for an engine to fill."""
+    fixture = scan_fixture
+    task = fixture.fetch_task()
+
+    response = fixture.report(task, findings=[_finding_payload()])
+
+    assert response.status_code == 200
+    finding = fixture.session.exec(select(Finding)).one()
+    key = secret_store.get_correlation_key()
+    assert key is not None
+    assert finding.correlation_id == correlation_id(finding.secret_hash, key=key)
 
 
 def test_a_replayed_submission_does_not_duplicate_findings(scan_fixture: Fixture) -> None:

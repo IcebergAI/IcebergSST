@@ -15,7 +15,8 @@ the purge runs and deletes nothing.
 | `ICEBERG_RETENTION_RESOLVED_FINDINGS_DAYS` | `0` (keep forever) | Findings **auto-resolved** longer ago than this. |
 | `ICEBERG_RETENTION_FINDING_EVENTS_DAYS` | `0` (keep forever) | `FindingEvent` rows older than this, on findings that are not open. |
 | `ICEBERG_RETENTION_AUDIT_EVENTS_DAYS` | `0` (keep forever) | `AuditEvent` rows older than this. |
-| `ICEBERG_RETENTION_BATCH_SIZE` | `1000` | Rows per table per round. |
+| `ICEBERG_RETENTION_REMEDIATION_EVIDENCE_DAYS` | `0` (keep forever) | **Scrubbed, not deleted** (ADR 0012): evidence-link URLs and notes on remediation actions whose finding has stayed resolved this long are reduced to labels. The action rows — who did what, verified or not — survive. |
+| `ICEBERG_RETENTION_BATCH_SIZE` | `1000` | Rows per table (or scrub round) per beat. |
 
 The finding clock runs from the **decision**, not the first sighting: `updated_at` moves when the
 finding is resolved, so a secret found two years ago and auto-resolved yesterday is one day old

@@ -40,16 +40,25 @@ def test_a_response_never_carries_the_secret_hash(
     make_user: Callable[..., User],
     login_as: Callable[[User], dict[str, str]],
 ) -> None:
-    """The hash is not reversible, but the API still never re-emits it (ADR 0004)."""
+    """The hash is not reversible, but the API still never re-emits it (ADR 0004).
+
+    The correlation id an analyst sees is a different value under a different
+    key (ADR 0011) — asserted here so the two can never quietly converge.
+    """
     login_as(make_user(UserRole.VIEWER))
-    finding = make_finding()
+    finding = make_finding(correlation_id="c0" * 32)
 
     listed = client.get(FINDINGS).json()["items"][0]
     detail = client.get(f"{FINDINGS}/{finding.id}").json()
 
     assert "secret_hash" not in listed
     assert "secret_hash" not in detail
+    assert finding.secret_hash not in str(listed) and finding.secret_hash not in str(detail)
     assert detail["redacted_snippet"] == "AKIA****************"
+
+    login_as(make_user(UserRole.ANALYST))
+    analyst_detail = client.get(f"{FINDINGS}/{finding.id}").json()
+    assert analyst_detail["correlation"]["correlation_id"] != finding.secret_hash
 
 
 def test_filters_compose(

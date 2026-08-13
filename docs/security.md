@@ -54,7 +54,12 @@ system itself a high-value target. This document states the trust boundaries and
   the findings DB, credentials at rest, or other engines' results. Narrower than direct-DB
   workers; not zero.
 - **Peppered hashes.** Secret hashes use a pepper from the secret store, so they aren't
-  brute-forceable offline from a DB dump.
+  brute-forceable offline from a DB dump. The hash itself is never exposed by the API; the
+  analyst-only exposure-cluster views use a *correlation id* derived from it under a separate
+  API-held key, which reveals equality and nothing else (ADR 0011).
+- **Role-shaped remediation evidence.** Remediation notes and evidence-link URLs are analyst
+  material: viewers see that an action happened and its link labels, never the URLs or free
+  text, and a retention window can scrub URLs off long-resolved findings (ADR 0012).
 - **Encrypted connector credentials.** Stored via the secret store (AES-GCM/Fernet by default;
   Vault in prod). Never logged; never returned by the API in plaintext.
 - **Full audit trail.** Every finding state/assignee/comment change writes a `FindingEvent`.
@@ -90,7 +95,8 @@ boundary applies to what goes over the wire:
 
 - The payload is built from an **explicit field list**, never by serialising the ORM row, so a new
   column on `Finding` cannot silently start being exported. It carries the redacted snippet
-  (ADR 0004) and the peppered hash — nothing reversible — and no analyst notes or assignee.
+  (ADR 0004) and the fingerprint — nothing reversible, and not the peppered secret hash — and no
+  analyst notes or assignee.
 - Requests are **signed** (`X-Iceberg-Signature`, HMAC-SHA256 over `timestamp.body`) when the
   channel has a secret, so a receiver can distinguish a real announcement from anything else that
   can reach its URL. The timestamp is inside the MAC, so replay has a bounded window.

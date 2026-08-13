@@ -26,11 +26,14 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from iceberg_api import ratelimit
 from iceberg_api.auth.routes import router as auth_router
+from iceberg_api.correlation.routes import router as correlation_router
 from iceberg_api.engines.routes import router as engines_router
 from iceberg_api.findings.routes import router as findings_router
 from iceberg_api.findings.suppression_routes import router as suppressions_router
 from iceberg_api.maintenance import background_maintenance
 from iceberg_api.notifications.routes import router as notifications_router
+from iceberg_api.remediation.guidance import load_catalog
+from iceberg_api.remediation.routes import router as remediation_router
 from iceberg_api.rules import router as rules_router
 from iceberg_api.scans.routes import router as scans_router
 from iceberg_api.sources.routes import router as sources_router
@@ -70,6 +73,12 @@ def create_app(settings: ApiSettings | None = None, *, background: bool = True) 
     timer against their own fixtures.
     """
     configure_logging(role="api")
+
+    # The packaged guidance catalog is validated here rather than on the first
+    # request that needs it (ADR 0012 says loud failure, and lazily loud is not
+    # loud). A packaging mistake is a deploy-time fact: it should stop the
+    # rollout, not wait to surface as a 500 on somebody's finding page.
+    load_catalog()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -111,9 +120,11 @@ def create_app(settings: ApiSettings | None = None, *, background: bool = True) 
         return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     app.include_router(auth_router, prefix=API_PREFIX)
+    app.include_router(correlation_router, prefix=API_PREFIX)
     app.include_router(engines_router, prefix=API_PREFIX)
     app.include_router(findings_router, prefix=API_PREFIX)
     app.include_router(notifications_router, prefix=API_PREFIX)
+    app.include_router(remediation_router, prefix=API_PREFIX)
     app.include_router(rules_router, prefix=API_PREFIX)
     app.include_router(scans_router, prefix=API_PREFIX)
     app.include_router(schedules_router, prefix=API_PREFIX)

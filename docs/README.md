@@ -28,3 +28,5 @@ Design specification and reference docs. Start with [`../ARCHITECTURE.md`](../AR
 - [0008 — Rule management: code rules + DB suppressions](./adr/0008-rule-management.md)
 - [0009 — Task lifecycle: two-phase scans, API-authoritative leases](./adr/0009-task-lifecycle.md)
 - [0010 — Credential liveness validation](./adr/0010-secret-liveness-validation.md)
+- [0011 — Credential correlation & exposure clusters](./adr/0011-credential-correlation.md)
+- [0012 — Rotation guidance & remediation evidence](./adr/0012-remediation-evidence.md)

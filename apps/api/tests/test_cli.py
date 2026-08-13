@@ -1,19 +1,27 @@
 """Operator commands (#35 — the engine-token bootstrap)."""
 
+import secrets
+import uuid
 from collections.abc import Iterator
 
 import pytest
 from iceberg_api import cli
 from iceberg_api.engines.auth import hash_token
+from iceberg_core.correlation import correlation_id
 from iceberg_core.db import set_db_engine
+from iceberg_core.enums import ScanStatus, ScanTrigger, Severity, SourceType
 from iceberg_core.models import (
+    AUDIT_CORRELATION_REINDEXED,
     AUDIT_ENGINE_REGISTERED,
     AUDIT_ENGINE_TOKEN_ROTATED,
     AuditEvent,
     Engine,
+    Finding,
+    Scan,
+    Source,
 )
 from sqlalchemy import Engine as SAEngine
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 
 @pytest.fixture(name="process_engine", autouse=True)
@@ -69,3 +77,105 @@ def test_cli_minting_lands_in_the_audit_trail_like_the_route_does(session: Sessi
     assert all(event.target_id == engine_id for event in events)
     assert all(event.actor_id is None for event in events)
     assert token not in str([event.detail for event in events])
+
+
+def _seed_finding(session: Session, *, correlation: str | None) -> Finding:
+    source = Source(
+        name=f"confluence-{uuid.uuid4().hex[:6]}",
+        type=SourceType.CONFLUENCE,
+        connection={"base_url": "https://example.atlassian.net/wiki"},
+    )
+    session.add(source)
+    session.commit()
+    scan = Scan(source_id=source.id, trigger=ScanTrigger.MANUAL, status=ScanStatus.COMPLETED)
+    session.add(scan)
+    session.commit()
+    finding = Finding(
+        source_id=source.id,
+        fingerprint=uuid.uuid4().hex,
+        rule_id="aws-access-key",
+        rulepack_version="2026.07.1",
+        resource_locator={"path": "/space/DOCS/page-1"},
+        redacted_snippet="AKIA****************",
+        secret_hash=uuid.uuid4().hex,
+        correlation_id=correlation,
+        severity=Severity.HIGH,
+        first_seen_scan_id=scan.id,
+        last_seen_scan_id=scan.id,
+    )
+    session.add(finding)
+    session.commit()
+    return finding
+
+
+def test_reindex_correlation_rederives_and_audits(session: Session) -> None:
+    """The key-rotation move (ADR 0011): every id re-derived under the new key
+    from stored data alone, and the recompute itself lands in the trail."""
+    stale = _seed_finding(session, correlation="0" * 64)
+    missing = _seed_finding(session, correlation=None)
+    key = secrets.token_bytes(32)
+
+    outcome = cli.reindex_correlation(key, batch=1)
+
+    assert (outcome.scanned, outcome.updated) == (2, 2)
+    for finding in (stale, missing):
+        session.refresh(finding)
+        assert finding.correlation_id == correlation_id(finding.secret_hash, key=key)
+
+    again = cli.reindex_correlation(key, batch=1)
+    assert (again.scanned, again.updated) == (2, 0)
+
+    events = session.exec(
+        select(AuditEvent).where(col(AuditEvent.action) == AUDIT_CORRELATION_REINDEXED)
+    ).all()
+    assert len(events) == 2
+    assert events[0].detail["updated"] == "2"
+    assert events[1].detail["updated"] == "0"
+
+
+@pytest.mark.parametrize("batch", ["0", "-1"])
+def test_a_non_positive_batch_is_refused_before_anything_runs(
+    session: Session, capsys: pytest.CaptureFixture[str], batch: str
+) -> None:
+    """`updated=0` is the runbook's signal that a key rotation converged, so it
+    has to mean the table was walked. `--batch 0` would walk with LIMIT 0 and
+    report exactly that having touched nothing — the parser refuses it instead."""
+    stale = _seed_finding(session, correlation="0" * 64)
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["reindex-correlation", "--batch", batch])
+
+    assert exit_info.value.code == 2  # argparse usage error, not a success path
+    assert "must be 1 or greater" in capsys.readouterr().err
+    session.refresh(stale)
+    assert stale.correlation_id == "0" * 64  # nothing was touched
+
+
+def test_the_purge_summary_names_every_counter_the_result_carries(
+    session: Session, capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hand-written summary drifts the moment retention grows a counter, and
+    it did: a run that only scrubbed remediation evidence — irreversibly
+    dropping URLs and notes — printed three zeroes. The line is built from the
+    dataclass so a new field cannot be invisible.
+
+    Logging setup is stubbed out: `main` would bind structlog to this test's
+    captured stream, and that binding outlives the test and writes to a closed
+    file. The summary is what is under test, not the logging bootstrap.
+    """
+    from dataclasses import fields
+
+    from iceberg_api.retention import PurgeResult
+    from iceberg_core.config import reset_settings_cache
+
+    monkeypatch.setattr(cli, "configure_logging", lambda **_: None)
+    monkeypatch.setenv("ICEBERG_DATABASE_URL", "sqlite://")
+    reset_settings_cache()
+    try:
+        assert cli.main(["retention-purge"]) == 0
+    finally:
+        reset_settings_cache()
+
+    printed = capfd.readouterr().err
+    for field in fields(PurgeResult):
+        assert f"{field.name}=" in printed, field.name

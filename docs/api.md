@@ -81,8 +81,32 @@ the manifest. Cancel or finish the active scan before editing its source.
 - `PATCH /findings/{id}` (analyst+) — `state`, `assignee_id`, `notes`, plus an optional `comment`
   recorded on the events the change writes. Returns the detail shape, history included.
 
-Responses never carry `secret_hash`. It is not reversible, but re-emitting anything derived from
-the secret would give every viewer a comparison oracle and buy a client nothing.
+Responses never carry `secret_hash` — not reversible, but a comparison oracle nobody should be
+handed casually. The one deliberate, scoped exception to "never anything derived from the secret"
+is the **correlation id** (ADR 0011): an API-minted equality label under a key that never leaves
+the API, shown to analyst+ as `correlation` on the finding detail and served by the cluster
+routes below. Viewers get `correlation: null` — role-shaped, not merely absent.
+
+## Correlation (analyst+, ADR 0011)
+- `GET /correlation/clusters` (paginated; `?min_findings=`, `?source_id=`) — every exposure
+  cluster: the same secret value grouped across all its locations, with finding/source/open
+  counts, worst severity, first-seen and last-activity. `min_findings` defaults to 1 — the
+  endpoint hides nothing; the console's spread view sends `?min_findings=2` explicitly.
+- `GET /correlation/clusters/{correlation_id}` — the topology: members grouped by source, each
+  member in the findings-API shape so per-location remediation state rides along.
+- `GET /correlation/clusters/{correlation_id}/export` — byte-stable JSON download (versioned
+  manifest, `Content-Disposition: attachment`, `Cache-Control: no-store`). Locations and states
+  only — no snippets, no notes. Every download writes a `correlation.cluster_exported` audit
+  event. The manifest's counts are computed from the members it lists, and the export is
+  **complete or refused**: a cluster larger than the export bound answers `409` naming
+  `GET /findings?correlation_id=…`, which pages. A short work order reads as the full list of
+  places the secret lives, so it is never produced.
+
+All three are analyst+ and 403 for viewers: clustering is the "same secret elsewhere" capability,
+scoped to the roles that remediate. A `source_id` filter narrows *which clusters appear* (those
+with a member in that source) without narrowing the aggregates — a spread view that hid the
+spread would defeat itself. `GET /findings?correlation_id=…` is the paginated way to walk one
+cluster of any size, and carries the same analyst+ gate for the same reason.
 
 **The state machine.** `open` → `false_positive` / `accepted_risk` / `resolved`, and any of those
 back to `open`. There is no direct move between judgements: relabelling one in place would leave an
@@ -97,6 +121,29 @@ row, so editing them does not erase what the last analyst wrote. `assignee_id: n
 omitting the field leaves the assignee alone. Assigning to an unknown or disabled user is a `422`.
 Resolving by hand sets `resolution: manual`; reopening clears it, so a reopened finding never keeps
 reconciliation's `auto`.
+
+## Remediation (ADR 0012)
+- `GET  /remediation/guidance/{rule_id}` — versioned advice for one rule, split into revoke /
+  rotate / scope-reduce / remove-source steps; falls back to the `default` entry and says so in
+  `matched`. Never executed by the platform — advice for a human.
+- `GET  /findings/{id}/remediations` — the finding's actions, oldest first. Role-shaped: analysts
+  see notes and evidence-link URLs; viewers see the fact of each action with link labels only.
+- `POST /findings/{id}/remediations` (analyst+) — record what was done: kind, when it was
+  performed, a note, up to ten evidence links (http(s) only, no embedded credentials). Stamps the
+  live guidance version. Content is write-once — retract and re-record to correct.
+- `POST /findings/{id}/remediations/{rid}/verify` (analyst+) — one-way confirmation the action
+  took effect; repeating it is a `409`.
+- `POST /findings/{id}/remediations/{rid}/retract` (analyst+) — set-once, reason required;
+  a retracted action stops satisfying the evidence policy.
+
+Every mutation writes a `FindingEvent` (`remediation`, `remediation_verified`,
+`remediation_retracted`) and an audit row. The finding detail carries `remediations` alongside
+`events` in the caller's shape.
+
+**Required-evidence policy.** With `ICEBERG_REMEDIATION_EVIDENCE_MIN_SEVERITY` set, resolving a
+finding at or above that severity without a non-retracted, evidence-carrying action is a `409`
+naming the fix. Judgements (`false_positive`, `accepted_risk`) and reconciliation's auto-resolve
+are exempt by design; unset (the default) changes nothing.
 
 ## Suppressions
 - `GET  /suppressions` (paginated; `?source_id=`, `?scope=`, `?active=`) · `GET /suppressions/{id}`

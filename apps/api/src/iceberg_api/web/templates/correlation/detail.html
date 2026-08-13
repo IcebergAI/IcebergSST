@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Cluster {{ cluster.correlation_id[:12] }} · {{ app_name }}{% endblock %}
+{% block crumb %}Cluster {{ cluster.correlation_id[:12] }}…{% endblock %}
+{% block page_class %}page-wide{% endblock %}
+
+{% block content %}
+<a class="backlink" href="/clusters?min_findings=2">← Clusters</a>
+
+<div class="head-row" style="margin-top:10px">
+  <div>
+    <div class="eyebrow">Exposure cluster</div>
+    <h1 class="page-title mono">{{ cluster.correlation_id[:12] }}…</h1>
+    <div class="row-inline" style="margin-top:12px">
+      <span class="tag tag--c sev-{{ cluster.max_severity.value }}"><span class="dot"></span>{{ cluster.max_severity.value }}</span>
+      {% if cluster.open_count %}
+      <span class="tag tag--c state-open"><span class="dot"></span>{{ cluster.open_count }} of {{ cluster.finding_count }} open</span>
+      {% else %}
+      <span class="tag tag--c state-resolved"><span class="dot"></span>fully remediated</span>
+      {% endif %}
+      <span class="tag">{{ cluster.finding_count }} findings</span>
+      <span class="tag">{{ cluster.source_count }} sources</span>
+    </div>
+  </div>
+  <div class="actions">
+    {#- A plain link to the API route: the export is the API's, the console just
+        points at it (docs/web.md). Each download writes an audit event. -#}
+    <a class="btn btn--ghost btn--sm" href="{{ export_url }}">
+      Export work order
+      <svg class="btn-ic" aria-hidden="true"><use href="#ic-external"/></svg>
+    </a>
+  </div>
+</div>
+
+<p class="lede section-gap">
+  Every finding below holds the <em>same secret value</em> — correlated by an opaque equality
+  label, never by storing or comparing the value itself. Remediation is done when every location
+  is: rotate once, then close each finding where the old value was removed.
+</p>
+
+{% if truncated %}
+<div class="notice section-gap" role="status">
+  <div>
+    <strong>Showing the first {{ cluster.members | length }} of {{ cluster.finding_count }} findings.</strong>
+    This screen renders a page; the export carries every member or refuses, and never a short list.
+  </div>
+</div>
+{% endif %}
+
+{% for section in sections %}
+<section class="card section-gap">
+  <div class="card-head">
+    <h2 class="section-title">{{ section.source.source_name }}</h2>
+    {#- The cluster's count for this source, not the page's: a source can have
+        findings here that the capped member list below does not reach. -#}
+    <span class="tag">{{ section.source.finding_count }} finding{{ 's' if section.source.finding_count != 1 }}</span>
+    {% if section.source.open_count %}
+    <span class="tag tag--c state-open"><span class="dot"></span>{{ section.source.open_count }} open</span>
+    {% endif %}
+  </div>
+  {% if section.members | length < section.source.finding_count %}
+  <p class="hint">Listing {{ section.members | length }} of {{ section.source.finding_count }} here — the export carries every one.</p>
+  {% endif %}
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>Severity</th><th>State</th><th>Rule</th><th>Where</th><th>First seen</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for member in section.members %}
+        <tr>
+          <td><span class="tag tag--c sev-{{ member.severity.value }}"><span class="dot"></span>{{ member.severity.value }}</span></td>
+          <td>
+            <span class="tag tag--c state-{{ member.state.value }}"><span class="dot"></span>{{ member.state.value | humanize }}</span>
+            {% if member.suppressed_at %}<span class="tag tag--c is-neutral">suppressed</span>{% endif %}
+          </td>
+          <td><a class="mono" href="/findings/{{ member.id }}">{{ member.rule_id }}</a></td>
+          <td class="truncate mono" style="font-size:12px;max-width:360px">
+            {{ member.resource_locator.get('path') or member.resource_locator.get('url') or member.resource_locator.get('title') or '—' }}
+          </td>
+          <td class="mono nowrap" style="font-size:12px">{{ member.created_at | dt }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endfor %}
+{% endblock %}

@@ -16,16 +16,30 @@ Confluence and are the reason the CSP on this page is strict.
 """
 
 import uuid
+from datetime import datetime
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Form, HTTPException, Query, Request, Response
-from iceberg_core.enums import FindingState, Severity, UserRole
+from iceberg_core.enums import FindingState, RemediationActionKind, Severity, UserRole
 from pydantic import ValidationError
 
 from iceberg_api.auth.dependencies import CsrfProtected, SessionDep, SettingsDep
 from iceberg_api.findings import routes as api
 from iceberg_api.findings.schemas import FindingUpdate
 from iceberg_api.pagination import DEFAULT_LIMIT
+from iceberg_api.remediation.routes import (
+    read_guidance,
+    record_remediation,
+    retract_remediation,
+    verify_remediation,
+)
+from iceberg_api.remediation.schemas import (
+    EvidenceLink,
+    RemediationCreate,
+    RemediationRetract,
+    RemediationVerify,
+)
 from iceberg_api.rules import list_rules
 from iceberg_api.sources.routes import list_sources
 from iceberg_api.users.routes import list_users
@@ -58,6 +72,18 @@ def _bool_or_none(value: str | None) -> bool | None:
     if value in {"true", "false"}:
         return value == "true"
     return None
+
+
+def _host_label(url: str) -> str:
+    """A viewer-safe default label for an evidence link: its host, nothing more.
+
+    Labels are viewer-visible while URLs are not (ADR 0012), so this deliberately
+    keeps the path, query and fragment out — those are where a ticket id, a
+    document name or an internal route would sit. A URL we cannot parse a host
+    from gets a neutral word rather than any part of the string itself.
+    """
+    host = urlsplit(url.strip()).hostname
+    return host[:200] if host else "evidence link"
 
 
 @router.get("/findings")
@@ -143,6 +169,7 @@ async def triage(  # one parameter per form field
     viewer: CurrentViewer,
     analyst: WebAnalyst,
     db: SessionDep,
+    settings: SettingsDep,
     state: Annotated[str, Form()],
     assignee: Annotated[str, Form()] = "",
     comment: Annotated[str, Form()] = "",
@@ -176,6 +203,7 @@ async def triage(  # one parameter per form field
             changes=FindingUpdate(**payload),
             analyst=analyst,
             db=db,
+            settings=settings,
         )
     except (HTTPException, ValidationError, ValueError) as exc:
         # A 409 is the state machine refusing a move between judgements, and
@@ -212,4 +240,133 @@ async def _detail_context(finding: Any, user: Any, db: Any) -> dict[str, Any]:
         "states": list(FindingState),
         "island": {"state": finding.state.value},
         "error": None,
+        # The remediation panel (#142): advice for this finding's rule, the
+        # action-kind options, and a slot for the panel's own form errors.
+        "guidance": await read_guidance(rule_id=finding.rule_id, user=user),
+        "remediation_kinds": list(RemediationActionKind),
+        "remediation_error": None,
     }
+
+
+@router.post("/findings/{finding_id}/remediations", dependencies=[CsrfProtected])
+async def record_remediation_form(  # one parameter per form field
+    request: Request,
+    finding_id: uuid.UUID,
+    viewer: CurrentViewer,
+    analyst: WebAnalyst,
+    db: SessionDep,
+    kind: Annotated[str, Form()],
+    occurred_at: Annotated[str, Form()] = "",
+    note: Annotated[str, Form()] = "",
+    link_url_1: Annotated[str, Form()] = "",
+    link_label_1: Annotated[str, Form()] = "",
+    link_url_2: Annotated[str, Form()] = "",
+    link_label_2: Annotated[str, Form()] = "",
+    link_url_3: Annotated[str, Form()] = "",
+    link_label_3: Annotated[str, Form()] = "",
+    csrf_token: Annotated[str, Form()] = "",
+) -> Response:
+    """Record a containment action, then re-render the panel with it listed.
+
+    Three static link rows rather than a scripted list (see the partial); a row
+    with a URL and no label gets the URL's *host* as its label rather than a 422 —
+    the label is for humans, and "fill something in" is not worth a round trip.
+
+    The host, and never the URL: labels are the one part of an evidence link a
+    viewer is shown (ADR 0012), so defaulting the label to the URL would hand
+    every viewer the path and query the redaction exists to withhold.
+    """
+    error = None
+    try:
+        links = []
+        for url, label in (
+            (link_url_1, link_label_1),
+            (link_url_2, link_label_2),
+            (link_url_3, link_label_3),
+        ):
+            if url.strip():
+                links.append(EvidenceLink(url=url.strip(), label=label.strip() or _host_label(url)))
+        payload = RemediationCreate(
+            kind=RemediationActionKind(kind),
+            occurred_at=datetime.fromisoformat(occurred_at) if occurred_at.strip() else None,
+            note=note.strip() or None,
+            evidence_links=links,
+        )
+        await record_remediation(finding_id=finding_id, payload=payload, analyst=analyst, db=db)
+    except (HTTPException, ValidationError, ValueError) as exc:
+        error = error_text(exc)
+
+    finding = await api.read_finding(finding_id=finding_id, user=analyst, db=db)
+    context = await _detail_context(finding, analyst, db)
+    return render_fragment(
+        request, "remediation.html", viewer, context | {"remediation_error": error}
+    )
+
+
+@router.post(
+    "/findings/{finding_id}/remediations/{remediation_id}/verify",
+    dependencies=[CsrfProtected],
+)
+async def verify_remediation_form(
+    request: Request,
+    finding_id: uuid.UUID,
+    remediation_id: uuid.UUID,
+    viewer: CurrentViewer,
+    analyst: WebAnalyst,
+    db: SessionDep,
+    comment: Annotated[str, Form()] = "",
+    csrf_token: Annotated[str, Form()] = "",
+) -> Response:
+    """Mark an action verified; a 409 (already verified/retracted) renders as
+    the panel's error rather than a dead end."""
+    error = None
+    try:
+        await verify_remediation(
+            finding_id=finding_id,
+            remediation_id=remediation_id,
+            payload=RemediationVerify(comment=comment.strip() or None),
+            analyst=analyst,
+            db=db,
+        )
+    except (HTTPException, ValidationError, ValueError) as exc:
+        error = error_text(exc)
+
+    finding = await api.read_finding(finding_id=finding_id, user=analyst, db=db)
+    context = await _detail_context(finding, analyst, db)
+    return render_fragment(
+        request, "remediation.html", viewer, context | {"remediation_error": error}
+    )
+
+
+@router.post(
+    "/findings/{finding_id}/remediations/{remediation_id}/retract",
+    dependencies=[CsrfProtected],
+)
+async def retract_remediation_form(
+    request: Request,
+    finding_id: uuid.UUID,
+    remediation_id: uuid.UUID,
+    viewer: CurrentViewer,
+    analyst: WebAnalyst,
+    db: SessionDep,
+    reason: Annotated[str, Form()] = "",
+    csrf_token: Annotated[str, Form()] = "",
+) -> Response:
+    """Retract a wrong record. The empty-reason 422 comes back on the panel."""
+    error = None
+    try:
+        await retract_remediation(
+            finding_id=finding_id,
+            remediation_id=remediation_id,
+            payload=RemediationRetract(reason=reason),
+            analyst=analyst,
+            db=db,
+        )
+    except (HTTPException, ValidationError, ValueError) as exc:
+        error = error_text(exc)
+
+    finding = await api.read_finding(finding_id=finding_id, user=analyst, db=db)
+    context = await _detail_context(finding, analyst, db)
+    return render_fragment(
+        request, "remediation.html", viewer, context | {"remediation_error": error}
+    )

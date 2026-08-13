@@ -2,12 +2,14 @@
 
 Two rules shape these:
 
-* **A response never carries anything derived from the secret itself.** The
-  ``redacted_snippet`` is masked inside the engine (ADR 0004) and is safe to show;
-  ``secret_hash`` is not exposed at all. It is not reversible, but handing every
-  viewer a stable comparison oracle for "is this the same secret as that one"
-  buys a client nothing and costs the guarantee that the API never re-emits a
-  secret in any form.
+* **A response never carries the secret, the peppered hash, or anything an
+  engine can recompute.** The ``redacted_snippet`` is masked inside the engine
+  (ADR 0004) and is safe to show; ``secret_hash`` is not exposed at all — it is
+  the trust anchor pepper re-keying compares against, and anyone holding the
+  pepper could use it to test candidate secrets. "Is this the same secret as
+  that one" *is* answered, deliberately and only for analysts, by the
+  correlation id (ADR 0011): an equality label minted under a key that never
+  leaves the API, useless for anything but the comparison it names.
 * **Filters are explicit, never implicit.** An analyst's default view is
   ``?state=open&suppressed=false``; the API does not silently hide rows, because a
   list endpoint that quietly drops records is one nobody can reconcile counts
@@ -29,6 +31,7 @@ from iceberg_core.enums import (
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from iceberg_api.remediation.schemas import RemediationRead, RemediationReadRedacted
 from iceberg_api.schemas import UtcDatetime
 
 
@@ -89,6 +92,18 @@ class FindingEventRead(BaseModel):
     created_at: UtcDatetime
 
 
+class CorrelationInfo(BaseModel):
+    """Where else this secret was seen (ADR 0011). Analyst+, else null.
+
+    The id is the API-minted equality label, never ``secret_hash``; the counts
+    are the whole cluster's, so "1 finding, 1 source" reads as "only here".
+    """
+
+    correlation_id: str
+    finding_count: int
+    source_count: int
+
+
 class FindingDetail(FindingRead):
     """``GET /findings/{id}``: the finding plus its history, oldest first.
 
@@ -98,6 +113,16 @@ class FindingDetail(FindingRead):
     """
 
     events: list[FindingEventRead]
+
+    #: Null for viewers (role-shaped, not merely absent data) and for findings
+    #: with no derived id. See the module docstring for why viewers do not get
+    #: the comparison oracle.
+    correlation: CorrelationInfo | None = None
+
+    #: Remediation actions, oldest first (#142) — full shape for analysts,
+    #: redacted (labels, no URLs or note) for viewers. Ships with the detail
+    #: for the same reason the history does.
+    remediations: list[RemediationRead | RemediationReadRedacted] = []
 
 
 class FindingUpdate(BaseModel):

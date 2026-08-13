@@ -42,6 +42,22 @@ regexes = ['''AKIAABCDEFGHIJKLMNOP''']
 
 [[allowlists]]
 description = """
+The correlation HMAC's domain-separation constant (ADR 0011, introduced in 1fd2e49).
+It is a *fixed public prefix* — the opposite of a secret: it exists so that a hash
+computed for correlation can never collide with one computed for a fingerprint or a
+secret hash, and it is printed in the ADR, the module docstring and the tests on
+purpose. `generic-api-key` matches it in the ADR's formula line, where the quoted
+constant sits immediately after `correlation_key,` and reads like an assignment.
+
+Allowlisted here rather than inline because 1fd2e49 is already in history and the CI
+job scans all of it; rewording the ADR today would not change what that commit
+contains. Keyed on the literal, so both the old and renumbered ADR paths — and every
+other file — are still scanned for everything else.
+"""
+regexes = ['''iceberg\.correlation\.v1''']
+
+[[allowlists]]
+description = """
 A high-entropy nonsense string in the keyword-proximity tests
 (packages/detect/tests/test_signals.py, introduced in e6b1317). It is the *subject*
 of those tests rather than a credential: they assert that `oauth` clipped by a window

@@ -1,0 +1,120 @@
+# Remediation guidance (#142, ADR 0012). Versioned like a rule pack: reviewed
+# as text in a PR, validated at startup (guidance.py), and the version below is
+# stamped onto every remediation action recorded while it is live — so "what
+# were they told to do" stays answerable after this file changes.
+#
+# Keys are rule ids from the detection packs; `default` is required and serves
+# every rule without an entry of its own. Steps are advice for a human — the
+# platform never executes any of this (non-goal in #142).
+version: "2026.08.1"
+
+entries:
+  default:
+    title: Exposed credential
+    revoke:
+      - Identify the issuing system and disable or delete the exposed credential there.
+      - Check the issuer's access logs for use of the credential since the finding's first-seen time.
+    rotate:
+      - Issue a replacement credential and update every legitimate consumer to use it.
+      - Confirm the replaced credential no longer authenticates before closing.
+    scope_reduce:
+      - If immediate revocation would break production, reduce the credential's permissions to the minimum while rotation is scheduled.
+    remove_source:
+      - Edit or delete the document, page, or file where the credential appears; check version history and attachments for further copies.
+      - Re-scan the source afterwards — removal is confirmed when the finding auto-resolves rather than when the page looks clean.
+
+  aws-access-key-id:
+    title: AWS access key
+    references:
+      - https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html
+    revoke:
+      - In IAM, mark the access key inactive, then delete it once nothing legitimate breaks.
+      - Review CloudTrail for calls made with this key id since first-seen.
+    rotate:
+      - Create a second access key for the same principal, deploy it, then delete the exposed one.
+      - Prefer replacing long-lived keys with IAM roles or short-lived STS credentials where the consumer allows.
+    scope_reduce:
+      - Attach a deny-all or minimal inline policy to the principal while rotation is in flight.
+    remove_source:
+      - Remove the key from the page or file it was found in, including edit history and attachments.
+
+  aws-secret-access-key:
+    title: AWS secret access key
+    references:
+      - https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html
+    revoke:
+      - Treat the paired access key id as compromised — deactivate and delete it in IAM.
+      - Review CloudTrail for activity since first-seen.
+    rotate:
+      - Create and deploy a replacement key pair, then delete the exposed pair.
+    scope_reduce:
+      - Restrict the principal's policies to the minimum while rotation is in flight.
+    remove_source:
+      - Remove the secret from the source location, including history and attachments.
+
+  gcp-service-account-key:
+    title: GCP service account key
+    references:
+      - https://cloud.google.com/iam/docs/best-practices-for-managing-service-account-keys
+    revoke:
+      - Delete the exposed key from the service account in IAM & Admin.
+      - Review Cloud Audit Logs for authentications with the key since first-seen.
+    rotate:
+      - Create a new key (or better, switch the workload to workload identity), deploy it, then delete the exposed key.
+    scope_reduce:
+      - Strip the service account's roles to the minimum while rotation is in flight.
+    remove_source:
+      - Remove the JSON key material from the source, including history and attachments.
+
+  github-token:
+    title: GitHub token
+    references:
+      - https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/token-expiration-and-revocation
+    revoke:
+      - Revoke the token in GitHub settings (or via the API); an exposed classic PAT should be assumed used.
+      - Review the account's security log since first-seen.
+    rotate:
+      - Mint a fine-grained token with the minimum repositories and permissions, deploy it, then revoke the exposed one.
+    scope_reduce:
+      - If the consumer needs time, replace with a fine-grained token scoped to the minimum first.
+    remove_source:
+      - Remove the token from the page or file, including edit history.
+
+  slack-webhook-url:
+    title: Slack webhook URL
+    references:
+      - https://api.slack.com/messaging/webhooks
+    revoke:
+      - Delete or regenerate the webhook in the Slack app's configuration — the URL is the credential.
+    rotate:
+      - Create a replacement webhook, update the sender, then remove the exposed one.
+    scope_reduce:
+      - Webhooks cannot be scoped down; treat this as revoke-and-replace.
+    remove_source:
+      - Remove the URL from the source location, including history.
+
+  stripe-api-key:
+    title: Stripe API key
+    references:
+      - https://docs.stripe.com/keys
+    revoke:
+      - Roll the key in the Stripe dashboard — rolling revokes the old value immediately.
+      - Review the Stripe request logs for use of the exposed key since first-seen.
+    rotate:
+      - Roll the key, deploy the replacement to every consumer, and prefer restricted keys over full-access secret keys.
+    scope_reduce:
+      - Replace with a restricted key carrying only the permissions the consumer uses.
+    remove_source:
+      - Remove the key from the source location, including history and attachments.
+
+  private-key-block:
+    title: Private key material
+    revoke:
+      - Identify what trusts this key (hosts, certificates, deploy systems) and remove or supersede that trust.
+      - For certificate keys, revoke the certificate with the issuing CA.
+    rotate:
+      - Generate a new key pair, distribute the public half to every relying party, then retire the exposed pair.
+    scope_reduce:
+      - Where trust cannot be removed at once, restrict what the key grants (allowed-from addresses, forced commands, narrowed certificate usage).
+    remove_source:
+      - Remove the key block from the source, including history and attachments — partial redaction of a key is not removal.

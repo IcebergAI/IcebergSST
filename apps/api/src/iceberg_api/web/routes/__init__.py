@@ -10,6 +10,7 @@ from fastapi import APIRouter
 
 from iceberg_api.web.routes import (
     admin,
+    clusters,
     findings,
     scans,
     schedules,
@@ -25,6 +26,7 @@ router = APIRouter(include_in_schema=False)
 # (docs/api.md), and HTML endpoints in it would describe a second one.
 router.include_router(shell.router)
 router.include_router(findings.router)
+router.include_router(clusters.router)
 router.include_router(scans.router)
 router.include_router(sources.router)
 router.include_router(schedules.router)

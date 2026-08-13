@@ -60,6 +60,18 @@ Confluence-scan-to-triaged-finding flow). M3–M4 complete the product.
 - **Epic: Hardening** — security review, rate limiting, audit logging, data-retention policy,
   key + pepper rotation runbook, docs polish.
 
+## M6 — Remediation and exposure closure
+- **Epic: Exposure clusters (#140)** *(shipped)* — correlate findings that contain the same secret
+  value into one exposure cluster without exposing the value: API-minted correlation ids under a
+  dedicated key (ADR 0011), analyst cluster list/topology/audited export plus console screens,
+  key rotation by reindex (`reindex-correlation`, no rescan).
+- **Epic: Rotation guidance & remediation evidence (#142)** *(shipped)* — versioned per-rule
+  guidance catalog, structured remediation actions with evidence links, one-way verification and
+  set-once retraction, an opt-in required-evidence policy by severity, viewer redaction, and
+  evidence scrubbing under retention (ADR 0012). A reappearing credential — including one a
+  validator (ADR 0010) reports live, since validation only accompanies a sighting — reopens with
+  its remediation history intact.
+
 ## MVP non-goals
 Jira/SMB connectors, incremental/delta scanning, image OCR, external ticket creation,
 multi-tenancy.

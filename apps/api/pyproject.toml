@@ -27,6 +27,9 @@ dependencies = [
     # OIDC: token exchange and JWKS fetches (httpx2), ID-token verification (pyjwt).
     "httpx2>=2.7.0",
     "pyjwt[crypto]>=2.13.0",
+    # The packaged remediation-guidance catalog (#142) is YAML, like the rule
+    # packs it parallels — reviewed as text, loaded and validated at startup.
+    "pyyaml>=6.0.3",
     # Imported directly by app.py — declared rather than leaned on transitively
     # through iceberg-core.
     "prometheus-client>=0.25.0",

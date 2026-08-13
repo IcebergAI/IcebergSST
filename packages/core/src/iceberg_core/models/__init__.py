@@ -16,8 +16,13 @@ from iceberg_core.models.audit import (
     AUDIT_CHANNEL_DELETED,
     AUDIT_CHANNEL_SECRET_SET,
     AUDIT_CHANNEL_UPDATED,
+    AUDIT_CORRELATION_CLUSTER_EXPORTED,
+    AUDIT_CORRELATION_REINDEXED,
     AUDIT_ENGINE_REGISTERED,
     AUDIT_ENGINE_TOKEN_ROTATED,
+    AUDIT_REMEDIATION_RECORDED,
+    AUDIT_REMEDIATION_RETRACTED,
+    AUDIT_REMEDIATION_VERIFIED,
     AUDIT_RETENTION_PURGED,
     AUDIT_SCHEDULE_CREATED,
     AUDIT_SCHEDULE_DELETED,
@@ -30,7 +35,9 @@ from iceberg_core.models.audit import (
     AUDIT_SUPPRESSION_CREATED,
     AUDIT_SUPPRESSION_DELETED,
     AUDIT_TARGET_CHANNEL,
+    AUDIT_TARGET_CORRELATION,
     AUDIT_TARGET_ENGINE,
+    AUDIT_TARGET_REMEDIATION,
     AUDIT_TARGET_RETENTION,
     AUDIT_TARGET_SCHEDULE,
     AUDIT_TARGET_SOURCE,
@@ -58,6 +65,7 @@ from iceberg_core.models.base import (
 from iceberg_core.models.findings import Finding, FindingEvent, Suppression
 from iceberg_core.models.identity import User
 from iceberg_core.models.notifications import NotificationChannel, NotificationDelivery
+from iceberg_core.models.remediation import RemediationAction
 from iceberg_core.models.scans import Engine, Scan, ScanTask
 from iceberg_core.models.sources import Schedule, Source
 from iceberg_core.models.validation import ValidationPolicy
@@ -67,8 +75,13 @@ __all__ = [
     "AUDIT_CHANNEL_DELETED",
     "AUDIT_CHANNEL_SECRET_SET",
     "AUDIT_CHANNEL_UPDATED",
+    "AUDIT_CORRELATION_CLUSTER_EXPORTED",
+    "AUDIT_CORRELATION_REINDEXED",
     "AUDIT_ENGINE_REGISTERED",
     "AUDIT_ENGINE_TOKEN_ROTATED",
+    "AUDIT_REMEDIATION_RECORDED",
+    "AUDIT_REMEDIATION_RETRACTED",
+    "AUDIT_REMEDIATION_VERIFIED",
     "AUDIT_RETENTION_PURGED",
     "AUDIT_SCHEDULE_CREATED",
     "AUDIT_SCHEDULE_DELETED",
@@ -81,7 +94,9 @@ __all__ = [
     "AUDIT_SUPPRESSION_CREATED",
     "AUDIT_SUPPRESSION_DELETED",
     "AUDIT_TARGET_CHANNEL",
+    "AUDIT_TARGET_CORRELATION",
     "AUDIT_TARGET_ENGINE",
+    "AUDIT_TARGET_REMEDIATION",
     "AUDIT_TARGET_RETENTION",
     "AUDIT_TARGET_SCHEDULE",
     "AUDIT_TARGET_SOURCE",
@@ -102,6 +117,7 @@ __all__ = [
     "IcebergModel",
     "NotificationChannel",
     "NotificationDelivery",
+    "RemediationAction",
     "Scan",
     "ScanTask",
     "Schedule",

@@ -1,0 +1,183 @@
+{#- The remediation panel: guidance, the recorded actions, and the forms.
+
+    One fragment because they are one answer: recording an action changes the
+    list, and the guidance stays in view while the responder fills the form.
+    Evidence rows are three static pairs rather than a dynamic list — the CSP
+    Alpine build makes list templating expensive, blank rows are simply
+    ignored, and the API accepts up to ten links for anyone who needs more.
+-#}
+<div id="remediation-panel">
+  {% if remediation_error %}
+  <div class="notice notice--crit" role="alert" style="margin-bottom:16px">
+    <div><strong>Not recorded.</strong> {{ remediation_error }}</div>
+  </div>
+  {% endif %}
+
+  <section class="card">
+    <div class="card-head">
+      <h2 class="section-title">Rotation guidance</h2>
+      <span class="tag">{{ 'for this rule' if guidance.matched == 'rule' else 'generic advice' }} · v{{ guidance.version }}</span>
+    </div>
+    <div class="card-pad">
+      <p class="field-hint" style="margin-top:0">
+        {{ guidance.entry.title }} — advice for a human; the platform never rotates or revokes
+        anything itself. Steps are split so “kill the credential” and “clean up the copy” are
+        never conflated.
+      </p>
+      <div class="grid-2">
+        {% for section, steps in (('Revoke', guidance.entry.revoke), ('Rotate', guidance.entry.rotate),
+                                  ('Scope-reduce', guidance.entry.scope_reduce), ('Remove from source', guidance.entry.remove_source)) %}
+        {% if steps %}
+        <div>
+          <div class="eyebrow" style="margin-bottom:6px">{{ section }}</div>
+          <ol style="margin:0;padding-left:18px;font-size:13px">
+            {% for step in steps %}<li style="margin-bottom:4px">{{ step }}</li>{% endfor %}
+          </ol>
+        </div>
+        {% endif %}
+        {% endfor %}
+      </div>
+      {% if guidance.entry.references %}
+      <div class="hr"></div>
+      <div class="eyebrow" style="margin-bottom:6px">Provider documentation</div>
+      {% for reference in guidance.entry.references %}
+      <a class="mono" style="font-size:12px;display:block" href="{{ reference }}" target="_blank" rel="noopener noreferrer">{{ reference }}
+        <svg class="btn-ic" aria-hidden="true" style="vertical-align:-2px"><use href="#ic-external"/></svg>
+      </a>
+      {% endfor %}
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="card section-gap">
+    <div class="card-head"><h2 class="section-title">Remediation record</h2></div>
+    <div class="card-pad">
+      {% if finding.remediations %}
+      <ol class="timeline">
+        {% for action in finding.remediations %}
+        <li class="{{ 'is-accent' if not action.retracted_at }}">
+          <div class="timeline-head">
+            <span class="timeline-kind"{% if action.retracted_at %} style="text-decoration:line-through"{% endif %}>{{ action.kind.value | humanize }}</span>
+            <span class="timeline-actor">{{ user_names.get(action.actor_id, 'system') if action.actor_id else 'system' }}</span>
+            <span class="timeline-ts">{{ (action.occurred_at or action.created_at) | dt }}</span>
+            {% if action.retracted_at %}
+            <span class="tag tag--c is-neutral">retracted</span>
+            {% elif action.verification.value == 'verified' %}
+            <span class="tag tag--c state-resolved"><span class="dot"></span>verified</span>
+            {% else %}
+            <span class="tag tag--c is-neutral">unverified</span>
+            {% endif %}
+          </div>
+          {% if role in ('analyst', 'admin') %}
+            {% if action.note %}<div class="timeline-comment">{{ action.note }}</div>{% endif %}
+            {% if action.retracted_reason %}<div class="timeline-comment">Retracted: {{ action.retracted_reason }}</div>{% endif %}
+            {% if action.evidence_links %}
+            <div class="timeline-body">
+              {% for link in action.evidence_links %}
+              {#- .get(): a scrubbed row has label only, and StrictUndefined
+                  would turn a plain attribute miss into a 500. -#}
+              {% if link.get('url') %}
+              <a class="mono" style="font-size:12px" href="{{ link.get('url') }}" target="_blank" rel="noopener noreferrer">{{ link.get('label') }}
+                <svg class="btn-ic" aria-hidden="true" style="vertical-align:-2px"><use href="#ic-external"/></svg>
+              </a>
+              {% else %}
+              <span class="mono" style="font-size:12px">{{ link.get('label') }} (link aged out)</span>
+              {% endif %}
+              {% endfor %}
+            </div>
+            {% endif %}
+            {% if not action.retracted_at %}
+            <div class="row-inline" style="margin-top:8px">
+              {% if action.verification.value != 'verified' %}
+              <form hx-post="/findings/{{ finding.id }}/remediations/{{ action.id }}/verify"
+                    hx-target="#remediation-panel" hx-swap="outerHTML">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="btn btn--ghost btn--sm">Mark verified</button>
+              </form>
+              {% endif %}
+              <form hx-post="/findings/{{ finding.id }}/remediations/{{ action.id }}/retract"
+                    hx-target="#remediation-panel" hx-swap="outerHTML" class="row-inline">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input class="field field--sm" type="text" name="reason" required maxlength="2000"
+                       placeholder="Why this record is wrong">
+                <button type="submit" class="btn btn--quiet btn--sm">Retract</button>
+              </form>
+            </div>
+            {% endif %}
+          {% else %}
+            {#- Viewers get the fact of the action; labels came role-shaped from
+                the API (evidence_labels), URLs and the note never left it. -#}
+            {% if action.evidence_labels %}
+            <div class="timeline-body mono" style="font-size:12px">Evidence: {{ action.evidence_labels | join(', ') }}</div>
+            {% endif %}
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ol>
+      {% else %}
+      <p class="empty" style="margin:0">
+        No containment action recorded yet{% if role in ('analyst', 'admin') %} — closing this
+        finding without one makes “resolved” unverifiable later{% endif %}.
+      </p>
+      {% endif %}
+    </div>
+  </section>
+
+  {% if role in ('analyst', 'admin') %}
+  <section class="card card-pad section-gap">
+    <div class="eyebrow" style="margin-bottom:12px">Record an action</div>
+    <form class="stack"
+          hx-post="/findings/{{ finding.id }}/remediations"
+          hx-target="#remediation-panel"
+          hx-swap="outerHTML"
+          hx-indicator="#remediation-save">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+      <label>
+        Action
+        <select class="field" name="kind">
+          {% for kind in remediation_kinds %}
+          <option value="{{ kind.value }}">{{ kind.value | humanize }}</option>
+          {% endfor %}
+        </select>
+        <span class="field-hint">
+          “Other” is an escape hatch — put the story in the note rather than mislabel the action.
+        </span>
+      </label>
+
+      <label>
+        Performed at
+        <input class="field" type="datetime-local" name="occurred_at">
+        <span class="field-hint">Leave empty for “when recorded”. Read as UTC.</span>
+      </label>
+
+      <label>
+        Note
+        <textarea class="field" name="note" rows="3" maxlength="2000"
+                  placeholder="Rotated in the provider console; old key disabled"></textarea>
+      </label>
+
+      <div class="eyebrow">Evidence links</div>
+      <span class="field-hint">
+        Where the proof lives — a ticket, a provider console page. Links only, never files;
+        blank rows are ignored. The record cannot be edited later, only retracted.
+      </span>
+      {% for row in (1, 2, 3) %}
+      <div class="row-inline">
+        <input class="field field--sm" type="url" name="link_url_{{ row }}" maxlength="2048"
+               placeholder="https://tickets.example/SEC-123">
+        <input class="field field--sm" type="text" name="link_label_{{ row }}" maxlength="200"
+               placeholder="Label">
+      </div>
+      {% endfor %}
+
+      <div class="actions">
+        <button type="submit" class="btn btn--primary" id="remediation-save">
+          <span class="spinner htmx-indicator" aria-hidden="true"></span>
+          Record action
+        </button>
+      </div>
+    </form>
+  </section>
+  {% endif %}
+</div>

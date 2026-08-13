@@ -31,6 +31,7 @@ from iceberg_core.enums import (
     FindingEventKind,
     FindingResolution,
     FindingState,
+    RemediationActionKind,
     ScanStatus,
     ScanTrigger,
     Severity,
@@ -41,10 +42,12 @@ from iceberg_core.models import (
     AuditEvent,
     Finding,
     FindingEvent,
+    RemediationAction,
     Scan,
     Source,
 )
 from pydantic import SecretStr
+from sqlalchemy.sql.dml import Update
 from sqlmodel import Session, col, select, update
 
 NOW = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
@@ -430,3 +433,187 @@ def test_a_round_deletes_at_most_the_batch_size(
     assert first.findings == 2
     assert second.findings == 2
     assert len(list(session.exec(select(Finding)))) == 1
+
+
+# ── Remediation-evidence scrub (#142, ADR 0012) ──────────────────────────────
+
+
+def _action(session: Session, finding: Finding, **fields: Any) -> RemediationAction:
+    defaults: dict[str, Any] = {
+        "kind": RemediationActionKind.ROTATE,
+        "note": "rotated; see ticket",
+        "evidence_links": [{"url": "https://tickets.example.test/SEC-1", "label": "SEC-1"}],
+    }
+    action = RemediationAction(finding_id=finding.id, **(defaults | fields))
+    session.add(action)
+    session.commit()
+    session.refresh(action)
+    return action
+
+
+def test_evidence_urls_are_scrubbed_to_labels_after_the_window(
+    session: Session, make_finding: Callable[..., Finding]
+) -> None:
+    finding = make_finding(updated_at=LONG_AGO)
+    action = _action(session, finding)
+
+    result = retention.purge(session, _settings(retention_remediation_evidence_days=30), now=NOW)
+
+    assert result.remediation_evidence_scrubbed == 1
+    session.refresh(action)
+    assert action.evidence_links == [{"label": "SEC-1", "scrubbed": True}]
+    assert action.note is None
+    assert action.scrubbed_at is not None
+    # The decision trail survives the scrub — that is the whole design.
+    assert action.kind is RemediationActionKind.ROTATE
+
+
+def test_the_scrub_is_off_by_default(
+    session: Session, make_finding: Callable[..., Finding]
+) -> None:
+    action = _action(session, make_finding(updated_at=LONG_AGO))
+
+    result = retention.purge(session, _settings(), now=NOW)
+
+    assert result.remediation_evidence_scrubbed == 0
+    session.refresh(action)
+    assert action.evidence_links[0]["url"] == "https://tickets.example.test/SEC-1"
+
+
+def test_an_open_findings_evidence_is_never_scrubbed(
+    session: Session, make_finding: Callable[..., Finding]
+) -> None:
+    finding = make_finding(state=FindingState.OPEN, resolution=None, updated_at=LONG_AGO)
+    action = _action(session, finding)
+
+    result = retention.purge(session, _settings(retention_remediation_evidence_days=30), now=NOW)
+
+    assert result.remediation_evidence_scrubbed == 0
+    session.refresh(action)
+    assert action.evidence_links[0]["url"].startswith("https://")
+
+
+def test_a_recently_resolved_findings_evidence_is_inside_the_window(
+    session: Session, make_finding: Callable[..., Finding]
+) -> None:
+    action = _action(session, make_finding(updated_at=RECENTLY))
+
+    result = retention.purge(session, _settings(retention_remediation_evidence_days=30), now=NOW)
+
+    assert result.remediation_evidence_scrubbed == 0
+    session.refresh(action)
+    assert "url" in action.evidence_links[0]
+
+
+def test_a_scrubbed_action_is_not_scrubbed_again(
+    session: Session, make_finding: Callable[..., Finding]
+) -> None:
+    """`scrubbed_at` is what keeps every later round from re-reporting the same
+    rows — the audit trail should record one scrub, not one per beat."""
+    finding = make_finding(updated_at=LONG_AGO)
+    _action(session, finding)
+    settings = _settings(retention_remediation_evidence_days=30)
+
+    first = retention.purge(session, settings, now=NOW)
+    second = retention.purge(session, settings, now=NOW)
+
+    assert first.remediation_evidence_scrubbed == 1
+    assert second.remediation_evidence_scrubbed == 0
+
+
+def test_a_finding_reopened_mid_scrub_keeps_its_evidence(
+    session: Session, make_finding: Callable[..., Finding], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The race the review found, reproduced at the point it happens.
+
+    The scrub selects an old resolved finding; ingest commits a reopen in
+    another session *after* that select; the scrub then writes. The original
+    code re-read `finding.state` off the object its own select had loaded — a
+    value no other session's commit can change — and erased the URLs from a
+    finding that was live again.
+
+    Two things stop it now. The eligibility predicates ride on the UPDATE, so a
+    reopen already visible matches nothing; and the findings are selected
+    ``FOR UPDATE`` first, so on PostgreSQL a reopen cannot slip in behind the
+    statement snapshot at all. This asserts the first — SQLite has no row locks,
+    and a single-writer database does not need them.
+
+    The reopen is injected immediately before the scrub's write, which is
+    exactly the window a second session would use.
+    """
+    finding = make_finding(updated_at=LONG_AGO)
+    action = _action(session, finding)
+    settings = _settings(retention_remediation_evidence_days=30)
+
+    original_exec = session.exec
+    reopened = False
+
+    def reopen_before_writing(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal reopened
+        if not reopened and isinstance(statement, Update):
+            # Set first: the injected write goes back through this same hook.
+            reopened = True
+            # synchronize_session=False stands in for another session's commit —
+            # the row changes, the object this session loaded does not.
+            session.exec(
+                update(Finding)
+                .where(col(Finding.id) == finding.id)
+                .values(state=FindingState.OPEN, resolution=None)
+                .execution_options(synchronize_session=False)
+            )
+        return original_exec(statement, *args, **kwargs)
+
+    monkeypatch.setattr(session, "exec", reopen_before_writing)
+
+    result = retention.purge(session, settings, now=NOW)
+
+    assert reopened, "the interleaving never fired; the scrub did not reach its write"
+    assert result.remediation_evidence_scrubbed == 0
+    monkeypatch.undo()
+    session.refresh(action)
+    assert action.evidence_links[0]["url"] == "https://tickets.example.test/SEC-1"
+    assert action.note is not None
+    assert action.scrubbed_at is None
+
+
+def test_the_scrub_is_bounded_by_the_configured_batch(
+    session: Session, make_finding: Callable[..., Finding]
+) -> None:
+    """The lock counts findings, but the rows this pass *writes* are actions,
+    and one finding can carry many. Without a limit on the action query a
+    `retention_batch_size` of 1 still issued an unbounded number of updates in
+    the round that is meant to be the small one."""
+    finding = make_finding(updated_at=LONG_AGO)
+    for _ in range(3):
+        _action(session, finding)
+    settings = _settings(retention_remediation_evidence_days=30, retention_batch_size=1)
+
+    first = retention.purge(session, settings, now=NOW)
+    second = retention.purge(session, settings, now=NOW)
+
+    assert first.remediation_evidence_scrubbed == 1
+    assert second.remediation_evidence_scrubbed == 1  # the rest, next beat
+
+
+def test_the_audit_row_quantifies_every_mutation_the_round_made(
+    session: Session, make_finding: Callable[..., Finding]
+) -> None:
+    """The trail is what an operator reads a year later, so a round that only
+    scrubbed evidence has to be countable from it. The detail is spread from
+    `PurgeResult` rather than listed by hand, so a future counter arrives in
+    the audit row and the CLI summary together or not at all."""
+    from dataclasses import fields
+
+    finding = make_finding(updated_at=LONG_AGO)
+    _action(session, finding)
+
+    result = retention.purge(session, _settings(retention_remediation_evidence_days=30), now=NOW)
+
+    assert result.remediation_evidence_scrubbed == 1
+    assert result.findings == 0  # nothing was deleted; the round is scrub-only
+    event = session.exec(
+        select(AuditEvent).where(col(AuditEvent.action) == AUDIT_RETENTION_PURGED)
+    ).one()
+    for field in fields(retention.PurgeResult):
+        assert field.name in event.detail, field.name
+    assert event.detail["remediation_evidence_scrubbed"] == "1"

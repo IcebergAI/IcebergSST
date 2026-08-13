@@ -63,6 +63,11 @@ REQUIRED_ACTIONS = {
     "validation_policy.created",
     "validation_policy.updated",
     "validation_policy.deleted",
+    "correlation.reindexed",
+    "correlation.cluster_exported",
+    "remediation.recorded",
+    "remediation.verified",
+    "remediation.retracted",
 }
 
 

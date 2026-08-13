@@ -7,6 +7,8 @@ The bootstrap tooling an operator needs before the stack will start (see
 * ``generate-pepper`` — a fresh fingerprint pepper, printed **only** as a sealed
   ref for ``ICEBERG_FINGERPRINT_PEPPER_REF``. The pepper itself is never
   displayed; it is not something a human needs to see or store.
+* ``generate-correlation-key`` — a fresh exposure-cluster correlation key
+  (ADR 0011), printed only as a sealed ref for ``ICEBERG_CORRELATION_KEY_REF``.
 * ``seal`` — seal a connector credential read from **stdin**, printing its ref.
 
 Secrets are read from stdin, never from arguments: process arguments are visible
@@ -38,6 +40,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "generate-pepper",
         help="print a sealed fingerprint-pepper ref for ICEBERG_FINGERPRINT_PEPPER_REF",
     )
+    commands.add_parser(
+        "generate-correlation-key",
+        help="print a sealed correlation-key ref for ICEBERG_CORRELATION_KEY_REF",
+    )
     seal = commands.add_parser(
         "seal",
         help="seal a secret read from stdin and print its opaque ref",
@@ -67,6 +73,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "other backends generate the pepper in the store itself"
                     )
                 print(store.generate_pepper_ref())
+            case "generate-correlation-key":
+                store = build_secret_store()
+                if not isinstance(store, EnvKeyBackend):
+                    raise SecretStoreError(
+                        "generate-correlation-key is specific to the env-key backend; "
+                        "other backends generate the key in the store itself"
+                    )
+                print(store.generate_correlation_key_ref())
             case "seal":
                 # At most one trailing newline is stripped — the one `echo` or a
                 # heredoc appends. A credential that genuinely ends in newlines

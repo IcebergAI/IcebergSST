@@ -27,6 +27,7 @@ class SecretPurpose(StrEnum):
 
     CREDENTIAL = "credential"
     PEPPER = "pepper"
+    CORRELATION = "correlation"
     GENERIC = "generic"
 
 
@@ -87,3 +88,22 @@ class SecretStore(ABC):
         (docs/runbooks/key-rotation.md).
         """
         return None
+
+    @abstractmethod
+    def get_correlation_key(self) -> bytes | None:
+        """The exposure-cluster correlation key (ADR 0011), or None if unset.
+
+        The API is the only role that ever holds this key — unlike the pepper it
+        is never placed in a lease, so an engine (or anyone holding a plaintext
+        secret plus a captured pepper) cannot derive a correlation id. ``None``
+        means correlation is switched off, which ingest treats as "store NULL and
+        carry on"; the id can always be derived later from the stored hash.
+
+        **Abstract on purpose, unlike `get_previous_pepper`.** There, ``None``
+        is the ordinary state — no rotation window is open. Here it is
+        indistinguishable from a backend that simply never implemented key
+        retrieval, and the failure would be silent: ingest fails open on this,
+        so a deployment with a correlation key configured would quietly store
+        NULLs and show empty cluster screens with nothing in the logs. A new
+        backend has to answer this question, even if the answer is None.
+        """

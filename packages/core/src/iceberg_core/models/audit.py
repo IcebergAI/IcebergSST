@@ -45,6 +45,15 @@ AUDIT_RETENTION_PURGED = "retention.purged"
 AUDIT_VALIDATION_POLICY_CREATED = "validation_policy.created"
 AUDIT_VALIDATION_POLICY_UPDATED = "validation_policy.updated"
 AUDIT_VALIDATION_POLICY_DELETED = "validation_policy.deleted"
+#: Exposure clusters (ADR 0011, #140): the full recompute after a key rotation,
+#: and each analyst download of a cluster's membership.
+AUDIT_CORRELATION_REINDEXED = "correlation.reindexed"
+AUDIT_CORRELATION_CLUSTER_EXPORTED = "correlation.cluster_exported"
+#: Remediation evidence (ADR 0012, #142). Every change to an action is an
+#: administrative event; the rows themselves are write-once.
+AUDIT_REMEDIATION_RECORDED = "remediation.recorded"
+AUDIT_REMEDIATION_VERIFIED = "remediation.verified"
+AUDIT_REMEDIATION_RETRACTED = "remediation.retracted"
 
 #: Values for ``target_type``.
 AUDIT_TARGET_USER = "user"
@@ -56,6 +65,10 @@ AUDIT_TARGET_CHANNEL = "channel"
 #: A purge is about the deployment, not about one row, so it has no target id.
 AUDIT_TARGET_RETENTION = "retention"
 AUDIT_TARGET_VALIDATION_POLICY = "validation_policy"
+#: A reindex is deployment-wide (no target id); an export's target id is not a
+#: row id either — the correlation id itself goes in the detail.
+AUDIT_TARGET_CORRELATION = "correlation"
+AUDIT_TARGET_REMEDIATION = "remediation"
 
 
 class AuditEvent(IcebergModel, table=True):

@@ -34,6 +34,7 @@ VERSION = "1"
 MASTER_KEY_BYTES = 32  # AES-256
 NONCE_BYTES = 12  # GCM standard nonce
 PEPPER_BYTES = 32
+CORRELATION_KEY_BYTES = 32
 
 _GENERATE_HINT = "generate one with: python -m iceberg_core.secrets generate-master-key"
 
@@ -76,6 +77,7 @@ class EnvKeyBackend(SecretStore):
         *,
         pepper_ref: str | None = None,
         previous_pepper_ref: str | None = None,
+        correlation_key_ref: str | None = None,
     ) -> None:
         if len(master_key) != MASTER_KEY_BYTES:
             raise SecretStoreConfigError(
@@ -84,6 +86,7 @@ class EnvKeyBackend(SecretStore):
         self._aead = AESGCM(master_key)
         self._pepper_ref = pepper_ref
         self._previous_pepper_ref = previous_pepper_ref
+        self._correlation_key_ref = correlation_key_ref
 
     @classmethod
     def from_settings(cls, settings: SecretStoreSettings) -> EnvKeyBackend:
@@ -93,6 +96,7 @@ class EnvKeyBackend(SecretStore):
             decode_master_key(settings.master_key.get_secret_value()),
             pepper_ref=settings.fingerprint_pepper_ref,
             previous_pepper_ref=settings.previous_fingerprint_pepper_ref,
+            correlation_key_ref=settings.correlation_key_ref,
         )
 
     def __repr__(self) -> str:
@@ -150,6 +154,22 @@ class EnvKeyBackend(SecretStore):
         if self._previous_pepper_ref is None:
             return None
         return self.open_bytes(self._previous_pepper_ref, purpose=SecretPurpose.PEPPER)
+
+    def generate_correlation_key_ref(self) -> str:
+        """Seal a freshly generated correlation key and return its ref.
+
+        Rotating this key only invalidates correlation ids, which can be
+        re-derived from stored hashes (`reindex-correlation`) — far cheaper than
+        a pepper rotation, and the reason the two are separate keys (ADR 0011).
+        """
+        return self.seal_bytes(
+            _secrets.token_bytes(CORRELATION_KEY_BYTES), purpose=SecretPurpose.CORRELATION
+        )
+
+    def get_correlation_key(self) -> bytes | None:
+        if self._correlation_key_ref is None:
+            return None
+        return self.open_bytes(self._correlation_key_ref, purpose=SecretPurpose.CORRELATION)
 
 
 def _associated_data(purpose: SecretPurpose) -> bytes:

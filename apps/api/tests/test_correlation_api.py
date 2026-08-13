@@ -1,0 +1,425 @@
+"""The cluster API (ADR 0011, #140): analyst-scoped reads and an audited export.
+
+What is pinned here: clustering answers "same secret elsewhere" for analysts
+and nobody below; the aggregates describe whole clusters; the export is
+byte-stable, allowlisted, and leaves a trail row; and no response — finding or
+cluster — ever carries ``secret_hash``.
+"""
+
+import secrets
+from collections.abc import Callable
+from typing import Any
+
+import pytest
+from fastapi.testclient import TestClient
+from iceberg_core.correlation import correlation_id
+from iceberg_core.enums import FindingState, Severity, UserRole
+from iceberg_core.models import (
+    AUDIT_CORRELATION_CLUSTER_EXPORTED,
+    AuditEvent,
+    Finding,
+    Source,
+    User,
+)
+from sqlmodel import Session, col, delete, select
+
+KEY = secrets.token_bytes(32)
+
+#: Stored hashes for two distinct secret values.
+HASH_A = "a1" * 32
+HASH_B = "b2" * 32
+
+CLUSTER_A = correlation_id(HASH_A, key=KEY)
+CLUSTER_B = correlation_id(HASH_B, key=KEY)
+
+
+@pytest.fixture(name="clustered")
+def clustered_fixture(
+    make_source: Callable[..., Source],
+    make_finding: Callable[..., Finding],
+) -> dict[str, Any]:
+    """Secret A in two sources (three findings), secret B in one."""
+    wiki = make_source(name="confluence-wiki")
+    share = make_source(name="finance-share")
+    return {
+        "wiki": wiki,
+        "share": share,
+        "a1": make_finding(
+            wiki, secret_hash=HASH_A, correlation_id=CLUSTER_A, severity=Severity.HIGH
+        ),
+        "a2": make_finding(
+            wiki,
+            secret_hash=HASH_A,
+            correlation_id=CLUSTER_A,
+            severity=Severity.CRITICAL,
+            state=FindingState.RESOLVED,
+        ),
+        "a3": make_finding(share, secret_hash=HASH_A, correlation_id=CLUSTER_A),
+        "b1": make_finding(share, secret_hash=HASH_B, correlation_id=CLUSTER_B),
+    }
+
+
+@pytest.fixture(name="analyst_headers")
+def analyst_headers_fixture(
+    make_user: Callable[..., User], login_as: Callable[[User], dict[str, str]]
+) -> dict[str, str]:
+    return login_as(make_user(UserRole.ANALYST))
+
+
+@pytest.fixture(name="viewer_headers")
+def viewer_headers_fixture(
+    make_user: Callable[..., User], login_as: Callable[[User], dict[str, str]]
+) -> dict[str, str]:
+    return login_as(make_user(UserRole.VIEWER))
+
+
+def test_the_same_value_forms_one_cluster_across_sources(
+    client: TestClient, api: str, clustered: dict[str, Any], analyst_headers: dict[str, str]
+) -> None:
+    response = client.get(f"{api}/correlation/clusters", headers=analyst_headers)
+
+    assert response.status_code == 200, response.text
+    by_id = {item["correlation_id"]: item for item in response.json()["items"]}
+    assert by_id[CLUSTER_A]["finding_count"] == 3
+    assert by_id[CLUSTER_A]["source_count"] == 2
+    assert by_id[CLUSTER_A]["open_count"] == 2  # a2 is resolved
+    assert by_id[CLUSTER_A]["max_severity"] == "critical"
+    assert by_id[CLUSTER_B]["finding_count"] == 1
+
+
+def test_min_findings_is_an_explicit_filter(
+    client: TestClient, api: str, clustered: dict[str, Any], analyst_headers: dict[str, str]
+) -> None:
+    """Absent means 1 — the endpoint hides nothing by default."""
+    everything = client.get(f"{api}/correlation/clusters", headers=analyst_headers)
+    spread = client.get(
+        f"{api}/correlation/clusters", params={"min_findings": 2}, headers=analyst_headers
+    )
+
+    assert len(everything.json()["items"]) == 2
+    assert [item["correlation_id"] for item in spread.json()["items"]] == [CLUSTER_A]
+
+
+def test_the_list_paginates_in_correlation_id_order(
+    client: TestClient, api: str, clustered: dict[str, Any], analyst_headers: dict[str, str]
+) -> None:
+    first = client.get(f"{api}/correlation/clusters", params={"limit": 1}, headers=analyst_headers)
+
+    page = first.json()
+    assert len(page["items"]) == 1
+    assert page["next_cursor"] is not None
+
+    second = client.get(
+        f"{api}/correlation/clusters",
+        params={"limit": 1, "cursor": page["next_cursor"]},
+        headers=analyst_headers,
+    )
+    ids = [page["items"][0]["correlation_id"], second.json()["items"][0]["correlation_id"]]
+    assert ids == sorted([CLUSTER_A, CLUSTER_B])
+    assert second.json()["next_cursor"] is None
+
+
+def test_cluster_detail_groups_members_by_source(
+    client: TestClient, api: str, clustered: dict[str, Any], analyst_headers: dict[str, str]
+) -> None:
+    response = client.get(f"{api}/correlation/clusters/{CLUSTER_A}", headers=analyst_headers)
+
+    assert response.status_code == 200, response.text
+    detail = response.json()
+    groups = {group["source_name"]: group for group in detail["sources"]}
+    assert groups["confluence-wiki"]["finding_count"] == 2
+    assert groups["confluence-wiki"]["open_count"] == 1
+    assert groups["finance-share"]["finding_count"] == 1
+    # Members are the findings-API shape: per-location remediation state rides
+    # along, which is what makes the cluster a work list.
+    assert {member["state"] for member in detail["members"]} == {"open", "resolved"}
+
+
+def test_an_unknown_cluster_is_a_404_and_a_malformed_id_a_422(
+    client: TestClient, api: str, analyst_headers: dict[str, str]
+) -> None:
+    unknown = client.get(f"{api}/correlation/clusters/{'0' * 64}", headers=analyst_headers)
+    malformed = client.get(f"{api}/correlation/clusters/not-a-cluster", headers=analyst_headers)
+
+    assert unknown.status_code == 404
+    assert malformed.status_code == 422
+
+
+def test_viewers_get_403_from_every_cluster_route(
+    client: TestClient, api: str, clustered: dict[str, Any], viewer_headers: dict[str, str]
+) -> None:
+    """The comparison capability is scoped to the roles that remediate."""
+    for path in (
+        "/correlation/clusters",
+        f"/correlation/clusters/{CLUSTER_A}",
+        f"/correlation/clusters/{CLUSTER_A}/export",
+    ):
+        assert client.get(f"{api}{path}", headers=viewer_headers).status_code == 403, path
+
+
+def test_no_cluster_response_carries_the_secret_hash(
+    client: TestClient, api: str, clustered: dict[str, Any], analyst_headers: dict[str, str]
+) -> None:
+    for path in (
+        "/correlation/clusters",
+        f"/correlation/clusters/{CLUSTER_A}",
+        f"/correlation/clusters/{CLUSTER_A}/export",
+    ):
+        body = client.get(f"{api}{path}", headers=analyst_headers).text
+        assert HASH_A not in body, path
+        assert HASH_B not in body, path
+        assert "secret_hash" not in body, path
+
+
+def test_the_export_is_byte_stable_and_audited(
+    client: TestClient,
+    api: str,
+    session: Session,
+    clustered: dict[str, Any],
+    analyst_headers: dict[str, str],
+) -> None:
+    first = client.get(f"{api}/correlation/clusters/{CLUSTER_A}/export", headers=analyst_headers)
+    second = client.get(f"{api}/correlation/clusters/{CLUSTER_A}/export", headers=analyst_headers)
+
+    assert first.status_code == 200, first.text
+    assert first.content == second.content
+    assert first.headers["cache-control"] == "no-store"
+    assert first.headers["content-disposition"].startswith("attachment;")
+    manifest = first.json()
+    assert manifest["manifest_version"] == 1
+    assert manifest["finding_count"] == 3
+    # Narrower than the findings API on purpose: an export travels.
+    assert all("redacted_snippet" not in member for member in manifest["members"])
+    assert all("notes" not in member for member in manifest["members"])
+
+    events = session.exec(
+        select(AuditEvent).where(col(AuditEvent.action) == AUDIT_CORRELATION_CLUSTER_EXPORTED)
+    ).all()
+    assert len(events) == 2  # one per download — that is the point of the trail
+    assert events[0].detail["correlation_id"] == CLUSTER_A
+
+
+def test_finding_detail_shows_the_cluster_to_analysts_only(
+    client: TestClient,
+    api: str,
+    clustered: dict[str, Any],
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    finding_id = clustered["a1"].id
+
+    # Sequential logins: the test client holds one session cookie at a time.
+    headers = login_as(make_user(UserRole.ANALYST))
+    analyst_view = client.get(f"{api}/findings/{finding_id}", headers=headers).json()
+    headers = login_as(make_user(UserRole.VIEWER))
+    viewer_view = client.get(f"{api}/findings/{finding_id}", headers=headers).json()
+
+    assert analyst_view["correlation"] == {
+        "correlation_id": CLUSTER_A,
+        "finding_count": 3,
+        "source_count": 2,
+    }
+    # Role-shaped: same field, null — a viewer cannot learn "same as that one".
+    assert viewer_view["correlation"] is None
+
+
+def test_a_finding_without_an_id_has_a_null_cluster(
+    client: TestClient,
+    api: str,
+    make_finding: Callable[..., Finding],
+    analyst_headers: dict[str, str],
+) -> None:
+    finding = make_finding(correlation_id=None)
+
+    detail = client.get(f"{api}/findings/{finding.id}", headers=analyst_headers).json()
+
+    assert detail["correlation"] is None
+
+
+def test_no_engine_facing_schema_mentions_correlation() -> None:
+    """The key never leaves the API, so nothing an engine sends or receives may
+    grow a correlation field — this is what keeps ids unmintable outside."""
+    from iceberg_api.engines import schemas as engine_schemas
+    from iceberg_core.config import EngineSettings
+    from pydantic import BaseModel
+
+    for name in dir(engine_schemas):
+        model = getattr(engine_schemas, name)
+        if isinstance(model, type) and issubclass(model, BaseModel):
+            offenders = [f for f in model.model_fields if "correlation" in f.lower()]
+            assert offenders == [], f"{name} carries {offenders}"
+    assert [f for f in EngineSettings.model_fields if "correlation" in f.lower()] == []
+
+
+def test_an_oversized_cluster_is_refused_rather_than_truncated(
+    client: TestClient,
+    api: str,
+    clustered: dict[str, Any],
+    analyst_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Somebody works down this file to decide an exposure is closed, so a short
+    one is a wrong answer in the shape of a right one. Refuse, and name the
+    query that can walk a cluster of any size."""
+    from iceberg_api.correlation import service
+
+    # The route reads the ceiling off the module at call time, so patching it
+    # here is the same knob a deployment-sized cluster would hit.
+    monkeypatch.setattr(service, "MAX_EXPORT_MEMBERS", 2)
+
+    response = client.get(f"{api}/correlation/clusters/{CLUSTER_A}/export", headers=analyst_headers)
+
+    assert response.status_code == 409
+    assert f"/findings?correlation_id={CLUSTER_A}" in response.json()["detail"]
+
+
+def test_the_export_header_is_computed_from_the_body(
+    client: TestClient, api: str, clustered: dict[str, Any], analyst_headers: dict[str, str]
+) -> None:
+    """The counts are derived from the members listed, not from a separate
+    aggregate query, so the file cannot describe a membership it does not
+    carry — the failure that made a truncated work order dangerous."""
+    manifest = client.get(
+        f"{api}/correlation/clusters/{CLUSTER_A}/export", headers=analyst_headers
+    ).json()
+
+    assert len(manifest["members"]) == manifest["finding_count"] == 3
+    assert manifest["source_count"] == len({m["source_id"] for m in manifest["members"]}) == 2
+    assert manifest["open_count"] == sum(1 for m in manifest["members"] if m["state"] == "open")
+    assert manifest["max_severity"] == "critical"
+
+
+def test_the_oversized_fallback_walks_the_cluster_a_page_at_a_time(
+    client: TestClient, api: str, clustered: dict[str, Any], analyst_headers: dict[str, str]
+) -> None:
+    """The 409 names `/findings?correlation_id=…`; that filter has to exist, be
+    paginated, and cover exactly the cluster."""
+    first = client.get(
+        f"{api}/findings",
+        params={"correlation_id": CLUSTER_A, "limit": 2},
+        headers=analyst_headers,
+    ).json()
+
+    assert len(first["items"]) == 2
+    rest = client.get(
+        f"{api}/findings",
+        params={"correlation_id": CLUSTER_A, "limit": 2, "cursor": first["next_cursor"]},
+        headers=analyst_headers,
+    ).json()
+    walked = {item["id"] for item in first["items"] + rest["items"]}
+    assert walked == {str(clustered[key].id) for key in ("a1", "a2", "a3")}
+
+
+def test_the_correlation_filter_is_analyst_only(
+    client: TestClient, api: str, clustered: dict[str, Any], viewer_headers: dict[str, str]
+) -> None:
+    """It answers "everywhere this same secret is" — the same capability the
+    cluster routes gate, so the queue must not be a side door into it."""
+    refused = client.get(
+        f"{api}/findings", params={"correlation_id": CLUSTER_A}, headers=viewer_headers
+    )
+    unfiltered = client.get(f"{api}/findings", headers=viewer_headers)
+
+    assert refused.status_code == 403
+    assert unfiltered.status_code == 200  # the queue itself stays open to viewers
+
+
+def test_a_cluster_emptied_mid_request_is_a_404_not_a_500(
+    client: TestClient,
+    api: str,
+    session: Session,
+    clustered: dict[str, Any],
+    analyst_headers: dict[str, str],
+) -> None:
+    """The aggregate and the member select are separate statements, so retention
+    can purge the last member in between. Every summary field of a manifest is
+    an aggregate *over* its members, so there is no honest file for none of
+    them — and `min()` on an empty sequence is a 500, not an answer."""
+    from iceberg_api.correlation import service
+    from iceberg_api.correlation.manifest import build_cluster_manifest
+
+    real_members = service.cluster_members
+
+    def purge_then_load(db: Any, cid: str, **kwargs: Any) -> Any:
+        session.exec(delete(Finding).where(col(Finding.correlation_id) == cid))
+        session.commit()
+        return real_members(db, cid, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(service, "cluster_members", purge_then_load)
+        response = client.get(
+            f"{api}/correlation/clusters/{CLUSTER_A}/export", headers=analyst_headers
+        )
+
+    assert response.status_code == 404
+
+    # And the builder states the contract rather than failing arithmetically.
+    with pytest.raises(ValueError, match="at least one member"):
+        build_cluster_manifest(CLUSTER_A, [])
+
+
+def test_the_export_audit_counts_what_the_file_carried(
+    client: TestClient,
+    api: str,
+    session: Session,
+    clustered: dict[str, Any],
+    analyst_headers: dict[str, str],
+) -> None:
+    """The trail row says how much left the API, so it has to come from the
+    manifest rather than a second query. Reading the count separately meant a
+    purge between the two statements could file a three-member trail entry for
+    a two-member download."""
+    from iceberg_api.correlation import service
+
+    real_members = service.cluster_members
+
+    def purge_one_then_load(db: Any, cid: str, **kwargs: Any) -> Any:
+        doomed = clustered["a3"].id
+        session.exec(delete(Finding).where(col(Finding.id) == doomed))
+        session.commit()
+        return real_members(db, cid, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(service, "cluster_members", purge_one_then_load)
+        manifest = client.get(
+            f"{api}/correlation/clusters/{CLUSTER_A}/export", headers=analyst_headers
+        ).json()
+
+    event = session.exec(
+        select(AuditEvent).where(col(AuditEvent.action) == AUDIT_CORRELATION_CLUSTER_EXPORTED)
+    ).one()
+    assert manifest["finding_count"] == 2  # one member was purged mid-request
+    assert event.detail["finding_count"] == "2"  # …and the trail agrees
+
+
+def test_the_detail_summary_and_its_breakdown_are_one_statement(
+    client: TestClient, api: str, clustered: dict[str, Any], analyst_headers: dict[str, str]
+) -> None:
+    """The header is rolled up from the per-source rows under it, so the two
+    cannot describe different snapshots — and the per-source counts are of the
+    whole cluster, not of whatever fitted on the member page."""
+    detail = client.get(f"{api}/correlation/clusters/{CLUSTER_A}", headers=analyst_headers).json()
+
+    assert detail["finding_count"] == sum(g["finding_count"] for g in detail["sources"])
+    assert detail["open_count"] == sum(g["open_count"] for g in detail["sources"])
+    assert detail["source_count"] == len(detail["sources"])
+
+
+def test_the_breakdown_counts_the_cluster_not_the_page(
+    client: TestClient,
+    api: str,
+    clustered: dict[str, Any],
+    analyst_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deriving the groups from the member list meant a cluster past the page
+    cap reported the page's per-source counts under a whole-cluster header."""
+    from iceberg_api.correlation import service
+
+    monkeypatch.setattr(service, "MAX_DETAIL_MEMBERS", 1)
+
+    detail = client.get(f"{api}/correlation/clusters/{CLUSTER_A}", headers=analyst_headers).json()
+
+    assert len(detail["members"]) == 1  # the page is capped…
+    assert detail["finding_count"] == 3  # …the counts are not
+    assert sum(g["finding_count"] for g in detail["sources"]) == 3

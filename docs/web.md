@@ -44,7 +44,8 @@ contract (`docs/api.md`), and HTML routes in it would describe a second one.
 | Path | Screen | Drives | Read by |
 |---|---|---|---|
 | `/` | Overview queue | the list endpoints below | viewer |
-| `/findings`, `/findings/{id}` | Queue, detail, triage | `GET/PATCH /findings` | viewer / analyst to triage |
+| `/findings`, `/findings/{id}` | Queue, detail, triage, remediation panel | `GET/PATCH /findings`, `/remediation/guidance/{rule_id}`, `/findings/{id}/remediations…` (ADR 0012) | viewer / analyst to triage or record |
+| `/clusters`, `/clusters/{id}` | Exposure clusters: spread view, topology, export link | `GET /correlation/clusters…` (ADR 0011) | analyst |
 | `/scans`, `/scans/{id}` | List, live status, cancel | `/scans`, `/scans/{id}/tasks`, `/scans/{id}/cancel` | viewer / analyst to cancel |
 | `/sources`, `/sources/{id}` | List, create/edit, connectivity test | `/sources`, `/sources/{id}/test`, `/sources/{id}/scan` | viewer / admin to write |
 | `/schedules` | Cron cadences | `/schedules` | viewer / admin to write |

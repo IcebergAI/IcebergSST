@@ -18,6 +18,8 @@ from typing import Literal
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from iceberg_core.enums import Severity
+
 Environment = Literal["dev", "test", "prod"]
 SecretStoreBackend = Literal["env_key", "vault"]
 
@@ -71,6 +73,16 @@ class SecretStoreSettings(CoreSettings):
     #:
     #: docs/runbooks/key-rotation.md is the procedure; do not set this casually.
     previous_fingerprint_pepper_ref: str | None = None
+
+    #: The exposure-cluster correlation key (ADR 0011, #140). Unset = correlation
+    #: off; ingest stores NULL and the cluster views stay empty.
+    #:
+    #: API-role-only, like the master key and unlike the pepper: it is never
+    #: placed in a lease, so nothing outside the API can mint a correlation id.
+    #: Rotating it is a recompute, not a rescan — swap the ref and run
+    #: `python -m iceberg_api reindex-correlation`; there is no previous-key
+    #: window (docs/runbooks/key-rotation.md § Correlation key).
+    correlation_key_ref: str | None = None
 
 
 class ApiSettings(SecretStoreSettings):
@@ -209,6 +221,25 @@ class ApiSettings(SecretStoreSettings):
     #: Rows deleted per table per round, so one purge cannot lock a table for
     #: minutes on a database that has never been purged before.
     retention_batch_size: int = Field(default=1000, ge=1, le=100_000)
+
+    # ─── Exposure clusters (ADR 0011, #140) ───────────────────────────────────
+    #: NULL correlation ids repaired per maintenance round. NULLs appear when
+    #: rows predate the key or ingest ran while it was unreadable; one bounded
+    #: batch per beat keeps a large backlog from stalling the round.
+    correlation_backfill_batch_size: int = Field(default=500, ge=1, le=100_000)
+
+    # ─── Remediation evidence (ADR 0012, #142) ────────────────────────────────
+    #: Findings at or above this severity cannot be resolved without a
+    #: non-retracted remediation action carrying at least one evidence link.
+    #: Unset = policy off — the shipped default, like every optional behaviour;
+    #: judgements (false_positive, accepted_risk) and reconciliation's
+    #: auto-resolve are exempt by design.
+    remediation_evidence_min_severity: Severity | None = None
+
+    #: Days after a finding is resolved before its actions' evidence-link URLs
+    #: are scrubbed to labels-only (the note goes with them). 0 = never — the
+    #: rows themselves are never deleted while their finding exists.
+    retention_remediation_evidence_days: int = Field(default=0, ge=0)
 
     @field_validator("database_url", "redis_url")
     @classmethod

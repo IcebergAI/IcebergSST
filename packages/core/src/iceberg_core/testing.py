@@ -60,4 +60,11 @@ def secret_store_fixture() -> EnvKeyBackend:
     """
     master_key = secrets.token_bytes(32)
     bootstrap = EnvKeyBackend(master_key)
-    return EnvKeyBackend(master_key, pepper_ref=bootstrap.generate_pepper_ref())
+    return EnvKeyBackend(
+        master_key,
+        pepper_ref=bootstrap.generate_pepper_ref(),
+        # Configured by default so ingest exercises correlation derivation the
+        # way a fully configured deployment does; a test for the key-off path
+        # builds its own store without one.
+        correlation_key_ref=bootstrap.generate_correlation_key_ref(),
+    )

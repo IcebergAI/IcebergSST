@@ -67,6 +67,32 @@ def test_a_credential_ref_cannot_be_opened_as_a_pepper(store: EnvKeyBackend) -> 
         store.open_bytes(ref, purpose=SecretPurpose.PEPPER)
 
 
+def test_a_pepper_ref_cannot_be_opened_as_the_correlation_key(store: EnvKeyBackend) -> None:
+    """Pointing ICEBERG_CORRELATION_KEY_REF at the pepper's ref must fail to
+    open, not silently correlate under the same key engines already receive."""
+    pepper_ref = store.generate_pepper_ref()
+
+    with pytest.raises(SealedRefError):
+        store.open_bytes(pepper_ref, purpose=SecretPurpose.CORRELATION)
+
+
+def test_correlation_key_comes_back_through_the_interface() -> None:
+    master_key = secrets.token_bytes(MASTER_KEY_BYTES)
+    key_ref = EnvKeyBackend(master_key).generate_correlation_key_ref()
+
+    store = EnvKeyBackend(master_key, correlation_key_ref=key_ref)
+    key = store.get_correlation_key()
+
+    assert key is not None
+    assert len(key) == 32
+    assert store.get_correlation_key() == key  # stable across calls
+
+
+def test_correlation_key_is_optional(store: EnvKeyBackend) -> None:
+    """Unset means the feature is off, not misconfigured — unlike the pepper."""
+    assert store.get_correlation_key() is None
+
+
 def test_another_key_cannot_open_the_ref(store: EnvKeyBackend) -> None:
     ref = store.seal(CREDENTIAL)
     stranger = EnvKeyBackend(secrets.token_bytes(MASTER_KEY_BYTES))
@@ -187,6 +213,22 @@ def test_cli_generate_pepper_prints_only_a_ref(
     assert printed.startswith("envkey:1:pepper:")
 
 
+def test_cli_generate_correlation_key_prints_only_a_ref(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    master_key = generate_master_key()
+    monkeypatch.setenv("ICEBERG_MASTER_KEY", master_key)
+
+    assert cli_main(["generate-correlation-key"]) == 0
+
+    printed = capsys.readouterr().out.strip()
+    assert printed.startswith("envkey:1:correlation:")
+
+    store = EnvKeyBackend(decode_master_key(master_key), correlation_key_ref=printed)
+    key = store.get_correlation_key()
+    assert key is not None and len(key) == 32
+
+
 def test_cli_seal_reads_the_secret_from_stdin(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -216,3 +258,41 @@ class _FakeStdin:
 
     def read(self) -> str:
         return self._text
+
+
+def test_a_backend_cannot_inherit_a_silently_absent_correlation_key() -> None:
+    """`get_correlation_key` is abstract, unlike `get_previous_pepper`.
+
+    There, ``None`` is the ordinary state — no rotation window is open. Here it
+    is indistinguishable from a backend that never implemented key retrieval,
+    and the failure is silent: ingest fails open on this call, so the
+    deployment would store NULL ids and show empty cluster screens with nothing
+    in the logs. A new backend has to answer the question, even with None.
+    """
+    from iceberg_core.secrets.base import SecretStore
+
+    class BackendThatForgot(SecretStore):
+        def seal_bytes(self, plaintext: bytes, *, purpose: SecretPurpose) -> str:
+            return "ref"
+
+        def open_bytes(self, ref: str, *, purpose: SecretPurpose) -> bytes:
+            return b""
+
+        def get_pepper(self) -> bytes:
+            return b"\x00" * 32
+
+    with pytest.raises(TypeError, match="get_correlation_key"):
+        BackendThatForgot()  # type: ignore[abstract]
+
+
+def test_the_vault_backend_is_a_seam_that_refuses_rather_than_a_half_built_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No deployment can be running on a partially implemented backend: the
+    factory refuses the value outright (ADR 0007), which is why `env_key` being
+    the only implementation is not a gap in correlation coverage."""
+    monkeypatch.setenv("ICEBERG_MASTER_KEY", generate_master_key())
+    monkeypatch.setenv("ICEBERG_SECRET_STORE_BACKEND", "vault")
+
+    with pytest.raises(SecretStoreConfigError, match="not yet implemented"):
+        build_secret_store()

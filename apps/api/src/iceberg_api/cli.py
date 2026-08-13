@@ -15,6 +15,7 @@ import argparse
 import sys
 import uuid
 from collections.abc import Sequence
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -25,14 +26,18 @@ from iceberg_core.config import get_api_settings
 from iceberg_core.db import session_scope
 from iceberg_core.logging import configure_logging
 from iceberg_core.models import (
+    AUDIT_CORRELATION_REINDEXED,
     AUDIT_ENGINE_REGISTERED,
     AUDIT_ENGINE_TOKEN_ROTATED,
+    AUDIT_TARGET_CORRELATION,
     AUDIT_TARGET_ENGINE,
     Engine,
 )
+from iceberg_core.secrets import build_secret_store
 from sqlmodel import col, select
 
 from iceberg_api import audit, retention
+from iceberg_api.correlation import reindex
 from iceberg_api.dispatch import build_dispatcher
 from iceberg_api.engines.auth import mint_token
 from iceberg_api.scans import service
@@ -40,6 +45,14 @@ from iceberg_api.scheduler import postgres_advisory_lock, tick
 from iceberg_api.scheduler_launcher import build_launcher
 
 logger = structlog.get_logger()
+
+
+def _positive_int(raw: str) -> int:
+    """An argparse type that refuses zero and negatives with a usage error."""
+    value = int(raw)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be 1 or greater, got {value}")
+    return value
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -61,6 +74,21 @@ def _build_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "retention-purge",
         help="apply the configured retention windows now (see docs/retention.md)",
+    )
+
+    reindex_parser = commands.add_parser(
+        "reindex-correlation",
+        help="re-derive every finding's correlation id under the configured key (ADR 0011)",
+    )
+    reindex_parser.add_argument(
+        "--batch",
+        # Positive, and refused by the parser rather than the loop: `--batch 0`
+        # would walk with LIMIT 0, touch nothing, and exit reporting
+        # `updated=0` — the very signal the runbook reads as "rotation
+        # complete". A completion result has to mean the table was scanned.
+        type=_positive_int,
+        default=1000,
+        help="rows walked per batch (default: 1000)",
     )
 
     migrate_parser = commands.add_parser("migrate", help="apply migrations up to a revision")
@@ -124,6 +152,30 @@ def mint_engine_token(name: str, version: str | None) -> tuple[uuid.UUID, str]:
     return engine_id, minted.token
 
 
+def reindex_correlation(key: bytes, *, batch: int = 1000) -> reindex.ReindexOutcome:
+    """Re-derive every finding's correlation id under ``key`` and audit it.
+
+    The rotation's whole migration path (ADR 0011): no rescan, no engine, one
+    idempotent walk of the table. Audited like the other CLI door — recomputing
+    every cluster in the deployment is an administrative act worth a trail row.
+    """
+    with session_scope() as db:
+        outcome = reindex.reindex_all(db, key, batch=batch)
+        audit.record(
+            db,
+            actor_id=None,
+            action=AUDIT_CORRELATION_REINDEXED,
+            target_type=AUDIT_TARGET_CORRELATION,
+            target_id=None,
+            detail={
+                "scanned": str(outcome.scanned),
+                "updated": str(outcome.updated),
+                "via": "cli",
+            },
+        )
+    return outcome
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     configure_logging(role="api")
@@ -171,11 +223,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             # to see the number rather than discover it in the audit log.
             with session_scope() as db:
                 purged = retention.purge(db, settings)
+            # Every counter the result carries, built from the dataclass rather
+            # than a hand-written list: a run that only scrubbed remediation
+            # evidence — irreversibly removing URLs and notes — reported three
+            # zeroes while the audit row recorded the work.
             print(
-                f"findings={purged.findings} finding_events={purged.finding_events} "
-                f"audit_events={purged.audit_events}",
+                " ".join(f"{field}={value}" for field, value in asdict(purged).items()),
                 file=sys.stderr,
             )
+        case "reindex-correlation":
+            # The key-rotation migration path (docs/runbooks/key-rotation.md
+            # § Correlation key): after swapping ICEBERG_CORRELATION_KEY_REF,
+            # re-derive every stored id. Idempotent — run it again and
+            # `updated=0` is the signal the rotation is complete.
+            key = build_secret_store(settings).get_correlation_key()
+            if key is None:
+                print(
+                    "error: ICEBERG_CORRELATION_KEY_REF is not set; "
+                    "generate one with: python -m iceberg_core.secrets generate-correlation-key",
+                    file=sys.stderr,
+                )
+                return 2
+            outcome = reindex_correlation(key, batch=args.batch)
+            print(f"scanned={outcome.scanned} updated={outcome.updated}", file=sys.stderr)
     return 0
 
 

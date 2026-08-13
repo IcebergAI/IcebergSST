@@ -20,9 +20,10 @@ from iceberg_core.config import CoreSettings
 from iceberg_core.enums import UserRole
 from iceberg_core.models import User
 
-#: Every page a signed-in viewer may open. Admin-only screens are checked
-#: separately, because for a viewer they are a 403 rather than a page.
+#: Every page a signed-in viewer may open. Analyst-only and admin-only screens
+#: are checked separately, because for a lesser role they are a 403, not a page.
 VIEWER_PAGES = ("/", "/findings", "/scans", "/sources", "/schedules", "/suppressions", "/rules")
+ANALYST_PAGES = ("/clusters",)
 ADMIN_PAGES = ("/engines", "/channels", "/users")
 
 
@@ -150,6 +151,38 @@ def test_every_viewer_page_renders_for_a_viewer(
     assert response.headers["content-type"].startswith("text/html")
 
 
+@pytest.mark.parametrize("path", ANALYST_PAGES)
+def test_the_analyst_screens_refuse_a_viewer(
+    client: TestClient,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+    path: str,
+) -> None:
+    """The cluster view is the "same secret elsewhere" capability (ADR 0011) —
+    scoped to the roles that remediate, and enforced here, not by the rail."""
+    login_as(make_user(UserRole.VIEWER))
+
+    response = client.get(path, follow_redirects=True)
+
+    assert response.status_code == 403
+    assert "Your role does not allow this" in response.text
+
+
+@pytest.mark.parametrize("path", ANALYST_PAGES)
+def test_every_analyst_screen_renders_for_an_analyst(
+    client: TestClient,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+    path: str,
+) -> None:
+    login_as(make_user(UserRole.ANALYST))
+
+    response = client.get(path, follow_redirects=True)
+
+    assert response.status_code == 200, response.text[:400]
+    assert response.headers["content-type"].startswith("text/html")
+
+
 @pytest.mark.parametrize("path", ADMIN_PAGES)
 def test_the_admin_screens_refuse_a_viewer(
     client: TestClient,
@@ -193,10 +226,23 @@ def test_the_rail_shows_administration_only_to_an_admin(
     assert 'href="/engines"' not in analyst_view
     assert 'href="/users"' not in analyst_view
     assert 'href="/findings"' in analyst_view
+    assert 'href="/clusters"' in analyst_view
 
     assert 'href="/engines"' in admin_view
     assert 'href="/users"' in admin_view
     assert 'href="/channels"' in admin_view
+
+
+def test_the_rail_hides_clusters_from_a_viewer(
+    client: TestClient, make_user: Callable[..., User], login_as: Callable[[User], dict[str, str]]
+) -> None:
+    """Same rule as Administration: no link to a page that would only 403."""
+    login_as(make_user(UserRole.VIEWER))
+
+    body = client.get("/").text
+
+    assert 'href="/clusters"' not in body
+    assert 'href="/findings"' in body
 
 
 def test_the_shell_names_the_signed_in_user_and_their_role(
