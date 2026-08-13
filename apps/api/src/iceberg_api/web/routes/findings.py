@@ -18,6 +18,7 @@ Confluence and are the reason the CSP on this page is strict.
 import uuid
 from datetime import datetime
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Form, HTTPException, Query, Request, Response
 from iceberg_core.enums import FindingState, RemediationActionKind, Severity, UserRole
@@ -71,6 +72,18 @@ def _bool_or_none(value: str | None) -> bool | None:
     if value in {"true", "false"}:
         return value == "true"
     return None
+
+
+def _host_label(url: str) -> str:
+    """A viewer-safe default label for an evidence link: its host, nothing more.
+
+    Labels are viewer-visible while URLs are not (ADR 0012), so this deliberately
+    keeps the path, query and fragment out — those are where a ticket id, a
+    document name or an internal route would sit. A URL we cannot parse a host
+    from gets a neutral word rather than any part of the string itself.
+    """
+    host = urlsplit(url.strip()).hostname
+    return host[:200] if host else "evidence link"
 
 
 @router.get("/findings")
@@ -256,8 +269,12 @@ async def record_remediation_form(  # one parameter per form field
     """Record a containment action, then re-render the panel with it listed.
 
     Three static link rows rather than a scripted list (see the partial); a row
-    with a URL and no label gets the URL's host as its label rather than a 422 —
+    with a URL and no label gets the URL's *host* as its label rather than a 422 —
     the label is for humans, and "fill something in" is not worth a round trip.
+
+    The host, and never the URL: labels are the one part of an evidence link a
+    viewer is shown (ADR 0012), so defaulting the label to the URL would hand
+    every viewer the path and query the redaction exists to withhold.
     """
     error = None
     try:
@@ -268,9 +285,7 @@ async def record_remediation_form(  # one parameter per form field
             (link_url_3, link_label_3),
         ):
             if url.strip():
-                links.append(
-                    EvidenceLink(url=url.strip(), label=label.strip() or url.strip()[:200])
-                )
+                links.append(EvidenceLink(url=url.strip(), label=label.strip() or _host_label(url)))
         payload = RemediationCreate(
             kind=RemediationActionKind(kind),
             occurred_at=datetime.fromisoformat(occurred_at) if occurred_at.strip() else None,

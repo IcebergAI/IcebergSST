@@ -178,3 +178,36 @@ def test_the_evidence_policy_409_surfaces_on_the_triage_panel(
     assert response.status_code == 200  # the fragment, not a dead end
     assert "Not applied." in response.text
     assert "remediation action" in response.text
+
+
+def test_a_blank_label_defaults_to_the_host_not_the_url(
+    client: TestClient,
+    make_finding: Callable[..., Finding],
+    as_analyst: dict[str, str],
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """Labels are the one part of an evidence link a viewer sees, so the
+    blank-label default must not smuggle the URL through as a label."""
+    finding = make_finding()
+
+    recorded = client.post(
+        f"/findings/{finding.id}/remediations",
+        data={
+            "kind": "revoke",
+            "link_url_1": "https://tickets.example.test/SEC-7/secret-path?token=abc",
+            "link_label_1": "",
+            "csrf_token": as_analyst["X-CSRF-Token"],
+        },
+        headers=as_analyst,
+    )
+    assert recorded.status_code == 200, recorded.text[:400]
+
+    (action,) = client.get(f"/api/v1/findings/{finding.id}/remediations").json()
+    assert action["evidence_links"][0]["label"] == "tickets.example.test"
+
+    login_as(make_user(UserRole.VIEWER))
+    body = client.get(f"/findings/{finding.id}").text
+    assert "tickets.example.test" in body  # the host is the label, deliberately
+    assert "secret-path" not in body  # …but never the path
+    assert "token=abc" not in body  # …nor the query

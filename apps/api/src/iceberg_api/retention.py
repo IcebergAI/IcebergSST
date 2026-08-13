@@ -48,7 +48,7 @@ from iceberg_core.models import (
     FindingEvent,
     RemediationAction,
 )
-from sqlmodel import Session, col, delete, select
+from sqlmodel import Session, col, delete, select, update
 
 from iceberg_api import audit
 
@@ -235,37 +235,62 @@ def _scrub_remediation_evidence(db: Session, days: int, *, at: datetime, batch: 
     written about the same internals.
 
     The window is measured from the finding's resolution (its ``updated_at``,
-    same clock `_purge_findings` reads), and re-checked row by row at write
-    time — a finding that re-opened between select and write keeps its URLs,
-    because its evidence is live again.
+    the same clock `_purge_findings` reads), and the eligibility predicates are
+    **repeated on the write** — a finding that re-opened between the select and
+    the update keeps its URLs, because its evidence is live again.
     """
     cutoff = _cutoff(days, at)
     if cutoff is None:
         return 0
 
-    candidates = list(
-        db.exec(
-            select(RemediationAction, Finding)
-            .join(Finding, col(RemediationAction.finding_id) == col(Finding.id))
-            .where(col(RemediationAction.scrubbed_at).is_(None))
-            .where(col(Finding.state) == FindingState.RESOLVED)
-            .where(col(Finding.updated_at) < cutoff)
-            .limit(batch)
-        )
+    # The finding this action belongs to must *still* be resolved and still be
+    # older than the window at write time. Repeated on the UPDATE rather than
+    # re-read from the selected object: the object was loaded by this statement,
+    # so a Python-side re-check would only ever see the value it was loaded
+    # with, and a concurrent reopen committed in the ingest session would not
+    # refresh it. Same reasoning, and the same shape, as `_purge_findings`.
+    eligible = (
+        select(col(RemediationAction.id))
+        .join(Finding, col(RemediationAction.finding_id) == col(Finding.id))
+        .where(col(RemediationAction.scrubbed_at).is_(None))
+        .where(col(Finding.state) == FindingState.RESOLVED)
+        .where(col(Finding.updated_at) < cutoff)
     )
+    candidates = list(db.exec(eligible.limit(batch)))
+    if not candidates:
+        return 0
 
     scrubbed = 0
-    for action, finding in candidates:
-        if finding.state is not FindingState.RESOLVED:
-            continue  # re-opened since the select; its evidence is live again
-        action.evidence_links = [
-            {"label": link.get("label", "evidence"), "scrubbed": True}
-            for link in action.evidence_links
-        ]
-        action.note = None
-        action.scrubbed_at = at
-        db.add(action)
-        scrubbed += 1
+    for action_id in candidates:
+        # One statement per action: the scrubbed content is derived from the
+        # row's own JSON, so it cannot be expressed as a single bulk UPDATE —
+        # but each write still carries the predicates, and a row that stopped
+        # qualifying since the select simply updates nothing.
+        action = db.get(RemediationAction, action_id)
+        if action is None:
+            continue
+        result = db.exec(
+            update(RemediationAction)
+            .where(col(RemediationAction.id) == action_id)
+            .where(col(RemediationAction.scrubbed_at).is_(None))
+            .where(
+                col(RemediationAction.finding_id).in_(
+                    select(col(Finding.id))
+                    .where(col(Finding.state) == FindingState.RESOLVED)
+                    .where(col(Finding.updated_at) < cutoff)
+                )
+            )
+            .values(
+                evidence_links=[
+                    {"label": link.get("label", "evidence"), "scrubbed": True}
+                    for link in action.evidence_links
+                ],
+                note=None,
+                scrubbed_at=at,
+            )
+            .execution_options(synchronize_session="fetch")
+        )
+        scrubbed += int(result.rowcount)
     return scrubbed
 
 

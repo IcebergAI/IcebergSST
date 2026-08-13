@@ -16,8 +16,13 @@ def build_cluster_manifest(
     aggregate: ClusterAggregate,
     members: list[tuple[Finding, str]],
 ) -> ClusterExportManifest:
-    """Shape one cluster as its export. Pure — no session, no clock."""
+    """Shape one cluster as its export. Pure — no session, no clock.
+
+    ``members_omitted`` is derived from the gap between the aggregate's count
+    and the rows actually loaded, so a truncated export says so in the file.
+    """
     return ClusterExportManifest(
+        members_omitted=max(0, aggregate.finding_count - len(members)),
         correlation_id=aggregate.correlation_id,
         finding_count=aggregate.finding_count,
         source_count=aggregate.source_count,

@@ -88,3 +88,8 @@ class ClusterExportManifest(BaseModel):
     first_seen: UtcDatetime
     last_activity: UtcDatetime
     members: list[ClusterExportMember]
+    #: Members beyond the export ceiling, counted rather than dropped in
+    #: silence — ``finding_count`` describes the whole cluster, so without this
+    #: a reader could not tell a complete export from a truncated one. Zero for
+    #: every cluster small enough to fit, which is nearly all of them.
+    members_omitted: int = 0

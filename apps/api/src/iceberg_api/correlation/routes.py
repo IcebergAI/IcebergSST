@@ -132,7 +132,12 @@ async def export_cluster(
     API as a file is worth a trail row.
     """
     aggregate = _load_cluster(db, correlation_id)
-    manifest = build_cluster_manifest(aggregate, service.cluster_members(db, correlation_id))
+    manifest = build_cluster_manifest(
+        aggregate,
+        # The export's own ceiling, not the screen's: this file is what somebody
+        # remediates from, and anything it drops is counted in `members_omitted`.
+        service.cluster_members(db, correlation_id, limit=service.MAX_EXPORT_MEMBERS),
+    )
 
     audit.record(
         db,

@@ -29,7 +29,7 @@ from iceberg_core.models import (
     FindingEvent,
     RemediationAction,
 )
-from sqlmodel import Session, col, select
+from sqlmodel import Session, col, select, update
 
 from iceberg_api import audit
 from iceberg_api.remediation.schemas import (
@@ -127,17 +127,36 @@ def verify(
     comment: str | None,
     now: datetime | None = None,
 ) -> RemediationAction:
-    """Mark an action verified. One-way; a second verify is a conflict."""
+    """Mark an action verified. One-way; a second verify is a conflict.
+
+    The transition is claimed by a **conditional UPDATE** carrying the same
+    predicates, not by the in-memory check alone: two analysts pressing the
+    button at once would both pass a check-then-write and both append trail
+    rows, leaving two "verified" events for one transition. Whichever statement
+    matches zero rows lost the race and raises, exactly as a second sequential
+    attempt does.
+    """
     if action.retracted_at is not None:
         raise AlreadyRetracted("a retracted action cannot be verified")
     if action.verification is RemediationVerification.VERIFIED:
         raise AlreadyVerified("this action is already verified")
 
     at = now or datetime.now(UTC)
-    action.verification = RemediationVerification.VERIFIED
-    action.verified_by_id = actor_id
-    action.verified_at = at
-    db.add(action)
+    claimed = db.exec(
+        update(RemediationAction)
+        .where(col(RemediationAction.id) == action.id)
+        .where(col(RemediationAction.retracted_at).is_(None))
+        .where(col(RemediationAction.verification) == RemediationVerification.UNVERIFIED)
+        .values(
+            verification=RemediationVerification.VERIFIED,
+            verified_by_id=actor_id,
+            verified_at=at,
+        )
+        .execution_options(synchronize_session="fetch")
+    )
+    if int(claimed.rowcount) == 0:
+        raise AlreadyVerified("this action is already verified")
+    db.refresh(action)
 
     db.add(
         FindingEvent(
@@ -169,15 +188,27 @@ def retract(
     reason: str,
     now: datetime | None = None,
 ) -> RemediationAction:
-    """Close a wrong record. Set-once; the reason is the story."""
+    """Close a wrong record. Set-once; the reason is the story.
+
+    Claimed by a conditional UPDATE for the same reason `verify` is: two
+    concurrent retractions with different reasons would otherwise both succeed,
+    leaving one stored reason and two audit rows each claiming to be the one
+    that closed it.
+    """
     if action.retracted_at is not None:
         raise AlreadyRetracted("this action is already retracted")
 
     at = now or datetime.now(UTC)
-    action.retracted_at = at
-    action.retracted_by_id = actor_id
-    action.retracted_reason = reason
-    db.add(action)
+    claimed = db.exec(
+        update(RemediationAction)
+        .where(col(RemediationAction.id) == action.id)
+        .where(col(RemediationAction.retracted_at).is_(None))
+        .values(retracted_at=at, retracted_by_id=actor_id, retracted_reason=reason)
+        .execution_options(synchronize_session="fetch")
+    )
+    if int(claimed.rowcount) == 0:
+        raise AlreadyRetracted("this action is already retracted")
+    db.refresh(action)
 
     db.add(
         FindingEvent(

@@ -46,6 +46,14 @@ from iceberg_api.scheduler_launcher import build_launcher
 logger = structlog.get_logger()
 
 
+def _positive_int(raw: str) -> int:
+    """An argparse type that refuses zero and negatives with a usage error."""
+    value = int(raw)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be 1 or greater, got {value}")
+    return value
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m iceberg_api",
@@ -73,7 +81,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     reindex_parser.add_argument(
         "--batch",
-        type=int,
+        # Positive, and refused by the parser rather than the loop: `--batch 0`
+        # would walk with LIMIT 0, touch nothing, and exit reporting
+        # `updated=0` — the very signal the runbook reads as "rotation
+        # complete". A completion result has to mean the table was scanned.
+        type=_positive_int,
         default=1000,
         help="rows walked per batch (default: 1000)",
     )

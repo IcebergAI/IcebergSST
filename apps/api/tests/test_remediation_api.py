@@ -6,12 +6,13 @@ viewers see the fact of an action but never its note or link URLs; and link
 validation refuses exactly the strings this product exists to find.
 """
 
+import uuid
 from collections.abc import Callable
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from iceberg_core.enums import UserRole
+from iceberg_core.enums import FindingEventKind, UserRole
 from iceberg_core.models import (
     AuditEvent,
     Finding,
@@ -372,3 +373,81 @@ def test_a_live_validated_credential_reopens_through_the_same_path(
     assert len(detail["remediations"]) == 1  # remediation history intact
     kinds = [event["kind"] for event in detail["events"]]
     assert {"remediation", "reopened", "validation"} <= set(kinds)
+
+
+def test_a_concurrent_verify_loses_the_race_instead_of_double_writing(
+    client: TestClient,
+    api: str,
+    session: Session,
+    finding: Finding,
+    analyst: tuple[User, dict[str, str]],
+) -> None:
+    """Set-once has to be claimed by the database, not by a check-then-write.
+
+    The stale-object update below stands in for a second analyst's request
+    committing between this one's check and its write: with a plain in-memory
+    check both would succeed and the trail would carry two "verified" events
+    for one transition.
+    """
+    from iceberg_core.enums import RemediationVerification
+    from iceberg_core.models import RemediationAction
+    from sqlmodel import update
+
+    _, headers = analyst
+    action_id = _record(client, api, finding, headers).json()["id"]
+
+    # Another request verified it; this session's cached row still says otherwise.
+    session.exec(
+        update(RemediationAction)
+        .where(col(RemediationAction.id) == uuid.UUID(action_id))
+        .values(verification=RemediationVerification.VERIFIED)
+        .execution_options(synchronize_session=False)
+    )
+    session.commit()
+
+    response = client.post(
+        f"{api}/findings/{finding.id}/remediations/{action_id}/verify", json={}, headers=headers
+    )
+
+    assert response.status_code == 409
+    events = session.exec(
+        select(FindingEvent)
+        .where(col(FindingEvent.finding_id) == finding.id)
+        .where(col(FindingEvent.kind) == FindingEventKind.REMEDIATION_VERIFIED)
+    ).all()
+    assert len(events) == 0  # the loser wrote no trail row
+
+
+def test_a_concurrent_retract_loses_the_race(
+    client: TestClient,
+    api: str,
+    session: Session,
+    finding: Finding,
+    analyst: tuple[User, dict[str, str]],
+) -> None:
+    from datetime import UTC, datetime
+
+    from iceberg_core.models import RemediationAction
+    from sqlmodel import update
+
+    _, headers = analyst
+    action_id = _record(client, api, finding, headers).json()["id"]
+
+    session.exec(
+        update(RemediationAction)
+        .where(col(RemediationAction.id) == uuid.UUID(action_id))
+        .values(retracted_at=datetime.now(UTC), retracted_reason="already closed elsewhere")
+        .execution_options(synchronize_session=False)
+    )
+    session.commit()
+
+    response = client.post(
+        f"{api}/findings/{finding.id}/remediations/{action_id}/retract",
+        json={"reason": "the second reason that must not stick"},
+        headers=headers,
+    )
+
+    assert response.status_code == 409
+    action = session.get(RemediationAction, uuid.UUID(action_id))
+    assert action is not None
+    assert action.retracted_reason == "already closed elsewhere"  # first claim holds

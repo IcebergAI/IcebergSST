@@ -249,3 +249,50 @@ def test_no_engine_facing_schema_mentions_correlation() -> None:
             offenders = [f for f in model.model_fields if "correlation" in f.lower()]
             assert offenders == [], f"{name} carries {offenders}"
     assert [f for f in EngineSettings.model_fields if "correlation" in f.lower()] == []
+
+
+def test_the_export_counts_what_it_had_to_leave_out(
+    client: TestClient,
+    api: str,
+    clustered: dict[str, Any],
+    analyst_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A truncated export must say so in the file. `finding_count` describes the
+    whole cluster, so without `members_omitted` a reader cannot tell a complete
+    export from one that silently stopped at the ceiling."""
+    from iceberg_api.correlation import service
+
+    # The route reads the ceiling off the module at call time, so patching it
+    # here is the same knob a deployment-sized cluster would hit.
+    monkeypatch.setattr(service, "MAX_EXPORT_MEMBERS", 2)
+
+    manifest = client.get(
+        f"{api}/correlation/clusters/{CLUSTER_A}/export", headers=analyst_headers
+    ).json()
+
+    assert manifest["finding_count"] == 3  # the cluster is still described whole
+    assert len(manifest["members"]) == 2  # …but only two rows fitted
+    assert manifest["members_omitted"] == 1
+
+
+def test_a_complete_export_omits_nothing(
+    client: TestClient, api: str, clustered: dict[str, Any], analyst_headers: dict[str, str]
+) -> None:
+    manifest = client.get(
+        f"{api}/correlation/clusters/{CLUSTER_A}/export", headers=analyst_headers
+    ).json()
+
+    assert len(manifest["members"]) == manifest["finding_count"] == 3
+    assert manifest["members_omitted"] == 0
+
+
+def test_the_export_ceiling_is_larger_than_the_screens(
+    client: TestClient, api: str, analyst_headers: dict[str, str]
+) -> None:
+    """The screen's cap is a rendering budget; the export's is a work-order
+    budget. Sharing one was how a 501-member cluster exported 500 rows under a
+    header claiming 501."""
+    from iceberg_api.correlation import service
+
+    assert service.MAX_EXPORT_MEMBERS > service.MAX_DETAIL_MEMBERS

@@ -21,6 +21,12 @@ from sqlmodel import Session, col, select
 #: via ``finding_count`` rather than silently truncating.
 MAX_DETAIL_MEMBERS = 500
 
+#: The export's own, much larger ceiling. An export is a work order rather than
+#: a screen, so it carries far more — but it is still bounded, and what it drops
+#: is *counted* in the manifest (``members_omitted``) rather than silently lost,
+#: the same contract the coverage manifest's ``gaps_omitted`` keeps.
+MAX_EXPORT_MEMBERS = 10_000
+
 #: Severity ordered for SQL aggregation — the enum is stored as text, and
 #: ``max('critical', 'low')`` in collation order would elect the wrong one.
 _SEVERITY_RANK = case(
@@ -128,14 +134,22 @@ def cluster_aggregate(db: Session, correlation_id: str) -> ClusterAggregate | No
     return None if row is None else _to_aggregate(row)
 
 
-def cluster_members(db: Session, correlation_id: str) -> list[tuple[Finding, str]]:
-    """Members with their source names, `(created_at, id)` order, capped."""
+def cluster_members(
+    db: Session, correlation_id: str, *, limit: int = MAX_DETAIL_MEMBERS
+) -> list[tuple[Finding, str]]:
+    """Members with their source names, `(created_at, id)` order, capped.
+
+    The cap is a parameter rather than a constant because the two callers want
+    different ones: the detail screen renders a page, the export is a work order
+    somebody remediates from. Passing the screen's cap into the export was how
+    a 501-member cluster came to export 500 members under a header claiming 501.
+    """
     return list(
         db.exec(
             select(Finding, col(Source.name))
             .join(Source, col(Finding.source_id) == col(Source.id))
             .where(col(Finding.correlation_id) == correlation_id)
             .order_by(col(Finding.created_at), col(Finding.id))
-            .limit(MAX_DETAIL_MEMBERS)
+            .limit(limit)
         )
     )

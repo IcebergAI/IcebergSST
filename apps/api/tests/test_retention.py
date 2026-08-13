@@ -518,3 +518,56 @@ def test_a_scrubbed_action_is_not_scrubbed_again(
 
     assert first.remediation_evidence_scrubbed == 1
     assert second.remediation_evidence_scrubbed == 0
+
+
+def test_a_finding_reopened_mid_scrub_keeps_its_evidence(
+    session: Session, make_finding: Callable[..., Finding], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The race the review found, reproduced at the point it happens.
+
+    The scrub selects an old resolved finding; ingest commits a reopen in
+    another session *after* that select; the scrub then writes. The old code
+    re-read `finding.state` from the object its own select had loaded — a value
+    that cannot change no matter what another session commits — so it erased the
+    URLs off a finding that was live again. The predicates now ride on the
+    UPDATE, the way `_purge_findings` has always carried them, so the write
+    simply matches nothing.
+
+    The reopen is injected through the per-row `db.get`, which the scrub calls
+    between selecting and writing: that is exactly the window, and it is the one
+    place a single-threaded SQLite suite can stand in for a second session.
+    """
+    finding = make_finding(updated_at=LONG_AGO)
+    action = _action(session, finding)
+    settings = _settings(retention_remediation_evidence_days=30)
+
+    original_get = session.get
+    reopened = False
+
+    def reopen_then_get(model: Any, primary_key: Any) -> Any:
+        nonlocal reopened
+        if not reopened:
+            reopened = True
+            # synchronize_session=False is what makes this a faithful stand-in
+            # for another session's commit: the row changes, the object this
+            # session already loaded does not. That stale object is precisely
+            # what the old Python-side re-check consulted.
+            session.exec(
+                update(Finding)
+                .where(col(Finding.id) == finding.id)
+                .values(state=FindingState.OPEN, resolution=None)
+                .execution_options(synchronize_session=False)
+            )
+        return original_get(model, primary_key)
+
+    monkeypatch.setattr(session, "get", reopen_then_get)
+
+    result = retention.purge(session, settings, now=NOW)
+
+    assert reopened, "the interleaving never fired; the scrub did not reach its write"
+    assert result.remediation_evidence_scrubbed == 0
+    monkeypatch.undo()
+    session.refresh(action)
+    assert action.evidence_links[0]["url"] == "https://tickets.example.test/SEC-1"
+    assert action.note is not None
+    assert action.scrubbed_at is None

@@ -131,3 +131,21 @@ def test_reindex_correlation_rederives_and_audits(session: Session) -> None:
     assert len(events) == 2
     assert events[0].detail["updated"] == "2"
     assert events[1].detail["updated"] == "0"
+
+
+@pytest.mark.parametrize("batch", ["0", "-1"])
+def test_a_non_positive_batch_is_refused_before_anything_runs(
+    session: Session, capsys: pytest.CaptureFixture[str], batch: str
+) -> None:
+    """`updated=0` is the runbook's signal that a key rotation converged, so it
+    has to mean the table was walked. `--batch 0` would walk with LIMIT 0 and
+    report exactly that having touched nothing — the parser refuses it instead."""
+    stale = _seed_finding(session, correlation="0" * 64)
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["reindex-correlation", "--batch", batch])
+
+    assert exit_info.value.code == 2  # argparse usage error, not a success path
+    assert "must be 1 or greater" in capsys.readouterr().err
+    session.refresh(stale)
+    assert stale.correlation_id == "0" * 64  # nothing was touched
