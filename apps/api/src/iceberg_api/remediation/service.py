@@ -229,16 +229,23 @@ def retract(
     return action
 
 
-def actions_for(db: Session, finding_id: uuid.UUID) -> list[RemediationAction]:
+def actions_for(
+    db: Session, finding_id: uuid.UUID, *, for_update: bool = False
+) -> list[RemediationAction]:
     """Every action on one finding, oldest first. Unpaginated and bounded —
-    a finding accrues actions at human speed."""
-    return list(
-        db.exec(
-            select(RemediationAction)
-            .where(col(RemediationAction.finding_id) == finding_id)
-            .order_by(col(RemediationAction.created_at), col(RemediationAction.id))
-        )
+    a finding accrues actions at human speed.
+
+    ``for_update`` locks the rows for the rest of the transaction; only the
+    evidence-policy check asks for it, and `qualifying_action_exists` says why.
+    """
+    statement = (
+        select(RemediationAction)
+        .where(col(RemediationAction.finding_id) == finding_id)
+        .order_by(col(RemediationAction.created_at), col(RemediationAction.id))
     )
+    if for_update:
+        statement = statement.with_for_update()
+    return list(db.exec(statement))
 
 
 def _naive_utc(value: datetime) -> datetime:
@@ -289,13 +296,23 @@ def qualifying_action_exists(db: Session, finding_id: uuid.UUID) -> bool:
     whatever was done before did not close this exposure. Counting the old
     action would let a re-sighted secret be closed again instantly on the
     strength of the attempt that demonstrably failed.
+
+    **The actions are locked, not merely read.** This authorises a write to a
+    *different* row — the finding's state — so an ordinary read leaves a window
+    in which a concurrent retraction commits between the check and the
+    resolution, and the finding lands resolved on evidence that no longer
+    qualifies. Holding the rows until the caller's transaction ends orders the
+    two: a retraction that arrives first is seen here, and one that arrives
+    second waits and lands after a resolution that was correct when it
+    committed. (SQLite has no row locks and its dialect omits the clause; a
+    single-writer database has no such interleaving to order.)
     """
     since = last_reopened_at(db, finding_id)
     return any(
         action.retracted_at is None
         and _carries_usable_evidence(action)
         and (since is None or _naive_utc(action.created_at) >= since)
-        for action in actions_for(db, finding_id)
+        for action in actions_for(db, finding_id, for_update=True)
     )
 
 

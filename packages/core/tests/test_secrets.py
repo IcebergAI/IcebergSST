@@ -258,3 +258,41 @@ class _FakeStdin:
 
     def read(self) -> str:
         return self._text
+
+
+def test_a_backend_cannot_inherit_a_silently_absent_correlation_key() -> None:
+    """`get_correlation_key` is abstract, unlike `get_previous_pepper`.
+
+    There, ``None`` is the ordinary state — no rotation window is open. Here it
+    is indistinguishable from a backend that never implemented key retrieval,
+    and the failure is silent: ingest fails open on this call, so the
+    deployment would store NULL ids and show empty cluster screens with nothing
+    in the logs. A new backend has to answer the question, even with None.
+    """
+    from iceberg_core.secrets.base import SecretStore
+
+    class BackendThatForgot(SecretStore):
+        def seal_bytes(self, plaintext: bytes, *, purpose: SecretPurpose) -> str:
+            return "ref"
+
+        def open_bytes(self, ref: str, *, purpose: SecretPurpose) -> bytes:
+            return b""
+
+        def get_pepper(self) -> bytes:
+            return b"\x00" * 32
+
+    with pytest.raises(TypeError, match="get_correlation_key"):
+        BackendThatForgot()  # type: ignore[abstract]
+
+
+def test_the_vault_backend_is_a_seam_that_refuses_rather_than_a_half_built_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No deployment can be running on a partially implemented backend: the
+    factory refuses the value outright (ADR 0007), which is why `env_key` being
+    the only implementation is not a gap in correlation coverage."""
+    monkeypatch.setenv("ICEBERG_MASTER_KEY", generate_master_key())
+    monkeypatch.setenv("ICEBERG_SECRET_STORE_BACKEND", "vault")
+
+    with pytest.raises(SecretStoreConfigError, match="not yet implemented"):
+        build_secret_store()

@@ -45,7 +45,15 @@ correlation_id = HMAC-SHA256(correlation_key, "iceberg.correlation.v1" ‖ secre
   past the export bound answers 409 pointing at `GET /findings?correlation_id=…`, which pages.
   The detail screen's cap is a different thing — a rendering budget that says so on the page.
   Somebody works down an export to decide an exposure is closed; a truncated one is a wrong
-  answer wearing the shape of a right one.
+  answer wearing the shape of a right one. A cluster whose last member is purged between the
+  aggregate and the member select answers 404 — the cluster stopped existing — rather than
+  producing a manifest that aggregates over nothing.
+- **`SecretStore.get_correlation_key` is abstract**, unlike `get_previous_pepper` where `None`
+  is the ordinary state. Here `None` is indistinguishable from a backend that never implemented
+  key retrieval, and the failure would be silent, because ingest fails open on this call: the
+  deployment would store NULL ids and show empty cluster screens with nothing in the logs. The
+  Vault backend is a seam that refuses (ADR 0007), so no deployment can be running on a
+  half-built one — but a future backend has to answer the question, even if the answer is None.
 
 **Scope.** This deployment is single-org by design (`CLAUDE.md` invariant 5), so "correlate
 within one organization only" reduces to: correlation is scoped to *this deployment's

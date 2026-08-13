@@ -8,6 +8,7 @@ for reconciliation's auto-resolve, triage behaves exactly as it always has.
 
 import uuid
 from collections.abc import Callable, Iterator
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -273,3 +274,58 @@ def test_judgements_are_exempt(
     )
 
     assert response.status_code == 200, response.text
+
+
+def test_the_policy_check_locks_the_evidence_it_relies_on(
+    session: Session, make_finding: Callable[..., Finding]
+) -> None:
+    """The check authorises a write to a *different* row — the finding's state.
+
+    So an ordinary read leaves a window: a retraction can commit between the
+    check and the resolution, and the finding lands resolved on evidence that
+    no longer qualifies. Locking the actions orders the two. SQLite has no row
+    locks, so what is pinned here is that the lock is asked for and that it
+    renders on the backend that has them.
+    """
+    from iceberg_api.remediation import service as remediation
+    from sqlalchemy.dialects import postgresql
+    from sqlmodel import col, select
+
+    finding = make_finding(severity=Severity.HIGH)
+    locked: list[bool] = []
+    real = remediation.actions_for
+
+    def spy(db: Session, finding_id: uuid.UUID, *, for_update: bool = False) -> list[Any]:
+        locked.append(for_update)
+        return real(db, finding_id, for_update=for_update)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(remediation, "actions_for", spy)
+        remediation.qualifying_action_exists(session, finding.id)
+
+    assert locked == [True]
+
+    statement = (
+        select(RemediationAction)
+        .where(col(RemediationAction.finding_id) == finding.id)
+        .with_for_update()
+    )
+    rendered = str(statement.compile(dialect=postgresql.dialect()))  # type: ignore[no-untyped-call]
+    assert "FOR UPDATE" in rendered
+
+
+def test_reading_the_action_list_does_not_lock_it(
+    session: Session, make_finding: Callable[..., Finding]
+) -> None:
+    """Only the policy check locks; the panel and the API list are plain reads,
+    and a lock held across an ordinary GET would be a queue nobody asked for."""
+    from iceberg_api.remediation import service as remediation
+    from sqlalchemy.dialects import postgresql
+    from sqlmodel import col, select
+
+    finding = make_finding()
+    assert remediation.actions_for(session, finding.id) == []
+
+    plain = select(RemediationAction).where(col(RemediationAction.finding_id) == finding.id)
+    rendered = str(plain.compile(dialect=postgresql.dialect()))  # type: ignore[no-untyped-call]
+    assert "FOR UPDATE" not in rendered

@@ -24,8 +24,14 @@ def build_cluster_manifest(
 ) -> ClusterExportManifest:
     """Shape one cluster as its export. Pure — no session, no clock.
 
-    ``members`` must be the cluster's whole membership; it is never a page.
+    ``members`` must be the cluster's whole membership, and non-empty: every
+    summary field here is an aggregate *over* the members, so there is no
+    honest manifest for none of them. The route answers 404 in that case, which
+    is what an emptied cluster means; this guard is so a future caller finds
+    the contract rather than a bare `min() arg is an empty sequence`.
     """
+    if not members:
+        raise ValueError("a cluster manifest needs at least one member")
     findings = [finding for finding, _ in members]
     return ClusterExportManifest(
         correlation_id=correlation_id,

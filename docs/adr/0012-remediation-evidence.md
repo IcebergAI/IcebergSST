@@ -53,6 +53,13 @@ secret needed rotating) and reconciliation's auto-resolve (an inference from abs
 reappearing credential reopens the finding with its remediation history intact, which ingest
 already guarantees — and, per the paragraph above, with the closure bar reset).
 
+**The policy check locks the evidence it relies on.** It authorises a write to a *different*
+row — the finding's state — so an ordinary read leaves a window in which a retraction commits
+between the check and the resolution, and the finding lands resolved on evidence that no longer
+qualifies. The qualifying actions are selected `FOR UPDATE`, which orders the two: a retraction
+arriving first is seen by the check, and one arriving second waits and lands after a resolution
+that was correct at the moment it committed.
+
 **Scrubbing and the policy interact, so retention is checked against a lock.** The scrub writes
 `remediation_action` rows on the strength of a predicate that lives on `finding`; repeating the
 predicate in the UPDATE is necessary but not sufficient, because under READ COMMITTED the

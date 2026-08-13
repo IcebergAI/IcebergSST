@@ -97,6 +97,11 @@ async def read_cluster(
     """One cluster's topology: members grouped by source, each triageable."""
     aggregate = _load_cluster(db, correlation_id)
     members = service.cluster_members(db, correlation_id)
+    if not members:
+        # Same two-statement race as the export: the last member can be purged
+        # between the aggregate and this select, and a detail page describing a
+        # cluster with no rows in it is a worse answer than "not found".
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "cluster not found")
 
     groups: dict[uuid.UUID, ClusterSourceGroup] = {}
     for finding, source_name in members:
@@ -146,6 +151,12 @@ async def export_cluster(
             f"exported as one work order; walk it with "
             f"GET /findings?correlation_id={correlation_id}",
         )
+    if not members:
+        # The aggregate above and this select are separate statements, so
+        # retention can purge the last member in between. The cluster stopped
+        # existing; say so the way an unknown id is answered, rather than
+        # building a manifest whose summary aggregates over nothing.
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "cluster not found")
     manifest = build_cluster_manifest(correlation_id, members)
 
     audit.record(

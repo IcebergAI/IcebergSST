@@ -21,7 +21,7 @@ from iceberg_core.models import (
     Source,
     User,
 )
-from sqlmodel import Session, col, select
+from sqlmodel import Session, col, delete, select
 
 KEY = secrets.token_bytes(32)
 
@@ -322,3 +322,37 @@ def test_the_correlation_filter_is_analyst_only(
 
     assert refused.status_code == 403
     assert unfiltered.status_code == 200  # the queue itself stays open to viewers
+
+
+def test_a_cluster_emptied_mid_request_is_a_404_not_a_500(
+    client: TestClient,
+    api: str,
+    session: Session,
+    clustered: dict[str, Any],
+    analyst_headers: dict[str, str],
+) -> None:
+    """The aggregate and the member select are separate statements, so retention
+    can purge the last member in between. Every summary field of a manifest is
+    an aggregate *over* its members, so there is no honest file for none of
+    them — and `min()` on an empty sequence is a 500, not an answer."""
+    from iceberg_api.correlation import service
+    from iceberg_api.correlation.manifest import build_cluster_manifest
+
+    real_members = service.cluster_members
+
+    def purge_then_load(db: Any, cid: str, **kwargs: Any) -> Any:
+        session.exec(delete(Finding).where(col(Finding.correlation_id) == cid))
+        session.commit()
+        return real_members(db, cid, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(service, "cluster_members", purge_then_load)
+        response = client.get(
+            f"{api}/correlation/clusters/{CLUSTER_A}/export", headers=analyst_headers
+        )
+
+    assert response.status_code == 404
+
+    # And the builder states the contract rather than failing arithmetically.
+    with pytest.raises(ValueError, match="at least one member"):
+        build_cluster_manifest(CLUSTER_A, [])

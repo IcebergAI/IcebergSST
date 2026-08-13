@@ -7,11 +7,18 @@ codebase.
 
 **The Vault seam.** ``ICEBERG_SECRET_STORE_BACKEND=vault`` is a recognised,
 validated value that raises a deliberate error until the backend lands (M4
-hardening). A ``VaultBackend`` implements the same two primitives — seal to an
-opaque ref, open a ref — with the ref pointing at a Vault path
-(``vault:1:<mount>/<path>#<version>``) instead of carrying ciphertext, and with
-Vault's transit/KV engine holding the key material the operator would otherwise
-manage by hand. Nothing above this module changes.
+hardening) — it is a documented seam, not a supported backend, so no deployment
+can be running on a half-built one. A ``VaultBackend`` implements the same two
+primitives — seal to an opaque ref, open a ref — with the ref pointing at a
+Vault path (``vault:1:<mount>/<path>#<version>``) instead of carrying
+ciphertext, and with Vault's transit/KV engine holding the key material the
+operator would otherwise manage by hand. Nothing above this module changes.
+
+It must also answer all three key accessors — ``get_pepper``,
+``get_previous_pepper``, ``get_correlation_key``. The first and last are
+abstract precisely so that cannot be forgotten: a backend that inherited a
+``None`` correlation key would disable exposure clustering in silence, because
+ingest fails open on that call (ADR 0011).
 """
 
 from iceberg_core.config import SecretStoreSettings, get_secret_store_settings
