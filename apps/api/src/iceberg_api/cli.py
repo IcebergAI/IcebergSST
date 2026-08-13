@@ -15,6 +15,7 @@ import argparse
 import sys
 import uuid
 from collections.abc import Sequence
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -222,9 +223,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             # to see the number rather than discover it in the audit log.
             with session_scope() as db:
                 purged = retention.purge(db, settings)
+            # Every counter the result carries, built from the dataclass rather
+            # than a hand-written list: a run that only scrubbed remediation
+            # evidence — irreversibly removing URLs and notes — reported three
+            # zeroes while the audit row recorded the work.
             print(
-                f"findings={purged.findings} finding_events={purged.finding_events} "
-                f"audit_events={purged.audit_events}",
+                " ".join(f"{field}={value}" for field, value in asdict(purged).items()),
                 file=sys.stderr,
             )
         case "reindex-correlation":

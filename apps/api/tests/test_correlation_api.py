@@ -356,3 +356,37 @@ def test_a_cluster_emptied_mid_request_is_a_404_not_a_500(
     # And the builder states the contract rather than failing arithmetically.
     with pytest.raises(ValueError, match="at least one member"):
         build_cluster_manifest(CLUSTER_A, [])
+
+
+def test_the_export_audit_counts_what_the_file_carried(
+    client: TestClient,
+    api: str,
+    session: Session,
+    clustered: dict[str, Any],
+    analyst_headers: dict[str, str],
+) -> None:
+    """The trail row says how much left the API, so it has to come from the
+    manifest rather than a second query. Reading the count separately meant a
+    purge between the two statements could file a three-member trail entry for
+    a two-member download."""
+    from iceberg_api.correlation import service
+
+    real_members = service.cluster_members
+
+    def purge_one_then_load(db: Any, cid: str, **kwargs: Any) -> Any:
+        doomed = clustered["a3"].id
+        session.exec(delete(Finding).where(col(Finding.id) == doomed))
+        session.commit()
+        return real_members(db, cid, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(service, "cluster_members", purge_one_then_load)
+        manifest = client.get(
+            f"{api}/correlation/clusters/{CLUSTER_A}/export", headers=analyst_headers
+        ).json()
+
+    event = session.exec(
+        select(AuditEvent).where(col(AuditEvent.action) == AUDIT_CORRELATION_CLUSTER_EXPORTED)
+    ).one()
+    assert manifest["finding_count"] == 2  # one member was purged mid-request
+    assert event.detail["finding_count"] == "2"  # …and the trail agrees

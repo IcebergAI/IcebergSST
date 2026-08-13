@@ -149,3 +149,33 @@ def test_a_non_positive_batch_is_refused_before_anything_runs(
     assert "must be 1 or greater" in capsys.readouterr().err
     session.refresh(stale)
     assert stale.correlation_id == "0" * 64  # nothing was touched
+
+
+def test_the_purge_summary_names_every_counter_the_result_carries(
+    session: Session, capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hand-written summary drifts the moment retention grows a counter, and
+    it did: a run that only scrubbed remediation evidence — irreversibly
+    dropping URLs and notes — printed three zeroes. The line is built from the
+    dataclass so a new field cannot be invisible.
+
+    Logging setup is stubbed out: `main` would bind structlog to this test's
+    captured stream, and that binding outlives the test and writes to a closed
+    file. The summary is what is under test, not the logging bootstrap.
+    """
+    from dataclasses import fields
+
+    from iceberg_api.retention import PurgeResult
+    from iceberg_core.config import reset_settings_cache
+
+    monkeypatch.setattr(cli, "configure_logging", lambda **_: None)
+    monkeypatch.setenv("ICEBERG_DATABASE_URL", "sqlite://")
+    reset_settings_cache()
+    try:
+        assert cli.main(["retention-purge"]) == 0
+    finally:
+        reset_settings_cache()
+
+    printed = capfd.readouterr().err
+    for field in fields(PurgeResult):
+        assert f"{field.name}=" in printed, field.name

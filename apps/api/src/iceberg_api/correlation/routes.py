@@ -94,13 +94,22 @@ async def read_cluster(
     analyst: AnalystUser,
     db: SessionDep,
 ) -> ClusterDetail:
-    """One cluster's topology: members grouped by source, each triageable."""
+    """One cluster's topology: members grouped by source, each triageable.
+
+    The summary here describes the **whole** cluster and ``members`` is a page
+    of it (`MAX_DETAIL_MEMBERS`) — two statements, deliberately, because the
+    counts an analyst needs are of the cluster, not of the page. So the header
+    can legitimately exceed the list, and the console says so rather than
+    implying the page is the membership. A member purged between the two reads
+    is the same skew as one beyond the cap, and reads the same way. The export
+    is where that gap matters, and it has no aggregate at all.
+    """
     aggregate = _load_cluster(db, correlation_id)
     members = service.cluster_members(db, correlation_id)
     if not members:
-        # Same two-statement race as the export: the last member can be purged
-        # between the aggregate and this select, and a detail page describing a
-        # cluster with no rows in it is a worse answer than "not found".
+        # Every member purged since the aggregate: the cluster stopped existing,
+        # and a page describing a cluster with no rows in it is a worse answer
+        # than the "not found" an unknown id already gets.
         raise HTTPException(status.HTTP_404_NOT_FOUND, "cluster not found")
 
     groups: dict[uuid.UUID, ClusterSourceGroup] = {}
@@ -140,8 +149,13 @@ async def export_cluster(
     decide the exposure is closed, so a truncated one is a wrong answer wearing
     the shape of a right one. Past `MAX_EXPORT_MEMBERS` the route says so and
     names the paginated query that can walk a cluster of any size.
+
+    **One statement decides everything.** The membership select is the only
+    read here — there is no aggregate query to disagree with it. Existence,
+    size, the manifest, and the audit row's count all come from the same rows,
+    so no concurrent purge can leave the file and its trail entry describing
+    different clusters.
     """
-    aggregate = _load_cluster(db, correlation_id)
     # One row past the ceiling: enough to tell "too big" from "all of it".
     members = service.cluster_members(db, correlation_id, limit=service.MAX_EXPORT_MEMBERS + 1)
     if len(members) > service.MAX_EXPORT_MEMBERS:
@@ -152,10 +166,8 @@ async def export_cluster(
             f"GET /findings?correlation_id={correlation_id}",
         )
     if not members:
-        # The aggregate above and this select are separate statements, so
-        # retention can purge the last member in between. The cluster stopped
-        # existing; say so the way an unknown id is answered, rather than
-        # building a manifest whose summary aggregates over nothing.
+        # Either the id was never minted or retention purged the last member.
+        # Both mean the same thing to a caller: there is no such cluster.
         raise HTTPException(status.HTTP_404_NOT_FOUND, "cluster not found")
     manifest = build_cluster_manifest(correlation_id, members)
 
@@ -166,8 +178,10 @@ async def export_cluster(
         target_type=AUDIT_TARGET_CORRELATION,
         target_id=None,
         detail={
+            # The manifest's count, not a separately queried one: the trail row
+            # says how much left the API, which is what it is for.
             "correlation_id": correlation_id,
-            "finding_count": str(aggregate.finding_count),
+            "finding_count": str(manifest.finding_count),
         },
     )
     db.commit()
