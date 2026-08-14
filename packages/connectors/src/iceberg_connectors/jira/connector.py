@@ -37,7 +37,7 @@ discovered keys, never spliced.
 import re
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, ClassVar
 
 import httpx2
@@ -193,17 +193,26 @@ class JiraConnector:
                 if str(value).strip()
             }
             include_archived = bool(connection.get("include_archived_projects"))
+            # Project search returns live projects only unless asked otherwise, so
+            # the opt-in has to reach the *server*: filtering the response cannot
+            # include what was never sent. Stated explicitly even for the default
+            # case, so the scope of a scan does not depend on a server-side default
+            # changing underneath it. `deleted` is never requested — a project in
+            # the trash is not in scope.
+            statuses = ["live", "archived"] if include_archived else ["live"]
 
             matched: dict[str, str] = {}
             malformed = False
             specs = 0
 
-            for project in client.paginate("/project/search", key="values"):
+            for project in client.paginate("/project/search", key="values", status=statuses):
                 key = str(project.get("key") or "").strip()
                 if not key or not _PROJECT_KEY.fullmatch(key):
                     logger.warning("jira_project_without_usable_key")
                     malformed = True
                     continue
+                # Belt and braces behind the server-side filter: a deployment that
+                # ignores `status` must not silently widen the configured scope.
                 if project.get("archived") and not include_archived:
                     continue
                 if wanted and key.casefold() not in wanted:
@@ -249,6 +258,12 @@ class JiraConnector:
         The upper bound is pinned to the newest issue seen at discovery, which gives
         the scan an honest point-in-time meaning — content created after discovery
         belongs to the next scan rather than to a window that silently grew.
+
+        That bound is carried at *minute* precision, not rounded up to the next
+        midnight. Rounding would readmit everything created later on the same day:
+        a spec built at 09:00 would still match an issue filed at 14:00 whenever the
+        fetch task actually ran, which is the opposite of pinned. Intermediate
+        boundaries stay calendar-aligned, because they only have to be reproducible.
         """
         oldest = client.search_one(f'project = "{key}" ORDER BY created ASC')
         if oldest is None:
@@ -257,33 +272,41 @@ class JiraConnector:
             return [_Window(start=None, end="")]
         newest = client.search_one(f'project = "{key}" ORDER BY created DESC')
 
-        first = _created_date(oldest)
-        last = _created_date(newest) if newest is not None else first
+        first = _created_at(oldest)
+        last = _created_at(newest) if newest is not None else first
         if first is None or last is None:
             raise ConnectorError(f"Jira returned an unreadable created date for project {key}")
 
-        # Exclusive upper bound covering all of the newest issue's day.
-        end = last + timedelta(days=1)
-        span = max((end - first).days, 1)
+        # Exclusive, and one minute past the newest issue so that issue is included
+        # and nothing filed after discovery is. JQL resolves to the minute, so this
+        # is the tightest bound it can express.
+        pinned = last + timedelta(minutes=1)
+        start_day, end_day = first.date(), pinned.date() + timedelta(days=1)
+        span = max((end_day - start_day).days, 1)
         width = next(
             (days for days in _BUCKET_LADDER if _ceil_div(span, days) <= MAX_WINDOWS_PER_PROJECT),
             _BUCKET_LADDER[-1],
         )
 
+        edges: list[date] = []
+        cursor = start_day
+        while cursor < end_day:
+            cursor = min(cursor + timedelta(days=width), end_day)
+            edges.append(cursor)
+
         windows: list[_Window] = []
-        cursor = first
-        while cursor < end:
-            edge = min(cursor + timedelta(days=width), end)
+        for index, edge in enumerate(edges):
             windows.append(
                 _Window(
                     # Open at the bottom, so an issue older than the one we probed —
                     # a timezone shift, a clock skew — cannot fall outside every
                     # window and be silently unscanned.
-                    start=None if not windows else _stamp(cursor),
-                    end=_stamp(edge),
+                    start=None if index == 0 else _stamp(edges[index - 1]),
+                    # The final edge is the pinned discovery instant rather than the
+                    # calendar day after it.
+                    end=_minute(pinned) if index == len(edges) - 1 else _stamp(edge),
                 )
             )
-            cursor = edge
         return windows
 
     # ─── Fetch ────────────────────────────────────────────────────────────────
@@ -704,20 +727,34 @@ def _jql(key: str, window: Any) -> str:
     return " AND ".join(clauses) + " ORDER BY created ASC"
 
 
-def _created_date(issue: Mapping[str, Any]) -> date | None:
+def _created_at(issue: Mapping[str, Any]) -> datetime | None:
+    """An issue's ``created`` at minute precision.
+
+    Parsed from the leading ``YYYY-MM-DDTHH:MM`` rather than through a full ISO
+    parse: Jira renders the offset as ``+0000`` without a colon, and the offset is
+    not wanted anyway — JQL evaluates its literals in the account's own timezone, so
+    an offset-aware bound would be comparing two different clocks. Windows are
+    contiguous and half-open precisely so that a timezone shift can move a boundary
+    without opening a hole.
+    """
     fields = issue.get("fields")
     raw = fields.get("created") if isinstance(fields, Mapping) else None
-    if not isinstance(raw, str) or len(raw) < 10:
+    if not isinstance(raw, str) or len(raw) < 16:
         return None
     try:
-        return date.fromisoformat(raw[:10])
+        return datetime.strptime(raw[:16], "%Y-%m-%dT%H:%M")
     except ValueError:
         return None
 
 
 def _stamp(value: date) -> str:
-    """A JQL datetime literal. Minute precision is all JQL accepts."""
+    """A calendar boundary as a JQL datetime literal."""
     return f"{value.isoformat()} 00:00"
+
+
+def _minute(value: datetime) -> str:
+    """A pinned instant as a JQL datetime literal. Minute is all JQL accepts."""
+    return value.strftime("%Y-%m-%d %H:%M")
 
 
 def _ceil_div(numerator: int, denominator: int) -> int:

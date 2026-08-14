@@ -223,8 +223,9 @@ space-shaped, so a 403 there means the credential.)
 - Issues the credential cannot browse are simply omitted by Jira, and the search endpoint no longer
   returns a total, so the connector *cannot* say "5000 existed, I read 4997". The unknown remainder
   becomes a scope gap, never an invented clean count.
-- The upper window bound is pinned at discovery, so content created during a scan belongs to the
-  next one.
+- The upper window bound is pinned at the minute discovery observed, so content created during a
+  scan belongs to the next one. Archived projects are requested explicitly rather than filtered out
+  of the response, because Jira's project search returns live projects only by default.
 - Issue history is capped per issue; the remainder is reported as a scope gap.
 - Custom fields are not scanned. Only `summary`, `description`, `environment`, comments,
   attachments, and (opt-in) field history are.

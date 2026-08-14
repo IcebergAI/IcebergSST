@@ -252,7 +252,10 @@ class FakeJira:
         if not path.startswith(f"{API_PREFIX}/"):
             return httpx2.Response(404, json={"errorMessages": ["no such endpoint"]})
 
-        return self._api(path.removeprefix(API_PREFIX), dict(request.url.params))
+        # The real QueryParams, not a dict: Jira's array parameters arrive
+        # repeated (`status=live&status=archived`) and collapsing them to a dict
+        # would silently keep only the last one.
+        return self._api(path.removeprefix(API_PREFIX), request.url.params)
 
     def _throttle(self) -> httpx2.Response:
         headers = {} if self.retry_after is None else {"Retry-After": str(self.retry_after)}
@@ -272,13 +275,18 @@ class FakeJira:
 
     # ─── Endpoints ────────────────────────────────────────────────────────────
 
-    def _api(self, path: str, params: dict[str, Any]) -> httpx2.Response:
+    def _api(self, path: str, params: httpx2.QueryParams) -> httpx2.Response:
         if path == "/myself":
             return httpx2.Response(200, json={"accountId": "1", "emailAddress": EMAIL})
 
         if path == "/project/search":
-            live = [p for p in self.projects if not p.archived]
-            return self._offset([p.as_payload() for p in live], "values", params)
+            # Jira defaults to live projects only; archived ones must be *asked*
+            # for. Modelled rather than assumed away, because a connector that
+            # merely filters the response locally would look correct against a
+            # fixture that always returned everything.
+            wanted = set(params.get_list("status")) or {"live"}
+            visible = [p for p in self.projects if ("archived" if p.archived else "live") in wanted]
+            return self._offset([p.as_payload() for p in visible], "values", params)
 
         if path == "/search/jql":
             return self._search(params)
@@ -297,7 +305,7 @@ class FakeJira:
 
         return httpx2.Response(404, json={"errorMessages": ["no such endpoint"]})
 
-    def _search(self, params: dict[str, Any]) -> httpx2.Response:
+    def _search(self, params: httpx2.QueryParams) -> httpx2.Response:
         matching = self._matching(str(params.get("jql", "")))
         limit = min(int(params.get("maxResults", self.page_size)), self.page_size)
 
@@ -354,7 +362,7 @@ class FakeJira:
         return [payload for _stamp, payload in rows]
 
     def _offset(
-        self, values: list[dict[str, Any]], key: str, params: dict[str, Any]
+        self, values: list[dict[str, Any]], key: str, params: httpx2.QueryParams
     ) -> httpx2.Response:
         start = int(params.get("startAt", 0))
         limit = min(int(params.get("maxResults", self.page_size)), self.page_size)

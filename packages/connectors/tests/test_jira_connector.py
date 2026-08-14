@@ -109,6 +109,37 @@ def test_discovery_is_deterministic_for_an_unchanged_site() -> None:
     assert first == second
 
 
+def test_the_upper_bound_is_pinned_to_the_minute_discovery_saw() -> None:
+    """Rounding up to the next midnight would readmit the rest of that day."""
+    site = FakeJira(
+        projects=[Project("10000", "ENG", issues=[Issue("1", "ENG-1", created="2024-05-06T09:00")])]
+    )
+
+    specs = list(_connector(site).discover(_connection(), API_TOKEN))
+
+    assert specs[-1].params["window"]["to"] == "2024-05-06 09:01"
+
+
+def test_an_issue_filed_after_discovery_does_not_join_a_frozen_spec() -> None:
+    """A spec is persisted and fetched later, so its bound must mean what it said.
+
+    The failure this guards is a scan reporting content it never planned to cover,
+    under a window an operator was told was point-in-time.
+    """
+    site = FakeJira(
+        projects=[Project("10000", "ENG", issues=[Issue("1", "ENG-1", created="2024-05-06T09:00")])]
+    )
+    spec = list(_connector(site).discover(_connection(), API_TOKEN))[-1]
+
+    # Filed the same day, after discovery froze the spec.
+    site.projects[0].issues.append(Issue("2", "ENG-2", created="2024-05-06T14:00"))
+
+    outcome = FetchOutcome(reference_key=REFERENCE_KEY)
+    list(_connector(site).fetch(_connection(), spec, API_TOKEN, outcome))
+
+    assert outcome.coverage.discovered == 1
+
+
 def test_a_project_with_no_issues_still_produces_one_enumerated_scope() -> None:
     site = FakeJira(projects=[Project("10000", "ENG")])
 
@@ -144,6 +175,31 @@ def test_archived_projects_are_out_of_scope_unless_asked_for() -> None:
     keys = {s.params["project_key"] for s in _connector(site).discover(_connection(), API_TOKEN)}
 
     assert keys == {"ENG"}
+
+
+def test_archived_projects_are_discovered_when_the_operator_opts_in() -> None:
+    """Jira's project search defaults to live-only, so archived projects have to be
+    *asked* for. Filtering the response locally cannot include what was never sent."""
+    site = FakeJira(
+        projects=[
+            Project("10000", "ENG", issues=[Issue("1", "ENG-1")]),
+            Project("10001", "OLD", archived=True, issues=[Issue("2", "OLD-1")]),
+        ]
+    )
+
+    specs = _connector(site).discover(_connection(include_archived_projects=True), API_TOKEN)
+
+    assert {s.params["project_key"] for s in specs} == {"ENG", "OLD"}
+
+
+def test_project_discovery_always_states_which_statuses_it_wants() -> None:
+    """Relying on the server's default would make the scope depend on the server."""
+    site = FakeJira(projects=[Project("10000", "ENG", issues=[Issue("1", "ENG-1")])])
+
+    list(_connector(site).discover(_connection(), API_TOKEN))
+
+    search = next(r for r in site.requests if "/project/search" in r.url.path)
+    assert search.url.params.get_list("status") == ["live"]
 
 
 def test_a_spec_never_carries_a_credential() -> None:
