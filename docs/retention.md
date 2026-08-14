@@ -92,3 +92,14 @@ There is no default that is right for everyone, which is why there is no default
 Whatever you choose, write it down somewhere other than the environment variable. The audit rows
 record the window in force at the time of each purge, but only for purges that have already
 happened.
+
+
+## Scan checkpoints and source cursors (#143)
+
+Nothing purges `scan` or `scan_task` rows, so the resume positions on them accumulate with scan
+history. They are bounded — one position per task — and content-free, but a position may hold a
+provider change token, which is why they are never logged or exported.
+
+`source_cursor` holds at most one live row per `(source, scope)` plus its retired predecessors, which
+are kept deliberately: "why did this become a full scan?" has to stay answerable after the cursor
+that caused it is gone. Deleting a source cascades to both.

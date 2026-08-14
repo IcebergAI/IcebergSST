@@ -1,0 +1,54 @@
+{#- What this source has read incrementally, and what it will re-read (#143).
+
+    The positions themselves are deliberately absent. A position may hold a
+    provider change token, which is bearer-ish for a place in a result set, so the
+    API never returns one — what an operator needs is whether a scope has a
+    watermark, how old it is, and how to get rid of it.
+-#}
+<div id="source-cursors">
+  <div class="row row--between">
+    <h2>Incremental watermarks</h2>
+    {% if watermarks.cursors %}
+    <button
+      class="btn btn--ghost"
+      hx-delete="/sources/{{ watermarks.source_id }}/cursors"
+      hx-target="#source-cursors"
+      hx-swap="outerHTML"
+      hx-confirm="Drop every watermark for this source? The next scan will read all of it."
+    >Force full rescan</button>
+    {% endif %}
+  </div>
+
+  {% if not watermarks.cursors %}
+  <p class="muted">
+    No watermarks. Every scan of this source reads all of it, which is also what
+    happens after any change that makes a watermark untrustworthy.
+  </p>
+  {% else %}
+  <p class="muted">
+    A scan is promoted to a full one automatically once a watermark is more than
+    {{ watermarks.full_scan_interval_days }} day{{ '' if watermarks.full_scan_interval_days == 1 else 's' }}
+    old. Only a full scan closes findings it no longer sees.
+  </p>
+  <table class="table">
+    <thead>
+      <tr><th scope="col">Scope</th><th scope="col">Read through</th><th scope="col">State</th></tr>
+    </thead>
+    <tbody>
+      {% for cursor in watermarks.cursors %}
+      <tr>
+        <td class="mono">{{ cursor.scope }}</td>
+        <td><time datetime="{{ cursor.minted_at.isoformat() }}">{{ cursor.minted_at.strftime('%Y-%m-%d %H:%M') }}</time></td>
+        <td>
+          {% if cursor.invalidated_at %}
+          <span class="tag tag--muted">retired · {{ cursor.invalidation_reason.value.replace('_', ' ') }}</span>
+          {% else %}
+          <span class="tag tag--ok">live</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>

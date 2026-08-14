@@ -42,6 +42,15 @@ whether one exists.
   changes, so "when does this fire next?" is answerable from the row.
 - A schedule re-enabled after a week off fires on its next beat — it does not owe a scan for every
   beat missed.
+- `mode` (`full` | `incremental`, default `full`) is a *request*. The API promotes it to a full scan
+  whenever the source's watermarks cannot be trusted, so a schedule can make scans cheaper but can
+  never stop reconciliation happening (#143).
+
+## Source cursors (#143)
+- `GET    /sources/{id}/cursors` (analyst+) — which scopes have a watermark, when it was minted, and
+  whether it has been retired. **Never the position itself**: it may hold a provider change token.
+- `DELETE /sources/{id}/cursors` (admin, CSRF) — retire them, forcing the next scan to be full.
+  Audited, because it changes when findings this source has stopped seeing are closed.
 
 ## Scans
 - `GET  /scans` (paginated; `?source_id=`, `?status=`, `?active=`) · `GET /scans/{id}`
@@ -65,6 +74,13 @@ An old engine that reported no structured coverage is shown as `unreported`, nev
 Only a terminal manifest whose coverage state is `complete` can authorize finding reconciliation
 or completion notifications. A task set may be operationally `completed` while its manifest is
 `partial` because content was skipped or an old engine omitted evidence; that run resolves nothing.
+
+`manifest_version` is `"2"` (#143). It carries `scan_mode`, and a `complete` **incremental** manifest
+means "everything that changed since `incremental_baseline`" rather than "everything" — so a v1
+reader must not treat a v2 manifest as full coverage. **An incremental scan resolves nothing at all**,
+whatever its coverage state; only a full scan's silence about a finding is evidence the secret is
+gone. New findings still notify. When an incremental scan was run as a full one anyway, the manifest
+carries `promoted_from` and `promotion_reason`.
 
 `source_configuration_version` is captured at launch. Source edits and credential rotations are
 refused while a scan is active, so every task in the run leases the configuration revision named by

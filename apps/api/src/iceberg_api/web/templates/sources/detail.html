@@ -116,6 +116,16 @@
       {% endif %}
     </section>
 
+    {#- Loaded on its own, not rendered inline: the cursor API is analyst-only
+        while this page is viewer-accessible, so a viewer simply gets nothing
+        here rather than the page dropping to analyst-only for everyone. -#}
+    <section
+      class="card card-pad"
+      hx-get="/sources/{{ source.id }}/cursors"
+      hx-trigger="load"
+      hx-swap="innerHTML"
+    ></section>
+
     <section class="card card-pad">
       <div class="eyebrow" style="margin-bottom:10px">Details</div>
       <dl class="kv">

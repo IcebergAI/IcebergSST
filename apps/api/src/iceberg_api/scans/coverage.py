@@ -172,6 +172,10 @@ def build_manifest(scan: Scan, tasks: Sequence[ScanTask]) -> CoverageManifest:
         scan_id=scan.id,
         source_id=scan.source_id,
         scan_status=scan.status,
+        scan_mode=scan.mode,
+        incremental_baseline=scan.incremental_baseline_at,
+        promoted_from=scan.promoted_from,
+        promotion_reason=scan.promotion_reason,
         coverage_state=_coverage_state(
             scan.status,
             skipped=counts["skipped"],
