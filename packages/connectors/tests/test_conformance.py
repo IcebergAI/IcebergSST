@@ -150,7 +150,7 @@ def test_resumability_is_declared_only_where_it_is_implemented() -> None:
     must pass for that connector — see its own suite — so this list is deliberately
     explicit rather than a loop over everything shipped.
     """
-    resumable = {"jira"}
+    resumable = {"confluence", "jira"}
 
     for connector in (FakeConnector(), ConfluenceConnector(), JiraConnector()):
         declared = ConnectorCapability.CHECKPOINTS in connector.metadata.capabilities

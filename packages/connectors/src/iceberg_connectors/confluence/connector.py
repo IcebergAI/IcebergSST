@@ -20,6 +20,20 @@ carries the title; never the version. Get it wrong and every re-scan orphans the
 analyst's triage decisions while looking like it worked (see
 :mod:`iceberg_connectors.units`).
 
+**Resume here is best-effort, and deliberately says so** (#143). The v2 cursor is
+opaque and short-lived, so a position cannot be stored and replayed; what is stored
+is the last page id, and resuming re-enumerates the listing until it turns up. The
+listing calls are paid again — the bodies, comments and attachments are not. If the
+page is gone, the enumeration runs to the end without finding it and the space is
+reported as a scope gap rather than as having read cleanly.
+
+**Incremental narrowing depends on an ordering the site has to provide.** v2 has no
+``lastModified``; ``version.createdAt`` is the only signal, and stopping early
+relies on ``sort=-modified-date`` meaning what it says. A page that arrives with no
+``version`` has no place in that order, so the narrowing is abandoned for the whole
+space and everything is read. Paying for a full scan is a bad trade, and still the
+right one against skipping content silently.
+
 **One bad page must not stop a scan of fifty thousand.** Every per-page failure
 below is counted into :class:`FetchOutcome` and stepped over so findings from
 readable neighbors survive. The engine nevertheless fails that fetch task and the
@@ -29,7 +43,7 @@ failures abort immediately because no later unit can recover from them.
 """
 
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -48,6 +62,7 @@ from iceberg_connectors.confluence.client import (
 from iceberg_connectors.confluence.storage import storage_to_text, supported_body_text
 from iceberg_connectors.extraction import ExtractionLimits, ExtractionOutcome, extract_text
 from iceberg_connectors.protocol import (
+    Checkpoint,
     ConnectorCapability,
     ConnectorError,
     ConnectorMetadata,
@@ -61,6 +76,13 @@ from iceberg_connectors.units import ContentOrigin, ContentUnit
 logger = structlog.get_logger()
 
 CONFLUENCE_CONNECTOR_TYPE = "confluence"
+
+#: This connector's own resume-protocol version, independent of the SDK's (#143).
+CONFLUENCE_CHECKPOINT_VERSION = "1"
+
+#: v2's newest-revision-first ordering. Opt-in: without it the site returns pages
+#: in its own order, and a watermark stop would be reading whatever came back.
+_MODIFIED_DESC = "-modified-date"
 
 #: Comment endpoints on a v2 page. Both are scanned: an inline comment on a
 #: paragraph is where someone answers "what's the password for staging?".
@@ -99,6 +121,11 @@ class ConfluenceConnector:
                     ConnectorCapability.ATTACHMENTS,
                     ConnectorCapability.COMMENTS,
                     ConnectorCapability.GAP_REPORTING,
+                    # #143. Resume here is best-effort by nature: the v2 cursor is
+                    # opaque and may not outlive a reclaim, so a rejected one falls
+                    # back to re-enumerating the space rather than pretending.
+                    ConnectorCapability.CHECKPOINTS,
+                    ConnectorCapability.INCREMENTAL,
                 }
             ),
         )
@@ -118,7 +145,13 @@ class ConfluenceConnector:
 
     # ─── Discovery ────────────────────────────────────────────────────────────
 
-    def discover(self, connection: dict[str, Any], credential: str | None) -> Iterator[TaskSpec]:
+    def discover(
+        self,
+        connection: dict[str, Any],
+        credential: str | None,
+        *,
+        cursors: Mapping[str, Any] | None = None,
+    ) -> Iterator[TaskSpec]:
         """One spec per space the scope allows.
 
         Yielding nothing is a legitimate answer — a site with no spaces, or a scope
@@ -162,14 +195,18 @@ class ConfluenceConnector:
                 matched.add(normalized_key)
                 matched_ids.add(space_id)
                 seen += 1
-                yield TaskSpec(
-                    label=f"space {key or space_id}",
-                    params={
-                        "space_id": space_id,
-                        "space_key": key,
-                        "space_name": space.get("name"),
-                    },
-                )
+                params: dict[str, Any] = {
+                    "space_id": space_id,
+                    "space_key": key,
+                    "space_name": space.get("name"),
+                }
+                since = _watermark(cursors, key or space_id)
+                if since:
+                    # Carried on the spec rather than applied here: discovery must
+                    # not open a space to find out whether it changed, or an
+                    # incremental scan would cost what a full one does.
+                    params["since"] = since
+                yield TaskSpec(label=f"space {key or space_id}", params=params)
 
             if missing := sorted(wanted - matched):
                 # The scope named spaces this site did not make fetchable. Matched
@@ -213,8 +250,17 @@ class ConfluenceConnector:
         want_attachments = connection.get("include_attachments", True)
         sandbox = _LazySandbox(self.sandbox_factory)
 
+        since = str(spec.params.get("since") or "")
+        resume = _resume_after(outcome.resume_from)
+        # Newest revision first *only* when there is a watermark to stop at. A full
+        # scan reads the whole space either way, and asking for an order it does
+        # not need would be one more thing the site could refuse.
+        params = {**_body_format(), "sort": _MODIFIED_DESC} if since else _body_format()
+        newest = ""
+        skipping = bool(resume)
+
         try:
-            for page in client.paginate(f"/spaces/{space_id}/pages", **_body_format()):
+            for page in client.paginate(f"/spaces/{space_id}/pages", **params):
                 page_id = str(page.get("id") or "")
                 if not page_id:
                     outcome.failed_for(
@@ -222,6 +268,31 @@ class ConfluenceConnector:
                         CoverageObjectKind.PAGE,
                         None,
                     )
+                    continue
+
+                revision = _revision(page)
+                newest = max(newest, revision) if revision else newest
+                if since and not revision:
+                    # A page the site will not date. Stopping early relies on the
+                    # ordering meaning "newest first", and a page with no revision
+                    # has no place in that order — so the rest of this space might
+                    # be anywhere in it. Abandon the narrowing and read all of it:
+                    # an incremental scan that costs a full one is a bad trade, and
+                    # still the right one against skipping content silently.
+                    logger.warning("confluence_incremental_abandoned", space_id=space_id)
+                    since = ""
+                elif since and revision <= since:
+                    # Sorted newest-first, so everything after this is older still.
+                    break
+
+                if skipping:
+                    # Re-enumerating to find where the last attempt stopped. The v2
+                    # cursor is opaque and short-lived, so it cannot be stored and
+                    # replayed; the page id can. Costs the listing calls again, and
+                    # nothing else — bodies, comments and attachments below are not
+                    # fetched for a page being skipped.
+                    if page_id == resume:
+                        skipping = False
                     continue
 
                 try:
@@ -281,6 +352,27 @@ class ConfluenceConnector:
                         logger.warning(
                             "confluence_attachments_failed", page_id=page_id, error=str(exc)
                         )
+
+                # After the page and everything hanging off it, never between them:
+                # a boundary inside a page would let a resumed attempt start at the
+                # next one and never read its comments or attachments (#143).
+                outcome.checkpoint_at(CONFLUENCE_CHECKPOINT_VERSION, {"after_page": page_id})
+
+            if skipping and resume:
+                # The page the last attempt stopped on is gone — deleted, or moved
+                # out of this space. The enumeration ran to the end without finding
+                # it, so nothing was scanned. Say so rather than reporting a space
+                # that read cleanly and resolving every finding in it.
+                outcome.scope_gap_for(
+                    CoverageReason.MISSING_RESOURCE,
+                    {"space": space_id, "resume": resume},
+                )
+            elif newest:
+                outcome.cursor_at(
+                    context.key or space_id,
+                    CONFLUENCE_CHECKPOINT_VERSION,
+                    {"modified": newest},
+                )
         finally:
             # Reached on a cancelled task too: closing a generator runs this, so an
             # abandoned fetch does not leak the child process (ADR 0009 §4) or the
@@ -671,6 +763,41 @@ def _space_filters(connection: dict[str, Any]) -> dict[str, Any]:
     if not connection.get("include_personal_spaces", False):
         filters["type"] = "global"
     return filters
+
+
+def _revision(page: Mapping[str, Any]) -> str:
+    """When this page's current revision was published, or "" if unknown.
+
+    v2 has no ``lastModified`` on a page; ``version.createdAt`` is the only signal
+    it offers. Compared as a string rather than parsed, because it is an ISO-8601
+    instant in UTC with fixed width — the comparison a parse would produce, minus
+    the failure modes. An unparseable or absent value is "", which is treated as
+    *unknown* and therefore always scanned.
+    """
+    version = page.get("version")
+    if not isinstance(version, Mapping):
+        return ""
+    created = version.get("createdAt")
+    return created if isinstance(created, str) else ""
+
+
+def _watermark(cursors: Mapping[str, Any] | None, scope: str) -> str:
+    """The revision instant this space was last completely scanned through."""
+    if not cursors:
+        return ""
+    position = cursors.get(scope)
+    if not isinstance(position, Mapping):
+        return ""
+    modified = position.get("modified")
+    return modified if isinstance(modified, str) else ""
+
+
+def _resume_after(checkpoint: Checkpoint | None) -> str:
+    """The page the last attempt finished, if this build can still act on it."""
+    if checkpoint is None or checkpoint.version != CONFLUENCE_CHECKPOINT_VERSION:
+        return ""
+    after = checkpoint.position.get("after_page")
+    return after if isinstance(after, str) else ""
 
 
 def _body_format() -> dict[str, Any]:
