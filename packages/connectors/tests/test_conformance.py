@@ -140,6 +140,20 @@ def test_every_shipped_connector_declares_the_current_sdk_contract() -> None:
         assert ConnectorCapability.PAGINATION in sourced.metadata.capabilities
         assert ConnectorCapability.COMMENTS in sourced.metadata.capabilities
         assert ConnectorCapability.ATTACHMENTS in sourced.metadata.capabilities
-        # Reserved for #143; docs/connector-sdk.md forbids declaring it until
-        # the resumable-scan contract exists.
-        assert ConnectorCapability.CHECKPOINTS not in sourced.metadata.capabilities
+
+
+def test_resumability_is_declared_only_where_it_is_implemented() -> None:
+    """A capability is a promise the conformance kit then holds a connector to.
+
+    `CHECKPOINTS` and `INCREMENTAL` were reserved until #143 (docs/connector-sdk.md).
+    Declaring one now means `assert_checkpoint_resume` / `assert_incremental_contract`
+    must pass for that connector — see its own suite — so this list is deliberately
+    explicit rather than a loop over everything shipped.
+    """
+    resumable = {"jira"}
+
+    for connector in (FakeConnector(), ConfluenceConnector(), JiraConnector()):
+        declared = ConnectorCapability.CHECKPOINTS in connector.metadata.capabilities
+        assert declared is (connector.connector_type in resumable), connector.connector_type
+        incremental = ConnectorCapability.INCREMENTAL in connector.metadata.capabilities
+        assert incremental is (connector.connector_type in resumable), connector.connector_type

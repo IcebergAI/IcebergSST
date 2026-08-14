@@ -10,18 +10,28 @@ A finding's fingerprint is derived from it (ADR 0006), so it is the numeric issu
 — never the key, which changes when an issue moves between projects — and, for a
 comment, an attachment or a history entry, an id that survives the next scan.
 
-**Discovery windows a project by ``created``, and that is the resume story.** A
-reclaimed task restarts its spec from the top (ADR 0009), so how finely discovery
-slices is how much work an interruption costs. ``created`` is immutable, so an issue
-can never migrate between windows and a boundary can never cause a skip or a
+**A full scan windows a project by ``created``.** ``created`` is immutable, so an
+issue can never migrate between windows and a boundary can never cause a skip or a
 double-scan on a rescan; windows are contiguous and half-open, so a JQL timezone
 shift can move a boundary but cannot open a hole. The bounds come from the project's
 own oldest and newest issue rather than from the clock, because the conformance kit
 runs ``discover`` twice and compares payloads.
 
-This is **not** checkpointed resume, and the connector does not claim
-``ConnectorCapability.CHECKPOINTS`` — that contract belongs to #143. What it buys is
-that an interrupted task re-reads one bounded window instead of a whole project.
+**Within a window, fetch resumes from the last issue it finished** (#143). The
+boundary is a whole issue — body, comments, attachments, history — because a
+position taken between an issue's own units would let a reclaimed attempt start at
+the next issue and never read the rest of them. JQL resolves to the minute and
+orders on the date alone, so at a boundary minute the tie is broken towards
+*re-reading*: a duplicate dedupes on fingerprint, whereas a skipped issue is a
+secret nobody reports.
+
+**An incremental scan narrows a project to one ``updated`` window instead.**
+``updated`` is mutable, so an issue edited mid-scan moves forward in the order and
+is at worst read twice. The upper bound is probed *before* the ``created`` bounds,
+so anything created or edited after the probes has an ``updated`` beyond it and is
+picked up by the next scan rather than falling between the two. A scan that used a
+watermark deliberately never looked at unchanged content, which is why the API
+refuses to let one auto-resolve anything (ADR 0013).
 
 **A 403 is one object, not the site.** Jira permission schemes are per-project and
 per-issue, so being refused one issue's comments is ordinary. It is counted and
@@ -55,6 +65,7 @@ from iceberg_connectors.http import (
 from iceberg_connectors.jira.client import JiraClient
 from iceberg_connectors.jira.document import issue_field_text
 from iceberg_connectors.protocol import (
+    Checkpoint,
     ConnectorCapability,
     ConnectorError,
     ConnectorMetadata,
@@ -72,7 +83,15 @@ JIRA_CONNECTOR_TYPE = "jira"
 #: The fields a scan asks for. Anything not listed never arrives, and
 #: ``issue_field_text`` reports an absent field as unread rather than empty — so
 #: adding a field here is the only way to scan it, and removing one is visible.
-ISSUE_FIELDS = ("summary", "description", "environment", "created", "attachment", "project")
+ISSUE_FIELDS = (
+    "summary",
+    "description",
+    "environment",
+    "created",
+    "updated",
+    "attachment",
+    "project",
+)
 
 #: The rich-text fields joined into the one BODY unit. ``environment`` earns its
 #: place: it is the classic "here are the staging credentials" field.
@@ -99,16 +118,29 @@ MAX_TASK_SPECS = 5_000
 #: a silent truncation.
 MAX_HISTORY_ENTRIES = 1_000
 
+#: This connector's own resume-protocol version, independent of the SDK's (#143).
+#: Bump it when the meaning of a stored position changes: the engine discards a
+#: checkpoint whose version it does not recognise and restarts the spec, which
+#: costs a re-read, whereas misreading one costs coverage.
+JIRA_CHECKPOINT_VERSION = "1"
+
 
 @dataclass(frozen=True, slots=True)
 class _Window:
-    """A half-open ``created`` range. ``start`` is None on the first window only."""
+    """A half-open range over one date field.
+
+    ``start`` is None on the first ``created`` window only, so an issue older than
+    the one discovery probed cannot fall outside every window. An ``updated``
+    window always has both bounds: its lower one is the watermark, and an open
+    bottom would make it a full scan wearing an incremental label.
+    """
 
     start: str | None
     end: str
+    field: str = "created"
 
     def as_params(self) -> dict[str, Any]:
-        return {"field": "created", "from": self.start, "to": self.end}
+        return {"field": self.field, "from": self.start, "to": self.end}
 
 
 @dataclass(slots=True)
@@ -165,9 +197,11 @@ class JiraConnector:
                     ConnectorCapability.ATTACHMENTS,
                     ConnectorCapability.COMMENTS,
                     ConnectorCapability.GAP_REPORTING,
-                    # Deliberately not CHECKPOINTS: reserved for #143, and
-                    # docs/connector-sdk.md forbids declaring it until that
-                    # contract exists.
+                    # Both land with #143. Fetch resumes from an issue boundary it
+                    # published, and discovery narrows to an `updated` window when
+                    # the API hands back a watermark.
+                    ConnectorCapability.CHECKPOINTS,
+                    ConnectorCapability.INCREMENTAL,
                 }
             ),
         )
@@ -183,8 +217,20 @@ class JiraConnector:
 
     # ─── Discovery ────────────────────────────────────────────────────────────
 
-    def discover(self, connection: Mapping[str, Any], credential: str | None) -> Iterator[TaskSpec]:
-        """Split the source into one spec per project and ``created`` window."""
+    def discover(
+        self,
+        connection: Mapping[str, Any],
+        credential: str | None,
+        *,
+        cursors: Mapping[str, Any] | None = None,
+    ) -> Iterator[TaskSpec]:
+        """Split the source into one spec per project and window.
+
+        A project with no watermark is sliced into ``created`` windows covering all
+        of it. A project the API handed a watermark for gets a single ``updated``
+        window instead, covering only what changed — which is why a scan that used
+        one may never auto-resolve anything (ADR 0013).
+        """
         client = self._client(connection, credential)
         try:
             wanted = {
@@ -223,16 +269,34 @@ class JiraConnector:
                     continue
                 matched[key.casefold()] = key
 
-                for window in self._windows(client, key):
+                # Probed *before* the window bounds, deliberately. Everything this
+                # scan cannot see — an issue created after the probes, or edited
+                # after them — then has an `updated` strictly greater than the
+                # bound, so the next incremental scan picks it up. Probing it last
+                # would leave a sliver of content that neither scan covers.
+                bound = self._cursor_bound(client, key)
+                since = _watermark(cursors, key)
+
+                for window in self._windows(client, key, since=since, bound=bound):
                     specs += 1
                     if specs > MAX_TASK_SPECS:
                         raise ConnectorError(
                             f"Jira discovery produced more than {MAX_TASK_SPECS} task specs; "
                             "narrow the configured projects"
                         )
+                    params: dict[str, Any] = {
+                        "project_key": key,
+                        "window": window.as_params(),
+                    }
+                    if bound:
+                        # The same value on every spec of this project, so whichever
+                        # task reports last proposes the same watermark as the rest.
+                        params["cursor_bound"] = bound
                     yield TaskSpec(
-                        label=f"{key} issues created {window.start or 'start'}…{window.end}",
-                        params={"project_key": key, "window": window.as_params()},
+                        label=(
+                            f"{key} issues {window.field} {window.start or 'start'}…{window.end}"
+                        ),
+                        params=params,
                     )
 
             missing = sorted(wanted - set(matched))
@@ -248,7 +312,52 @@ class JiraConnector:
         finally:
             client.close()
 
-    def _windows(self, client: JiraClient, key: str) -> list[_Window]:
+    def _cursor_bound(self, client: JiraClient, key: str) -> str:
+        """The ``updated`` instant the next scan of this project should start at.
+
+        Pinned one minute past the most recently edited issue, so that issue is on
+        this side of the boundary and nothing edited afterwards is. Empty for a
+        project with no issues, which proposes no watermark at all — there is
+        nothing to have read.
+
+        Derived from the project's own data rather than the clock, like every other
+        bound here, because the conformance kit runs discovery twice and compares.
+        """
+        newest = client.search_one(f'project = "{key}" ORDER BY updated DESC')
+        if newest is None:
+            return ""
+        edited = _field_at(newest, "updated") or _field_at(newest, "created")
+        if edited is None:
+            raise ConnectorError(f"Jira returned an unreadable updated date for project {key}")
+        return _minute(edited + timedelta(minutes=1))
+
+    def _windows(
+        self,
+        client: JiraClient,
+        key: str,
+        *,
+        since: str = "",
+        bound: str = "",
+    ) -> list[_Window]:
+        """Bounded, reproducible ranges covering the part of a project in scope.
+
+        With a watermark, that is one ``updated`` window: everything edited since
+        the last complete scan. It is a single window rather than a laddered set
+        because the changed set is bounded by how often full scans are forced —
+        ``Source.full_scan_interval_days`` — and a project cannot accumulate an
+        unbounded backlog of edits behind it.
+
+        Without one, the ``created`` ladder below covers the whole project.
+        """
+        if since and bound:
+            if since >= bound:
+                # Nothing has been edited since the watermark. No spec at all, so
+                # the scan does not enumerate a scope it is not going to read.
+                return []
+            return [_Window(start=since, end=bound, field="updated")]
+        return self._created_windows(client, key)
+
+    def _created_windows(self, client: JiraClient, key: str) -> list[_Window]:
         """Bounded, reproducible ``created`` ranges covering one project.
 
         Derived from the project's own oldest and newest issue, never from the
@@ -328,13 +437,26 @@ class JiraConnector:
         include_attachments = bool(connection.get("include_attachments", True))
         include_history = bool(connection.get("include_history", False))
 
+        window = spec.params.get("window")
+        field = _window_field(window)
+        resume = _resume_point(outcome.resume_from, window)
+
         client = self._client(connection, credential)
         sandbox = _LazySandbox(self.sandbox_factory)
         try:
-            for issue in client.search(_jql(key, spec.params.get("window")), fields=ISSUE_FIELDS):
+            for issue in client.search(
+                _jql(key, window, resume_from=resume.at if resume else ""),
+                fields=ISSUE_FIELDS,
+            ):
                 issue_id = str(issue.get("id") or "")
                 if not issue_id:
                     outcome.failed_for(CoverageReason.INVALID_METADATA, CoverageObjectKind.RECORD)
+                    continue
+
+                if resume is not None and resume.covers(issue, field, issue_id):
+                    # Already read and already durably reported by the earlier
+                    # attempt. Counting it again would double it in the merged
+                    # coverage once the API adds the two attempts together.
                     continue
 
                 display = _display(base_url, key, issue)
@@ -383,6 +505,25 @@ class JiraConnector:
                         issue_id,
                         "history",
                     )
+
+                # After every unit of this issue, never between them. An issue's
+                # comments and attachments are read as one indivisible piece of
+                # work, so a boundary inside it would let a resumed attempt skip
+                # the rest of them (#143).
+                at = _field_at(issue, field)
+                if at is not None:
+                    outcome.checkpoint_at(
+                        JIRA_CHECKPOINT_VERSION,
+                        {"field": field, "at": _minute(at), "issue_id": issue_id},
+                    )
+
+            bound = spec.params.get("cursor_bound")
+            if isinstance(bound, str) and bound:
+                # Proposed from the bound discovery pinned rather than from what
+                # this task happened to read: the API commits it only if the whole
+                # scan completed with complete coverage, so "what I read" and "what
+                # the scan read" are the same thing by the time it is stored.
+                outcome.cursor_at(key, JIRA_CHECKPOINT_VERSION, {"updated": bound})
         finally:
             sandbox.close()
             client.close()
@@ -713,18 +854,115 @@ def _display(base_url: str, key: str, issue: Mapping[str, Any]) -> dict[str, Any
     }
 
 
-def _jql(key: str, window: Any) -> str:
-    """The query for one window. ``key`` is validated by the caller."""
-    clauses = [f'project = "{key}"']
+#: The only date fields a window may name. Whitelisted rather than validated,
+#: because the value is spliced into JQL: a spec is persisted and comes back
+#: through a lease, so it is not this process's own string by the time it is used.
+_WINDOW_FIELDS = frozenset({"created", "updated"})
+
+
+def _window_field(window: Any) -> str:
     if isinstance(window, Mapping):
-        start, end = window.get("from"), window.get("to")
-        if isinstance(start, str) and start:
-            clauses.append(f'created >= "{start}"')
-        if isinstance(end, str) and end:
-            clauses.append(f'created < "{end}"')
-    # Ordered on the immutable field, so paging stays coherent while issues are
-    # being created underneath the scan.
-    return " AND ".join(clauses) + " ORDER BY created ASC"
+        field = window.get("field")
+        if isinstance(field, str) and field in _WINDOW_FIELDS:
+            return field
+    return "created"
+
+
+def _jql(key: str, window: Any, *, resume_from: str = "") -> str:
+    """The query for one window. ``key`` is validated by the caller.
+
+    Ordered on the window's own field so paging stays coherent while the project
+    is written to underneath the scan. For a ``created`` window that field is
+    immutable and the order is stable outright; for an ``updated`` window an issue
+    edited mid-scan moves *forward* in the order, so the worst case is reading it
+    twice rather than missing it.
+    """
+    field = _window_field(window)
+    clauses = [f'project = "{key}"']
+    start = window.get("from") if isinstance(window, Mapping) else None
+    end = window.get("to") if isinstance(window, Mapping) else None
+    if resume_from:
+        # A resumed attempt starts at the boundary the last one published rather
+        # than at the window's own start. `>=` and not `>`: JQL resolves to the
+        # minute, so several issues can share the boundary value, and excluding
+        # them would skip whichever ones had not been read.
+        start = resume_from
+    if isinstance(start, str) and start:
+        clauses.append(f'{field} >= "{start}"')
+    if isinstance(end, str) and end:
+        clauses.append(f'{field} < "{end}"')
+    return " AND ".join(clauses) + f" ORDER BY {field} ASC"
+
+
+@dataclass(frozen=True, slots=True)
+class _Resume:
+    """A point a previous attempt of this task reached (#143)."""
+
+    at: str
+    issue_id: str
+
+    def covers(self, issue: Mapping[str, Any], field: str, issue_id: str) -> bool:
+        """Whether the earlier attempt already reported this issue.
+
+        The query already excluded everything before ``at``; what is left to decide
+        is the tie, because JQL resolves to the minute and a busy project puts many
+        issues in one. Only issues at that same minute with an id at or below the
+        boundary are skipped.
+
+        Deliberately asymmetric. Jira orders on the date alone, so within a minute
+        the order is unspecified and an issue with a *higher* id may already have
+        been read — it is read again, and its findings dedupe on fingerprint. The
+        other direction has no such safety net: skipping an unread issue loses its
+        secrets silently, so nothing is skipped without positive evidence.
+        """
+        stamp = _field_at(issue, field)
+        if stamp is None or _minute(stamp) != self.at:
+            return False
+        try:
+            return int(issue_id) <= int(self.issue_id)
+        except ValueError:
+            # Non-numeric ids are not a Jira shape, and an unorderable id is not
+            # evidence of anything. Re-read it.
+            return False
+
+
+def _resume_point(checkpoint: Checkpoint | None, window: Any) -> _Resume | None:
+    """The resume point on the lease, if this build can still act on it."""
+    if checkpoint is None or checkpoint.version != JIRA_CHECKPOINT_VERSION:
+        return None
+    position = checkpoint.position
+    at, issue_id = position.get("at"), position.get("issue_id")
+    if not isinstance(at, str) or not at or not isinstance(issue_id, str) or not issue_id:
+        return None
+    if position.get("field") != _window_field(window):
+        # A position taken over `created` cannot bound an `updated` window: the
+        # two orderings have nothing to do with each other, and resuming across
+        # them would skip whatever happens to sort earlier under the new field.
+        return None
+    return _Resume(at=at, issue_id=issue_id)
+
+
+def _watermark(cursors: Mapping[str, Any] | None, key: str) -> str:
+    """The ``updated`` instant this project was last completely scanned through."""
+    if not cursors:
+        return ""
+    position = cursors.get(key)
+    if not isinstance(position, Mapping):
+        return ""
+    updated = position.get("updated")
+    return updated if isinstance(updated, str) else ""
+
+
+def _field_at(issue: Mapping[str, Any], field: str) -> datetime | None:
+    """One of an issue's date fields at minute precision. See `_created_at`."""
+    fields = issue.get("fields")
+    raw = fields.get(field) if isinstance(fields, Mapping) else None
+    if not isinstance(raw, str) or len(raw) < 16:
+        return None
+    try:
+        return datetime.strptime(raw[:16], "%Y-%m-%dT%H:%M")
+    except ValueError:
+        return None
 
 
 def _created_at(issue: Mapping[str, Any]) -> datetime | None:
