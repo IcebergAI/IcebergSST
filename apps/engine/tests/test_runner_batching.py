@@ -316,3 +316,144 @@ def test_a_cursor_proposal_rides_on_the_terminal_submission_only() -> None:
         "version": "1",
         "position": {"revision": 3},
     }
+
+
+# ─── A lost response must not strand findings (review #160) ───────────────────
+
+
+class LosesOneResponse(Api):
+    """Commits a batch, then loses every response to it until the client gives up.
+
+    The API has the batch. The engine does not know that, and — crucially — its own
+    transport retries are exhausted, so recovery is the *engine's* problem rather
+    than the client's. That is the only path on which the batcher has to decide
+    what a later replay answer means, and a fixture that drops one response is
+    quietly resolved by `EngineClient`'s four attempts without ever reaching it.
+    """
+
+    def __init__(self, lease: dict[str, Any] | None = None) -> None:
+        super().__init__(lease)
+        #: One more than the client's own attempt budget, so its retries run out.
+        self.drop_first = 4
+        self.dropped = 0
+        self.sequence = 0
+        #: Every progress request, accepted or not — what the engine actually put
+        #: on the wire, which is the thing under test.
+        self.attempts: list[dict[str, Any]] = []
+
+    def __call__(self, request: httpx2.Request) -> httpx2.Response:
+        if request.url.path.endswith("/lease"):
+            return httpx2.Response(200, json=self.lease_body)
+        body = json.loads(request.content)
+        if request.url.path.endswith("/progress"):
+            self.attempts.append(body)
+            if body["sequence"] == self.sequence + 1:
+                self.sequence = body["sequence"]
+                self.batches.append(body)
+            if self.dropped < self.drop_first:
+                # Committed, then the response never arrives — repeatedly.
+                self.dropped += 1
+                return httpx2.Response(503)
+            return httpx2.Response(200, json={"task_id": str(TASK_ID), "sequence": self.sequence})
+        self.submissions.append(body)
+        return httpx2.Response(200, json={"task_id": str(TASK_ID)})
+
+
+def _retry_immediately(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Arm the next flush the moment one fails, so the retry happens in-test.
+
+    In production a failed batch waits out the 30-second interval before it is
+    retried; a test that waited would be a test of `sleep`.
+    """
+    monkeypatch.setattr(runner, "CHECKPOINT_BATCH_SECONDS", 0.0)
+
+
+def test_a_lost_batch_response_does_not_strand_the_findings_after_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The blocker from the #160 review.
+
+    A sequence number is bound to the payload it was first sent with. If the
+    engine retried that number with a *larger* payload, the API would answer
+    "replay" — it already holds the smaller one — and taking that as
+    acknowledgement would advance the sent ledger past findings the API never
+    received. The terminal submission then omits them: silent data loss.
+    """
+    _retry_immediately(monkeypatch)
+    _register(pages=4, resumable=True)
+    api = LosesOneResponse()
+
+    run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    reported = [
+        finding["resource_locator"]["resource_id"]
+        for message in (*api.batches, api.submission)
+        for finding in message["findings"]
+    ]
+    assert sorted(set(reported)) == ["page-0", "page-1", "page-2", "page-3"]
+
+
+def test_a_retried_batch_is_the_same_payload_under_the_same_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What makes acting on a replay answer safe.
+
+    The engine keeps going while the response is outstanding, so by the time it
+    retries it has more findings to hand. It must still send the original bytes:
+    a bigger payload wearing an already-accepted number is answered as a replay of
+    the smaller one, and there is no way to tell those apart from the response.
+    """
+    _retry_immediately(monkeypatch)
+    _register(pages=4, resumable=True)
+    api = LosesOneResponse()
+
+    run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    at_one = [attempt for attempt in api.attempts if attempt["sequence"] == 1]
+    assert len(at_one) > 1, "the fixture did not exercise a retry"
+    assert all(attempt == at_one[0] for attempt in at_one)
+
+
+# ─── Discovery is narrowed when the API says so (review #160) ─────────────────
+
+
+def _discovery_lease(**overrides: Any) -> dict[str, Any]:
+    return _lease(kind="discovery", spec={}, **overrides)
+
+
+def test_an_incremental_lease_narrows_discovery_with_its_cursors() -> None:
+    """The API committing cursors is worth nothing until they reach `discover`."""
+    connector = FakeConnector(spaces={"DOCS": _pages(2), "OPS": _pages(2)}, incremental=True)
+    registry.register(connector, replace=True)
+    api = Api(
+        _discovery_lease(mode="incremental", cursors={"DOCS": {"revision": 99}}),
+    )
+
+    run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    scopes = [spec["params"]["space"] for spec in api.submission["task_specs"]]
+    assert scopes == ["OPS"]
+
+
+def test_a_full_lease_withholds_cursors_even_when_the_source_has_them() -> None:
+    """A connector handed positions during a full scan could narrow without the
+    control plane intending it — and that scan *does* auto-resolve."""
+    connector = FakeConnector(spaces={"DOCS": _pages(2), "OPS": _pages(2)}, incremental=True)
+    registry.register(connector, replace=True)
+    api = Api(_discovery_lease(mode="full", cursors={"DOCS": {"revision": 99}}))
+
+    run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    scopes = [spec["params"]["space"] for spec in api.submission["task_specs"]]
+    assert scopes == ["DOCS", "OPS"]
+
+
+def test_a_connector_without_the_capability_is_never_handed_cursors() -> None:
+    """It would raise on the keyword; SDK 1.0 connectors must keep working."""
+    registry.register(FakeConnector(spaces={"DOCS": _pages(2)}), replace=True)
+    api = Api(_discovery_lease(mode="incremental", cursors={"DOCS": {"revision": 99}}))
+
+    report = run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    assert report is not None
+    assert report.status == "completed"

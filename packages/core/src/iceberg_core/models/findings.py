@@ -24,9 +24,25 @@ from iceberg_core.models.base import (
     utc_timestamp_type,
 )
 
-#: Predicate for the finding-event idempotency index: a *system* event caused by a
-#: known scan. Analyst rows carry an actor and no scan, and are unconstrained.
-_SYSTEM_EVENT_WHERE = text("actor_id IS NULL AND scan_id IS NOT NULL")
+#: System event kinds a single scan can only cause **once** for a finding, because
+#: each is a transition out of a state the same scan then leaves it in. Validation
+#: is deliberately absent: a scan whose tasks observe a credential changing status
+#: mid-run may legitimately record two, and a unique index over those would turn a
+#: truthful second observation into a failed results submission.
+IDEMPOTENT_SYSTEM_EVENTS: frozenset[FindingEventKind] = frozenset(
+    {FindingEventKind.STATE_CHANGE, FindingEventKind.REOPENED}
+)
+
+#: Built from the enum so the index and the code cannot drift apart, as the
+#: active-scan index is (`models/scans.py`).
+_IDEMPOTENT_SQL = ", ".join(f"'{kind.value}'" for kind in sorted(IDEMPOTENT_SYSTEM_EVENTS))
+
+#: Predicate for the finding-event idempotency index: a *system* event, caused by a
+#: known scan, of a kind that can only happen once per scan. Analyst rows carry an
+#: actor and no scan, and are unconstrained.
+_SYSTEM_EVENT_WHERE = text(
+    f"actor_id IS NULL AND scan_id IS NOT NULL AND kind IN ({_IDEMPOTENT_SQL})"
+)
 
 
 class Finding(TimestampedModel, table=True):

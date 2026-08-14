@@ -33,7 +33,13 @@ down_revision: str | None = "0012"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-_SYSTEM_EVENT_WHERE = sa.text("actor_id IS NULL AND scan_id IS NOT NULL")
+#: Mirrors `iceberg_core.models.findings._SYSTEM_EVENT_WHERE`. Validation events
+#: are deliberately outside it: a scan whose tasks observe a credential changing
+#: status mid-run may truthfully record two, and constraining that would turn a
+#: correct second observation into a failed results submission.
+_SYSTEM_EVENT_WHERE = sa.text(
+    "actor_id IS NULL AND scan_id IS NOT NULL AND kind IN ('reopened', 'state_change')"
+)
 
 
 def upgrade() -> None:

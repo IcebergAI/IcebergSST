@@ -23,6 +23,7 @@ from iceberg_api.scans import cursors, service
 from iceberg_core.enums import (
     CursorInvalidationReason,
     EngineStatus,
+    FindingEventKind,
     FindingResolution,
     FindingState,
     ScanMode,
@@ -36,11 +37,13 @@ from iceberg_core.enums import (
 from iceberg_core.models import (
     Engine,
     Finding,
+    FindingEvent,
     Scan,
     ScanTask,
     Source,
     SourceCursor,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 RULEPACK = "2026.07.1"
@@ -478,3 +481,93 @@ def test_a_silent_fleet_reports_nothing(session: Session) -> None:
     _engine(session, version=None)
 
     assert cursors.fleet_rulepack_version(session) is None
+
+
+# ─── System events carry their scan, and cannot double (review #160) ──────────
+
+
+def test_an_auto_resolution_records_which_scan_caused_it(
+    session: Session, dispatcher: RecordingDispatcher
+) -> None:
+    """Provenance, and what makes the row idempotent: the partial unique index is
+    predicated on a non-null scan_id, so an unpopulated column leaves every system
+    event outside it and the constraint inert."""
+    scan, finding = _completed_scan_with_a_stale_finding(session, dispatcher, mode=ScanMode.FULL)
+
+    service.finalize_and_reconcile(session, scan.id)
+
+    event = session.exec(select(FindingEvent).where(FindingEvent.finding_id == finding.id)).one()
+    assert event.scan_id == scan.id
+    assert event.actor_id is None
+
+
+def test_a_second_auto_resolution_by_the_same_scan_is_refused_by_the_database(
+    session: Session, dispatcher: RecordingDispatcher
+) -> None:
+    """The constraint itself, exercised rather than assumed."""
+    scan, finding = _completed_scan_with_a_stale_finding(session, dispatcher, mode=ScanMode.FULL)
+    service.finalize_and_reconcile(session, scan.id)
+
+    session.add(
+        FindingEvent(
+            finding_id=finding.id,
+            actor_id=None,
+            scan_id=scan.id,
+            kind=FindingEventKind.STATE_CHANGE,
+            from_value="open",
+            to_value="resolved",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        session.commit()
+    session.rollback()
+
+
+def test_two_analysts_may_still_record_the_same_transition(
+    session: Session, dispatcher: RecordingDispatcher, make_user: Any
+) -> None:
+    """Analyst rows are exempt: they carry an actor and no scan, so the index does
+    not apply to them and a genuine second decision is not a database error."""
+    _scan, finding = _completed_scan_with_a_stale_finding(session, dispatcher, mode=ScanMode.FULL)
+    first, second = make_user(UserRole.ANALYST), make_user(UserRole.ANALYST)
+
+    for actor in (first, second):
+        session.add(
+            FindingEvent(
+                finding_id=finding.id,
+                actor_id=actor.id,
+                kind=FindingEventKind.STATE_CHANGE,
+                from_value="open",
+                to_value="false_positive",
+            )
+        )
+    session.commit()
+
+    events = session.exec(select(FindingEvent).where(FindingEvent.finding_id == finding.id)).all()
+    assert len([event for event in events if event.actor_id is not None]) == 2
+
+
+def test_validation_events_are_outside_the_index_by_design(
+    session: Session, dispatcher: RecordingDispatcher
+) -> None:
+    """A scan whose tasks observe a credential changing status mid-run may
+    truthfully record two. Constraining that would turn a correct second
+    observation into a failed results submission."""
+    scan, finding = _completed_scan_with_a_stale_finding(session, dispatcher, mode=ScanMode.FULL)
+
+    for status in ("active", "revoked"):
+        session.add(
+            FindingEvent(
+                finding_id=finding.id,
+                actor_id=None,
+                scan_id=scan.id,
+                kind=FindingEventKind.VALIDATION,
+                to_value=status,
+            )
+        )
+    session.commit()
+
+    events = session.exec(
+        select(FindingEvent).where(FindingEvent.kind == FindingEventKind.VALIDATION)
+    ).all()
+    assert len(events) == 2

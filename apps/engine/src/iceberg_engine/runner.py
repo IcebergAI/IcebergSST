@@ -29,7 +29,7 @@ from collections.abc import Iterator
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from time import monotonic
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from dramatiq.middleware import Interrupt
@@ -44,7 +44,7 @@ from iceberg_connectors import (
     TaskSpec,
     registry,
 )
-from iceberg_connectors.protocol import Connector
+from iceberg_connectors.protocol import Connector, IncrementalConnector
 from iceberg_core.enums import CoverageObjectKind, CoverageReason, ScanTaskKind
 from iceberg_core.fingerprint import fingerprint, secret_hash
 from iceberg_core.metrics import (
@@ -187,6 +187,18 @@ def _coverage_delta(current: dict[str, Any], sent: dict[str, Any]) -> dict[str, 
     }
 
 
+@dataclass(frozen=True, slots=True)
+class _Batch:
+    """One composed batch, held so a retry is a true retransmission (#143)."""
+
+    payload: dict[str, Any]
+    checkpoint: Checkpoint
+    #: What the ledger advances to once the API confirms it holds this batch.
+    covered: int
+    coverage: dict[str, Any]
+    counts: dict[str, int]
+
+
 @dataclass(slots=True)
 class _Batcher:
     """Flushes findings and their resume point to the API mid-fetch (#143).
@@ -213,6 +225,15 @@ class _Batcher:
     pending: tuple[int, dict[str, Any], dict[str, int]] | None = None
     flushed_checkpoint: Checkpoint | None = None
     deadline: float = 0.0
+    #: A batch that was sent and never acknowledged, kept verbatim.
+    #:
+    #: A sequence number is bound to the payload it was first sent with. If a
+    #: response is lost, the API may already hold that batch, and the only safe
+    #: retry is the *same* bytes at the *same* number: a bigger payload wearing an
+    #: already-accepted sequence would be answered as a replay, and treating that
+    #: as acknowledgement would advance the sent ledger past findings the API never
+    #: received — which the terminal submission then omits. Silent data loss.
+    in_flight: _Batch | None = None
 
     def boundary(
         self,
@@ -237,6 +258,10 @@ class _Batcher:
 
     def due(self, checkpoint: Checkpoint | None, candidates: int, now: float) -> bool:
         """Whether there is a boundary worth spending a round trip on."""
+        if self.in_flight is not None:
+            # An unacknowledged batch outranks any new one: until its fate is
+            # known, no later sequence number is safe to use.
+            return now >= self.deadline
         if self.pending is None or checkpoint is None or checkpoint == self.flushed_checkpoint:
             return False
         unsent = self.pending[0] - self.sent_candidates
@@ -246,20 +271,15 @@ class _Batcher:
             return now >= self.deadline and self.pending[1] != self.sent_coverage
         return unsent >= CHECKPOINT_BATCH_FINDINGS or now >= self.deadline
 
-    def flush(
+    def send(
         self,
         checkpoint: Checkpoint,
         findings: list[dict[str, Any]],
         suppressed: int,
-    ) -> int:
-        """Send the pending boundary. Returns how many candidates it covered.
-
-        A failure here is logged and nothing is marked sent, so the work simply
-        rides on the terminal submission instead. Losing a batch costs a re-read
-        after a reclaim; dropping the findings would cost the findings.
-        """
+    ) -> None:
+        """Compose the pending boundary into a batch and try to deliver it."""
         if self.pending is None:  # pragma: no cover — guarded by `due`
-            return self.sent_candidates
+            return
         covered, coverage, counts = self.pending
         delta_counts = {key: value - self.sent_counts.get(key, 0) for key, value in counts.items()}
         # Already a per-slice number rather than a running total, so it is not
@@ -274,22 +294,80 @@ class _Batcher:
         }
         if self.rulepack_version:
             payload["rulepack_version"] = self.rulepack_version
+        self.in_flight = _Batch(
+            payload=payload,
+            checkpoint=checkpoint,
+            covered=covered,
+            coverage=coverage,
+            counts=counts,
+        )
+        self.deliver()
+
+    def deliver(self) -> None:
+        """Deliver (or redeliver) the in-flight batch, verbatim.
+
+        The ledger advances only when the API's own counter reaches the sequence
+        this batch carries. A replay at that sequence is still an acknowledgement —
+        it means the API already holds *this* payload, because the payload and the
+        number were bound together when it was first composed. A reported counter
+        *below* it means the batch was refused, so nothing moves and the work rides
+        on the terminal submission instead.
+
+        Losing a batch costs a re-read after a reclaim. Advancing the ledger past
+        what the API stored would cost the findings.
+        """
+        batch = self.in_flight
+        if batch is None:  # pragma: no cover — guarded by callers
+            return
         try:
-            accepted = self.client.submit_progress(self.lease.task_id, payload)
+            accepted = self.client.submit_progress(self.lease.task_id, batch.payload)
         except EngineApiError as exc:
             # Includes a lost lease: the task is about to be reclaimed anyway, and
             # the reclaimed attempt resumes from the last batch the API *did* take.
             self.log.warning("scan_task_batch_failed", error=type(exc).__name__)
-            return self.sent_candidates
+            return
 
-        self.sequence = int(accepted.get("sequence", self.sequence + 1))
-        self.flushed_checkpoint = checkpoint
-        self.sent_coverage = coverage
-        self.sent_counts = counts
-        self.sent_candidates = covered
+        sequence = int(batch.payload["sequence"])
+        reported = int(accepted.get("sequence", sequence))
+        if reported < sequence:
+            self.log.warning("scan_task_batch_refused", offered=sequence, stored=reported)
+            self.in_flight = None
+            return
+
+        self.sequence = reported
+        self.flushed_checkpoint = batch.checkpoint
+        self.sent_coverage = batch.coverage
+        self.sent_counts = batch.counts
+        self.sent_candidates = batch.covered
         self.pending = None
-        ENGINE_FINDINGS_REPORTED.inc(len(findings))
-        return covered
+        self.in_flight = None
+        ENGINE_FINDINGS_REPORTED.inc(len(batch.payload["findings"]))
+
+
+def _discovered(connector: Connector, lease: Lease) -> Iterator[TaskSpec]:
+    """Run discovery, narrowed to what changed when the scan asked for that (#143).
+
+    The keyword is passed only when the connector declares ``INCREMENTAL``. Gating
+    on the declared capability rather than on ``isinstance``: a runtime-checkable
+    Protocol checks that ``discover`` exists, not that it accepts ``cursors``, so
+    an SDK 1.0 connector would pass the check and fail on the call.
+
+    Cursors are withheld unless the *API* put the scan in incremental mode. A
+    connector handed positions during a full scan could narrow without the control
+    plane intending it, and that scan would then auto-resolve against content it
+    never looked at.
+    """
+    capabilities = getattr(connector, "metadata", None)
+    incremental = (
+        lease.incremental
+        and capabilities is not None
+        and ConnectorCapability.INCREMENTAL in capabilities.capabilities
+    )
+    if not incremental:
+        return connector.discover(lease.connection, lease.credential)
+    return cast(IncrementalConnector, connector).discover(
+        lease.connection, lease.credential, cursors=lease.cursors
+    )
 
 
 def _validator(
@@ -385,11 +463,17 @@ def _flush(
     validator: ValidationExecutor,
 ) -> None:
     """Prepare and send the pending boundary, then arm the next interval."""
-    covered = batcher.pending[0] if batcher.pending else batcher.sent_candidates
-    findings, suppressed = _prepare(
-        candidates[batcher.sent_candidates : covered], rules, validator, validate=True
-    )
-    batcher.flush(checkpoint, findings, suppressed)
+    if batcher.in_flight is not None:
+        # Redelivered verbatim. Composing a fresh, larger payload under the same
+        # sequence would be answered as a replay of the *old* one, and taking that
+        # as acknowledgement would strand everything the two differ by.
+        batcher.deliver()
+    else:
+        covered = batcher.pending[0] if batcher.pending else batcher.sent_candidates
+        findings, suppressed = _prepare(
+            candidates[batcher.sent_candidates : covered], rules, validator, validate=True
+        )
+        batcher.send(checkpoint, findings, suppressed)
     # Armed whether or not the send worked: a source that is failing should not be
     # retried once per unit.
     batcher.deadline = monotonic() + CHECKPOINT_BATCH_SECONDS
@@ -586,7 +670,7 @@ def _discover(connector: Connector, lease: Lease, report: TaskReport) -> None:
     report.coverage = coverage
     seen_scopes: set[str] = set()
     try:
-        for spec in connector.discover(lease.connection, lease.credential):
+        for spec in _discovered(connector, lease):
             # Append as discovery progresses so a late failure (for example one
             # configured space missing after other matches) does not discard the
             # matched spaces.  The failed discovery keeps the overall scan partial,
