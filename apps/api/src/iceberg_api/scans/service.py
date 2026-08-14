@@ -300,6 +300,65 @@ def claim_result(db: Session, task: ScanTask, idempotency_key: str) -> bool:
     return True
 
 
+def advance_checkpoint(
+    db: Session,
+    task: ScanTask,
+    *,
+    sequence: int,
+    checkpoint: dict[str, Any],
+    context: dict[str, Any],
+) -> bool:
+    """Claim batch ``sequence`` for this task and store its resume point (#143).
+
+    One conditional UPDATE does all the guarding a batched submission needs. The
+    ``checkpoint_sequence = sequence - 1`` predicate is the whole idempotency
+    scheme: a duplicate batch, a batch that arrives out of order, and a batch from
+    an engine whose lease was reclaimed all fail the same way — ``False``, ingest
+    nothing. The counter is per *task*, not per attempt, so a reclaimed attempt
+    continues the sequence rather than colliding with its predecessor.
+
+    The caller must ingest the batch's findings in this same transaction. A
+    checkpoint that commits without them would tell the next attempt to start
+    beyond content nobody stored, which loses findings silently — the failure this
+    entire mechanism exists to make impossible. No commit; the caller owns it.
+    """
+    result = db.exec(
+        update(ScanTask)
+        .where(
+            col(ScanTask.id) == task.id,
+            col(ScanTask.engine_id) == task.engine_id,
+            col(ScanTask.status).in_(list(LEASED_STATUSES)),
+            col(ScanTask.result_key).is_(None),
+            col(ScanTask.checkpoint_sequence) == sequence - 1,
+        )
+        .values(
+            checkpoint=checkpoint,
+            checkpoint_sequence=sequence,
+            checkpoint_context=context,
+        )
+    )
+    if result.rowcount != 1:
+        return False
+    # Keep the ORM object in step with the row, as `claim_result` does.
+    task.checkpoint = checkpoint
+    task.checkpoint_sequence = sequence
+    task.checkpoint_context = context
+    return True
+
+
+def discard_checkpoint(db: Session, task: ScanTask) -> None:
+    """Drop a resume point the current configuration no longer licenses (#143).
+
+    The sequence is deliberately *not* reset: it is the batch idempotency counter,
+    and rewinding it would let a replayed batch from the previous attempt be
+    accepted a second time. Only the position is cleared, so the task restarts its
+    spec from the top while its batch history stays monotonic.
+    """
+    task.checkpoint = {}
+    task.checkpoint_context = {}
+    db.add(task)
+
+
 def complete_task(
     db: Session,
     task: ScanTask,

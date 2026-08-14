@@ -17,6 +17,7 @@ from iceberg_core.enums import (
     CoverageObjectKind,
     CoverageReason,
     EngineStatus,
+    ScanMode,
     ScanTaskKind,
     ScanTaskStatus,
     Severity,
@@ -27,6 +28,11 @@ from iceberg_core.enums import (
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from iceberg_api.schemas import UtcDatetime
+
+#: Ceiling on progress batches for one task (#143). A runaway-loop backstop set far
+#: above any real task: at the engine's flush thresholds this is hundreds of
+#: thousands of findings, and a task producing more of them has a different problem.
+MAX_BATCH_SEQUENCE = 1_000
 
 
 class RuleMetadata(BaseModel):
@@ -130,6 +136,26 @@ class LeaseResponse(BaseModel):
     spec: dict[str, Any] = Field(default_factory=dict)
     #: How to reach the source, minus the credential.
     connection: dict[str, Any] = Field(default_factory=dict)
+
+    #: Where a previous attempt of this task got to (#143), or empty to start from
+    #: the top. Empty whenever the configuration the position was taken under has
+    #: since moved, because resuming into content the current configuration does
+    #: not cover would report a scan of the wrong thing.
+    checkpoint: dict[str, Any] = Field(default_factory=dict)
+
+    #: How many batches this task has already had accepted. The engine's first
+    #: batch is this plus one; the counter is per task, so a reclaimed attempt
+    #: continues it rather than colliding with its predecessor's numbers.
+    checkpoint_sequence: int = Field(default=0, ge=0)
+
+    #: Per-scope watermarks for an incremental scan, ``{scope: position}``. Empty
+    #: for a full scan, which is every scan unless a schedule asked otherwise and
+    #: every cursor survived validation.
+    cursors: dict[str, Any] = Field(default_factory=dict)
+
+    #: What this scan undertook to read. An engine does not decide it; it is
+    #: reported so the connector can narrow discovery and so logs say which it was.
+    mode: ScanMode = ScanMode.FULL
 
     #: The source credential in plaintext, scoped to this task. Deliberately a plain
     #: string rather than a SecretStr: pydantic would serialise that as asterisks
@@ -350,6 +376,22 @@ class TaskCoverageReport(BaseModel):
         return self
 
 
+class CursorProposal(BaseModel):
+    """A connector's proposal for where the next scan of one scope starts (#143).
+
+    The scope is named by the engine rather than derived by the API: scope
+    parameter names are connector knowledge (``space_key``, ``project_key``), and
+    the API runs no connector code. ``position`` is opaque here — it may hold a
+    provider change token, so it is stored but never logged or exported.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    scope: str = Field(min_length=1, max_length=512)
+    version: str = Field(min_length=1, max_length=32)
+    position: dict[str, Any] = Field(default_factory=dict)
+
+
 class ResultsSubmission(BaseModel):
     """``POST /scan-tasks/{id}/results`` — the only ingress for results."""
 
@@ -379,6 +421,59 @@ class ResultsSubmission(BaseModel):
     #: engine; a missing report is surfaced as ``unreported`` in the manifest and
     #: can never produce a clean coverage state.
     coverage: TaskCoverageReport | None = None
+
+    #: How many progress batches preceded this submission (#143). Zero — an engine
+    #: that never flushed, or one predating batching — means ``counts`` and
+    #: ``coverage`` describe the whole task, exactly as they always have. Above
+    #: zero they are the remaining delta and the API merges them onto what the
+    #: batches already recorded.
+    checkpoint_sequence: int = Field(default=0, ge=0, le=MAX_BATCH_SEQUENCE)
+
+    #: Where the next scan of this scope should start, proposed by the connector.
+    #: Stored only if the whole scan reaches ``completed`` with complete coverage.
+    cursor: CursorProposal | None = None
+
+
+class ProgressSubmission(BaseModel):
+    """``POST /scan-tasks/{id}/progress`` — one durable batch of a running task.
+
+    The counterpart to :class:`ResultsSubmission` for work that is not finished.
+    Findings and the resume point move together in one transaction, because a
+    checkpoint stored ahead of its findings would tell the next attempt to skip
+    them.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Strictly monotonic within a task, starting at one past whatever the lease
+    #: reported. The API accepts ``sequence`` only when it is exactly one ahead of
+    #: the stored counter, which makes duplicate, out-of-order, and stale-engine
+    #: batches indistinguishable — all three are simply refused.
+    sequence: int = Field(ge=1, le=MAX_BATCH_SEQUENCE)
+
+    #: The connector position these findings are complete up to.
+    checkpoint: dict[str, Any] = Field(default_factory=dict)
+
+    #: Findings, tallies, and assurance for this batch only — never running totals.
+    findings: list[FindingPayload] = Field(default_factory=list)
+    counts: dict[str, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
+    coverage: TaskCoverageReport | None = None
+
+    rulepack_version: str | None = Field(default=None, max_length=64)
+
+
+class ProgressAccepted(BaseModel):
+    """What a batch did, and where the task now stands."""
+
+    task_id: uuid.UUID
+    #: The stored counter after this call. On a replay it is unchanged, which is
+    #: how an engine learns its batch was already recorded.
+    sequence: int
+    replay: bool = False
+    findings_ingested: int = 0
+    findings_suppressed: int = 0
+    findings_reopened: int = 0
+    findings_below_threshold: int = 0
 
 
 class ResultsAccepted(BaseModel):

@@ -49,12 +49,15 @@ from iceberg_api.engines.schemas import (
     HeartbeatRequest,
     HeartbeatResponse,
     LeaseResponse,
+    ProgressAccepted,
+    ProgressSubmission,
     ResultsAccepted,
     ResultsSubmission,
     RulepackReport,
+    TaskCoverageReport,
 )
-from iceberg_api.scans import service
-from iceberg_api.scans.coverage import failure_report
+from iceberg_api.scans import cursors, service
+from iceberg_api.scans.coverage import failure_report, merge_task_report, stored_task_report
 from iceberg_api.validation import service as validation_service
 
 router = APIRouter(tags=["engines"])
@@ -65,7 +68,12 @@ logger = structlog.get_logger()
 REPORTABLE_STATUSES = (ScanTaskStatus.COMPLETED, ScanTaskStatus.FAILED)
 
 
-def _effective_outcome(body: ResultsSubmission) -> tuple[ScanTaskStatus, str | None]:
+def _effective_outcome(
+    body: ResultsSubmission,
+    *,
+    counts: dict[str, int],
+    coverage: TaskCoverageReport | None,
+) -> tuple[ScanTaskStatus, str | None]:
     """Fail closed when a connector could not read requested content.
 
     Engines report both a task status and connector tallies.  Older engines could
@@ -74,12 +82,19 @@ def _effective_outcome(body: ResultsSubmission) -> tuple[ScanTaskStatus, str | N
     evidence that its old findings disappeared.  The API is the only writer of
     record, so it enforces the invariant at ingest as well as relying on current
     runners to send the correct status.
+
+    ``counts`` and ``coverage`` are the task's **merged** totals, not the final
+    submission's delta (#143). A task that flushed batches reports each one
+    separately, so a unit that failed in the first batch is absent from the last
+    body — judging that body alone would let a task whose failures all landed
+    early report itself complete, and reconciliation would then auto-resolve
+    against content nobody read.
     """
-    failed_units = body.counts.get("units_failed", 0)
-    truncated_units = body.counts.get("units_truncated", 0)
-    if body.coverage is not None:
-        failed_objects = body.coverage.counts.failed
-        scope_gaps = body.coverage.scope.gaps
+    failed_units = counts.get("units_failed", 0)
+    truncated_units = counts.get("units_truncated", 0)
+    if coverage is not None:
+        failed_objects = coverage.counts.failed
+        scope_gaps = coverage.scope.gaps
         if body.status is ScanTaskStatus.COMPLETED and (failed_objects or scope_gaps):
             return (
                 ScanTaskStatus.FAILED,
@@ -105,6 +120,24 @@ def _effective_outcome(body: ResultsSubmission) -> tuple[ScanTaskStatus, str | N
             f"{truncated_units} were truncated",
         )
     return body.status, body.error
+
+
+def _checkpoint_still_valid(task: ScanTask, scan: Scan) -> bool:
+    """Whether a stored resume point was taken under this scan's configuration.
+
+    Compared rather than trusted: a task can be reclaimed long after its first
+    attempt, and both the source and the running rule pack may have moved since.
+    An unreadable context is treated as invalid — restarting a spec costs a re-read
+    and nothing else, while resuming on a guess costs coverage.
+    """
+    context = task.checkpoint_context
+    expected_configuration = (
+        scan.source_configuration_version.isoformat() if scan.source_configuration_version else None
+    )
+    return (
+        context.get("source_configuration_version") == expected_configuration
+        and context.get("rulepack_version") == scan.rulepack_version
+    )
 
 
 def _rulepack_record(report: RulepackReport) -> dict[str, object]:
@@ -306,6 +339,18 @@ async def lease_task(
                 "source credential could not be decrypted",
             ) from exc
 
+    # A resume point is only meaningful under the configuration it was taken from
+    # (#143). Handing back one taken under different scope filters or a different
+    # rule pack would resume into content this scan does not cover, or skip content
+    # the new rules have never seen — either way a scan that reports more coverage
+    # than it has. Restarting the spec is the cheap, correct answer.
+    checkpoint = task.checkpoint
+    if checkpoint and not _checkpoint_still_valid(task, scan):
+        service.discard_checkpoint(db, task)
+        db.commit()
+        checkpoint = {}
+        logger.info("scan_task_checkpoint_discarded", task_id=str(task.id))
+
     return LeaseResponse(
         task_id=task.id,
         scan_id=scan.id,
@@ -316,6 +361,10 @@ async def lease_task(
         lease_expires_at=grant.expires_at,
         spec=task.spec,
         connection=source.connection,
+        checkpoint=checkpoint,
+        checkpoint_sequence=task.checkpoint_sequence,
+        cursors=cursors.positions_for_scan(db, scan),
+        mode=scan.mode,
         credential=credential,
         fingerprint_pepper=pepper,
         previous_fingerprint_pepper=previous_pepper,
@@ -326,6 +375,120 @@ async def lease_task(
         validation_policies=validation_service.enabled_lease_snapshot(
             db, deployment_enabled=settings.secret_validation_enabled
         ),
+    )
+
+
+@router.post("/scan-tasks/{task_id}/progress")
+async def submit_progress(
+    task_id: uuid.UUID,
+    body: ProgressSubmission,
+    engine: CurrentEngine,
+    db: SessionDep,
+    settings: SettingsDep,
+    store: SecretStoreDep,
+) -> ProgressAccepted:
+    """Durably record one batch of a still-running task (#143).
+
+    The counterpart to ``/results`` for work that has not finished. Findings and
+    the connector's resume point are written in a single transaction, because a
+    checkpoint that commits ahead of its findings tells the next attempt to start
+    beyond content nobody stored — which loses secrets silently, and is the one
+    failure this whole mechanism exists to prevent.
+
+    Deliberately **not** terminal: no ``complete_task``, no ``finalize_and_reconcile``.
+    A batch says "this much is safe", never "this task is done".
+    """
+    task = db.get(ScanTask, task_id)
+    if task is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "task not found")
+    if task.engine_id != engine.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "task is not leased by this engine")
+    if task.kind is not ScanTaskKind.FETCH:
+        # Discovery produces specs, not findings, and its output is meaningless
+        # until complete — there is nothing a partial discovery could safely store.
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "only fetch tasks batch results")
+
+    try:
+        validation_service.require_authorized_results(
+            db,
+            body.findings,
+            deployment_enabled=settings.secret_validation_enabled,
+        )
+    except validation_service.UnauthorizedValidation as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+
+    now = datetime.now(UTC)
+    scan = db.exec(select(Scan).where(col(Scan.id) == task.scan_id).with_for_update()).one_or_none()
+    if scan is None:  # pragma: no cover — FK guarantees it
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "scan not found")
+
+    context = {
+        "source_configuration_version": (
+            scan.source_configuration_version.isoformat()
+            if scan.source_configuration_version
+            else None
+        ),
+        "rulepack_version": body.rulepack_version,
+    }
+    if not service.advance_checkpoint(
+        db,
+        task,
+        sequence=body.sequence,
+        checkpoint=body.checkpoint,
+        context=context,
+    ):
+        # Duplicate, out of order, or from an engine whose lease has gone. All
+        # three are the same answer: nothing was ingested, and the stored counter
+        # tells the engine where the task actually stands.
+        db.rollback()
+        db.refresh(task)
+        if task.engine_id != engine.id or task.result_key is not None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "task is no longer accepting batches")
+        logger.info(
+            "scan_task_batch_refused",
+            task_id=str(task.id),
+            offered=body.sequence,
+            stored=task.checkpoint_sequence,
+        )
+        return ProgressAccepted(task_id=task.id, sequence=task.checkpoint_sequence, replay=True)
+
+    outcome = ingest.IngestOutcome()
+    if body.findings:
+        # Fail-open on the correlation key exactly as `/results` does (ADR 0011):
+        # a transient secret-store failure must not drop findings.
+        correlation_key: bytes | None = None
+        try:
+            correlation_key = store.get_correlation_key()
+        except SecretStoreError:
+            logger.warning("correlation_key_unavailable", scan_id=str(scan.id))
+
+        outcome = ingest.ingest_findings(
+            db,
+            scan,
+            body.findings,
+            now=now,
+            threshold=settings.confidence_threshold,
+            correlation_key=correlation_key,
+        )
+
+    if body.coverage is not None:
+        merged = merge_task_report(stored_task_report(task), body.coverage)
+        task.coverage = merged.model_dump(mode="json")
+        db.add(task)
+
+    ingest.merge_scan_counts(scan, outcome, body.counts)
+    if body.rulepack_version:
+        scan.rulepack_version = body.rulepack_version
+    db.add(scan)
+    db.commit()
+
+    return ProgressAccepted(
+        task_id=task.id,
+        sequence=body.sequence,
+        findings_ingested=outcome.ingested,
+        findings_suppressed=outcome.suppressed,
+        findings_reopened=outcome.reopened,
+        findings_below_threshold=outcome.below_threshold,
     )
 
 
@@ -375,6 +538,15 @@ async def submit_results(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "discovery tasks may report task specs but not findings",
         )
+    if body.checkpoint_sequence != task.checkpoint_sequence:
+        # The engine believes it flushed a different number of batches than the API
+        # recorded. Merging the remainder onto the wrong base would over- or
+        # under-count coverage, and an over-count reads as content that was never
+        # there. Refuse and let the task be reclaimed.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "reported batch sequence does not match the recorded one",
+        )
     if task.kind is ScanTaskKind.FETCH and body.task_specs:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -417,7 +589,30 @@ async def submit_results(
 
     outcome = ingest.IngestOutcome()
     fetch_tasks: list[ScanTask] = []
-    task_status, task_error = _effective_outcome(body)
+
+    # A task that flushed batches has already reported part of its coverage; this
+    # body carries only the remainder. Judge the *task*, not the last body of it —
+    # a unit that failed in batch one is absent from here, and calling the task
+    # complete on that basis would let reconciliation auto-resolve against content
+    # nobody read.
+    #
+    # Coverage carries this, not `counts`: a truncated or unreadable unit is
+    # recorded as a failed *object* in the same batch's report, so the merged
+    # report sees every batch's failures even though per-batch tallies are not
+    # retained. `counts` stays the body's own, and is only consulted for an engine
+    # old enough to send no coverage — which is also too old to send batches.
+    #
+    # `checkpoint_sequence == 0` means no batches at all, where this is
+    # byte-identical to the previous behaviour.
+    merged_coverage = body.coverage
+    if body.checkpoint_sequence > 0:
+        merged_coverage = (
+            merge_task_report(stored_task_report(task), body.coverage)
+            if body.coverage is not None
+            else stored_task_report(task)
+        )
+
+    task_status, task_error = _effective_outcome(body, counts=body.counts, coverage=merged_coverage)
 
     if task.kind is ScanTaskKind.DISCOVERY:
         if body.task_specs:
@@ -460,7 +655,7 @@ async def submit_results(
         task,
         status=task_status,
         error=task_error,
-        coverage=body.coverage.model_dump(mode="json") if body.coverage else None,
+        coverage=merged_coverage.model_dump(mode="json") if merged_coverage else None,
         now=now,
     )
     db.add(scan)

@@ -33,6 +33,73 @@ from iceberg_api.scans.schemas import (
 )
 
 
+def merge_task_report(
+    existing: TaskCoverageReport | None,
+    delta: TaskCoverageReport,
+) -> TaskCoverageReport:
+    """Accumulate one batch's coverage onto what a task has already reported (#143).
+
+    A task that flushes findings mid-fetch reports its coverage the same way: in
+    deltas, each covering only the objects that batch saw. The API is the only
+    writer of record, so the accumulation happens here rather than in the engine —
+    an engine that died between batches must not be able to leave a task claiming
+    coverage it never sent.
+
+    ``scope.requested`` survives only if *every* contributing batch knew it. A
+    total assembled from some batches that counted and some that could not is
+    worse than no total, because it would look exact (compare `build_manifest`).
+    """
+    if existing is None:
+        return delta
+    if existing.phase is not delta.phase:
+        raise ValueError("coverage batches disagree about the task phase")
+
+    reasons: Counter[tuple[CoverageDisposition, CoverageReason]] = Counter()
+    for entry in (*existing.reasons, *delta.reasons):
+        reasons[(entry.outcome, entry.reason)] += entry.count
+
+    # Concatenate under the same ceiling one report obeys, and account for what
+    # the ceiling drops. Aggregate counts continue past it; only the correlatable
+    # references stop, which is the documented behaviour of the cap.
+    gaps = [*existing.gaps, *delta.gaps]
+    retained = gaps[:MAX_COVERAGE_GAP_REFERENCES]
+    gaps_omitted = existing.gaps_omitted + delta.gaps_omitted + (len(gaps) - len(retained))
+
+    requested: int | None = None
+    if existing.scope.requested is not None and delta.scope.requested is not None:
+        requested = existing.scope.requested + delta.scope.requested
+
+    return TaskCoverageReport(
+        version=existing.version,
+        phase=existing.phase,
+        counts=CoverageCounts(
+            requested=existing.counts.requested + delta.counts.requested,
+            discovered=existing.counts.discovered + delta.counts.discovered,
+            scanned=existing.counts.scanned + delta.counts.scanned,
+            skipped=existing.counts.skipped + delta.counts.skipped,
+            failed=existing.counts.failed + delta.counts.failed,
+        ),
+        scope=CoverageScope(
+            requested=requested,
+            discovered=existing.scope.discovered + delta.scope.discovered,
+            gaps=existing.scope.gaps + delta.scope.gaps,
+        ),
+        reasons=[
+            CoverageReasonCount(outcome=outcome, reason=reason, count=count)
+            for (outcome, reason), count in sorted(
+                reasons.items(), key=lambda item: (item[0][0].value, item[0][1].value)
+            )
+        ],
+        gaps=retained,
+        gaps_omitted=gaps_omitted,
+    )
+
+
+def stored_task_report(task: ScanTask) -> TaskCoverageReport | None:
+    """The coverage already accumulated on a task, or None if there is none."""
+    return _validated_report(task)
+
+
 def build_manifest(scan: Scan, tasks: Sequence[ScanTask]) -> CoverageManifest:
     """Build the same allowlisted manifest for the same frozen terminal rows."""
     counts = Counter[str]()
