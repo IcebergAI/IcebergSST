@@ -24,14 +24,18 @@ broker, logs, metrics, audit events, or database (ADR 0004 and ADR 0010).
 
 import base64
 import uuid
+from collections import Counter
 from collections.abc import Iterator
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from time import monotonic
 from typing import Any
 
 import structlog
 from dramatiq.middleware import Interrupt
 from iceberg_connectors import (
+    Checkpoint,
+    ConnectorCapability,
     ConnectorError,
     ConnectorFailureCode,
     ContentUnit,
@@ -48,6 +52,7 @@ from iceberg_core.metrics import (
     ENGINE_FINDINGS_REPORTED,
     ENGINE_TASKS_RUN,
 )
+from iceberg_core.suppression import SuppressionRule
 from iceberg_detect import DetectionResult, RulePack, detect
 
 from iceberg_engine.api_client import (
@@ -102,6 +107,15 @@ class TaskReport:
     task_specs: list[dict[str, Any]] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
     coverage: TaskCoverage | None = None
+    #: Set when the coverage above is a *remainder* rather than the whole task —
+    #: the rest went out in progress batches (#143). Zero means one submission
+    #: carried everything, which is the ordinary case.
+    checkpoint_sequence: int = 0
+    #: Overrides `coverage` when batching has already sent part of it, because a
+    #: delta cannot be expressed as a `TaskCoverage`.
+    coverage_payload: dict[str, Any] | None = None
+    #: Where the next scan of this scope should start, if the connector said.
+    cursor: dict[str, Any] | None = None
 
     def as_submission(self, idempotency_key: str, rulepack_version: str | None) -> dict[str, Any]:
         submission: dict[str, Any] = {
@@ -110,14 +124,275 @@ class TaskReport:
             "findings": self.findings,
             "task_specs": self.task_specs,
             "counts": self.counts,
+            "checkpoint_sequence": self.checkpoint_sequence,
         }
         if self.error:
             submission["error"] = self.error
         if rulepack_version:
             submission["rulepack_version"] = rulepack_version
-        if self.coverage is not None:
+        if self.coverage_payload is not None:
+            submission["coverage"] = self.coverage_payload
+        elif self.coverage is not None:
             submission["coverage"] = self.coverage.as_payload()
+        if self.cursor is not None:
+            submission["cursor"] = self.cursor
         return submission
+
+
+#: Flush thresholds (#143). Deliberately coarse: a batch costs a round trip and a
+#: transaction, and the point is to bound how much a reclaimed task re-reads, not
+#: to stream. Whichever trips first wins, so a slow source still checkpoints.
+CHECKPOINT_BATCH_FINDINGS = 500
+CHECKPOINT_BATCH_SECONDS = 30.0
+
+
+def _coverage_delta(current: dict[str, Any], sent: dict[str, Any]) -> dict[str, Any]:
+    """What ``current`` adds to a coverage payload already reported.
+
+    Valid because a batch is only ever cut at a boundary between units: counts
+    accumulate monotonically across boundaries, and ``gaps`` is append-only, so the
+    new references are exactly the tail of the list. (Within one unit a truncation
+    can move a count from ``scanned`` to ``failed``, but both sides of that land
+    inside the same boundary, so no delta ever goes negative.)
+    """
+    current_counts, sent_counts = current["counts"], sent["counts"]
+    current_scope, sent_scope = current["scope"], sent["scope"]
+
+    reasons: Counter[tuple[str, str]] = Counter()
+    for entry in current["reasons"]:
+        reasons[(entry["outcome"], entry["reason"])] += entry["count"]
+    for entry in sent["reasons"]:
+        reasons[(entry["outcome"], entry["reason"])] -= entry["count"]
+
+    requested = current_scope["requested"]
+    if requested is not None and sent_scope["requested"] is not None:
+        requested -= sent_scope["requested"]
+
+    return {
+        "version": current["version"],
+        "phase": current["phase"],
+        "counts": {key: current_counts[key] - sent_counts[key] for key in current_counts},
+        "scope": {
+            "requested": requested,
+            "discovered": current_scope["discovered"] - sent_scope["discovered"],
+            "gaps": current_scope["gaps"] - sent_scope["gaps"],
+        },
+        "reasons": [
+            {"outcome": outcome, "reason": reason, "count": count}
+            for (outcome, reason), count in sorted(reasons.items())
+            if count > 0
+        ],
+        "gaps": current["gaps"][len(sent["gaps"]) :],
+        "gaps_omitted": current["gaps_omitted"] - sent["gaps_omitted"],
+    }
+
+
+@dataclass(slots=True)
+class _Batcher:
+    """Flushes findings and their resume point to the API mid-fetch (#143).
+
+    Holds the one thing the runner cannot recompute: how much of the task the API
+    has already accepted. A batch is cut only where the connector's published
+    checkpoint and the accumulated findings describe the same prefix of the work —
+    see :meth:`boundary`, which is what makes a resumed attempt neither skip nor
+    double-count.
+    """
+
+    client: EngineClient
+    lease: Lease
+    rulepack_version: str | None
+    log: Any
+    sequence: int
+    #: Coverage the API has accepted, as a payload. Diffed to build each delta.
+    sent_coverage: dict[str, Any]
+    #: Candidates already submitted, as an index into the runner's growing list.
+    sent_candidates: int = 0
+    sent_counts: dict[str, int] = field(default_factory=dict)
+    #: Work completed as of the end of the last unit: how many candidates it had
+    #: produced, and the coverage and tallies that described exactly those units.
+    pending: tuple[int, dict[str, Any], dict[str, int]] | None = None
+    flushed_checkpoint: Checkpoint | None = None
+    deadline: float = 0.0
+
+    def boundary(
+        self,
+        candidates: int,
+        coverage: dict[str, Any],
+        counts: dict[str, int],
+    ) -> None:
+        """Record what has been fully processed, at the end of a unit.
+
+        No checkpoint is recorded with it, because there is not one yet. ``fetch``
+        is a generator: the ``checkpoint_at`` call covering this unit does not run
+        until the consumer asks for the next one. So the position that matches this
+        snapshot only becomes visible at the *top* of the following iteration,
+        which is where :meth:`due` pairs the two.
+
+        Getting this backwards is the subtle failure the design has to avoid.
+        Pairing the checkpoint visible *now* with the work visible *now* would ship
+        a batch covering one unit more than its position admits, and every resumed
+        attempt would re-report that unit and inflate the merged coverage.
+        """
+        self.pending = (candidates, coverage, dict(counts))
+
+    def due(self, checkpoint: Checkpoint | None, candidates: int, now: float) -> bool:
+        """Whether there is a boundary worth spending a round trip on."""
+        if self.pending is None or checkpoint is None or checkpoint == self.flushed_checkpoint:
+            return False
+        unsent = self.pending[0] - self.sent_candidates
+        if unsent <= 0 and self.pending[0] == self.sent_candidates:
+            # Nothing new to make durable; a bare position is not worth a round
+            # trip, and the next boundary will carry it anyway.
+            return now >= self.deadline and self.pending[1] != self.sent_coverage
+        return unsent >= CHECKPOINT_BATCH_FINDINGS or now >= self.deadline
+
+    def flush(
+        self,
+        checkpoint: Checkpoint,
+        findings: list[dict[str, Any]],
+        suppressed: int,
+    ) -> int:
+        """Send the pending boundary. Returns how many candidates it covered.
+
+        A failure here is logged and nothing is marked sent, so the work simply
+        rides on the terminal submission instead. Losing a batch costs a re-read
+        after a reclaim; dropping the findings would cost the findings.
+        """
+        if self.pending is None:  # pragma: no cover — guarded by `due`
+            return self.sent_candidates
+        covered, coverage, counts = self.pending
+        delta_counts = {key: value - self.sent_counts.get(key, 0) for key, value in counts.items()}
+        # Already a per-slice number rather than a running total, so it is not
+        # part of the diff above.
+        delta_counts["prefiltered"] = suppressed
+        payload: dict[str, Any] = {
+            "sequence": self.sequence + 1,
+            "checkpoint": checkpoint.as_payload(),
+            "findings": findings,
+            "counts": delta_counts,
+            "coverage": _coverage_delta(coverage, self.sent_coverage),
+        }
+        if self.rulepack_version:
+            payload["rulepack_version"] = self.rulepack_version
+        try:
+            accepted = self.client.submit_progress(self.lease.task_id, payload)
+        except EngineApiError as exc:
+            # Includes a lost lease: the task is about to be reclaimed anyway, and
+            # the reclaimed attempt resumes from the last batch the API *did* take.
+            self.log.warning("scan_task_batch_failed", error=type(exc).__name__)
+            return self.sent_candidates
+
+        self.sequence = int(accepted.get("sequence", self.sequence + 1))
+        self.flushed_checkpoint = checkpoint
+        self.sent_coverage = coverage
+        self.sent_counts = counts
+        self.sent_candidates = covered
+        self.pending = None
+        ENGINE_FINDINGS_REPORTED.inc(len(findings))
+        return covered
+
+
+def _validator(
+    lease: Lease,
+    pack: RulePack,
+    limiter: RateLimiter | None,
+) -> ValidationExecutor:
+    """One executor for the whole task, batches included.
+
+    Built once rather than per batch because its budget and its per-secret cache
+    are task-scoped: a fresh one per batch would re-spend the provider allowance
+    and re-validate a secret the task has already seen (ADR 0010).
+    """
+    eligible_bindings = {
+        rule.id: rule.validator_id for rule in pack.rules if rule.validator_id is not None
+    }
+    return ValidationExecutor.from_payloads(
+        [
+            policy
+            for policy in lease.validation_policies
+            if eligible_bindings.get(str(policy.get("rule_id"))) == str(policy.get("validator_id"))
+        ],
+        limiter=limiter,
+    )
+
+
+def _prepare(
+    candidates: list[Candidate],
+    rules: list[SuppressionRule],
+    validator: ValidationExecutor,
+    *,
+    validate: bool,
+) -> tuple[list[dict[str, Any]], int]:
+    """Pre-filter and validate one slice of candidates, ready to report.
+
+    Pre-filtering locally saves bandwidth. The API applies the same suppressions
+    again at ingest, authoritatively, so this can only ever be the more permissive
+    of the two (#44).
+
+    ``validate`` is false after cancellation: that is an explicit revocation of
+    further sensitive work, so coverage accounting still finishes but no provider
+    call is initiated once the heartbeat has observed it.
+    """
+    filtered = prefilter(candidates, rules)
+    if validate:
+        for candidate in filtered.kept:
+            validation = validator.validate(
+                rule_id=candidate.rule_id,
+                secret_hash=str(candidate.payload["secret_hash"]),
+                secret=candidate.secret,
+            )
+            if validation is not None:
+                candidate.payload["validation"] = validation.as_payload()
+    return [candidate.payload for candidate in filtered.kept], filtered.suppressed_count
+
+
+def _batcher(
+    client: EngineClient | None,
+    lease: Lease,
+    connector: Connector,
+    pack: RulePack,
+    *,
+    log: Any,
+) -> _Batcher | None:
+    """A batcher, but only for a connector that can actually resume (#143).
+
+    Gated on the declared capability rather than attempted universally. Flushing a
+    connector that cannot resume would be worse than useless: the API would hold a
+    checkpoint the next attempt ignores, so it would re-read from the top and
+    re-report everything the batch already delivered.
+    """
+    if client is None:
+        return None
+    capabilities = getattr(connector, "metadata", None)
+    if capabilities is None or ConnectorCapability.CHECKPOINTS not in capabilities.capabilities:
+        return None
+    return _Batcher(
+        client=client,
+        lease=lease,
+        rulepack_version=pack.version,
+        log=log,
+        sequence=lease.checkpoint_sequence,
+        sent_coverage=FetchOutcome(reference_key=None).as_coverage(),
+        deadline=monotonic() + CHECKPOINT_BATCH_SECONDS,
+    )
+
+
+def _flush(
+    batcher: _Batcher,
+    checkpoint: Checkpoint,
+    candidates: list[Candidate],
+    rules: list[SuppressionRule],
+    validator: ValidationExecutor,
+) -> None:
+    """Prepare and send the pending boundary, then arm the next interval."""
+    covered = batcher.pending[0] if batcher.pending else batcher.sent_candidates
+    findings, suppressed = _prepare(
+        candidates[batcher.sent_candidates : covered], rules, validator, validate=True
+    )
+    batcher.flush(checkpoint, findings, suppressed)
+    # Armed whether or not the send worked: a source that is failing should not be
+    # retried once per unit.
+    batcher.deadline = monotonic() + CHECKPOINT_BATCH_SECONDS
 
 
 def _incomplete_content_error(failed: int, truncated: int) -> str | None:
@@ -184,6 +459,7 @@ def run_task(
                     lease,
                     report,
                     pack=pack,
+                    client=client,
                     tasks=tasks,
                     task_id=task_id,
                     validation_executor=validation_executor,
@@ -338,6 +614,7 @@ def _fetch(
     report: TaskReport,
     *,
     pack: RulePack,
+    client: EngineClient | None = None,
     tasks: TaskRegistry | None = None,
     task_id: uuid.UUID | None = None,
     validation_executor: ValidationExecutor | None = None,
@@ -351,11 +628,19 @@ def _fetch(
     """
     pepper = _pepper(lease)
     previous_pepper = _previous_pepper(lease)
-    outcome = FetchOutcome(reference_key=pepper)
+    outcome = FetchOutcome(
+        reference_key=pepper,
+        # Handed back only when the API judged it still valid under this scan's
+        # configuration; otherwise this is None and the spec restarts (#143).
+        resume_from=Checkpoint.from_payload(lease.checkpoint),
+    )
     spec = TaskSpec.from_payload(lease.spec)
 
     candidates: list[Candidate] = []
     tallies = {"units_truncated": 0, "dropped_below_threshold": 0}
+    suppression_rules = rules_from_lease(lease.suppressions)
+    validator = validation_executor or _validator(lease, pack, validation_limiter)
+    batcher = _batcher(client, lease, connector, pack, log=logger)
 
     cancelled = False
     try:
@@ -364,6 +649,20 @@ def _fetch(
             # is cheaper than the bookkeeping to abandon it half-scanned.
             if tasks is not None and task_id is not None and tasks.is_cancelled(task_id):
                 raise TaskCancelled(str(task_id))
+
+            # Before this unit is touched. The generator has just published the
+            # checkpoint covering the *previous* unit, which is exactly the
+            # boundary recorded at the end of the previous iteration — so here,
+            # and only here, position and work describe the same prefix. Findings
+            # sent are durable, and a reclaimed attempt resumes past them (#143).
+            published = outcome.checkpoint
+            if (
+                batcher is not None
+                and published is not None
+                and batcher.due(published, len(candidates), monotonic())
+            ):
+                _flush(batcher, published, candidates, suppression_rules, validator)
+
             result = detect(unit.text, pack, threshold=lease.confidence_threshold)
             tallies["dropped_below_threshold"] += result.dropped_below_threshold
             tallies["units_truncated"] += int(result.truncated)
@@ -376,6 +675,12 @@ def _fetch(
             candidates.extend(
                 _candidates(unit, result, pepper=pepper, previous_pepper=previous_pepper, pack=pack)
             )
+            if batcher is not None:
+                batcher.boundary(
+                    len(candidates),
+                    outcome.as_coverage(),
+                    {**outcome.as_counts(), **tallies},
+                )
     except TaskCancelled:
         cancelled = True
         raise
@@ -385,43 +690,31 @@ def _fetch(
         # units before it. `complete_task(FAILED)` is terminal, so anything left
         # here surfaces only if an operator re-runs the whole scan (#115).
         #
-        # Pre-filter locally to save bandwidth. The API applies the same
-        # suppressions again at ingest, authoritatively, so this can only ever be
-        # the more permissive of the two (#44).
-        filtered = prefilter(candidates, rules_from_lease(lease.suppressions))
-
-        eligible_bindings = {
-            rule.id: rule.validator_id for rule in pack.rules if rule.validator_id is not None
-        }
-        validator = validation_executor or ValidationExecutor.from_payloads(
-            [
-                policy
-                for policy in lease.validation_policies
-                if eligible_bindings.get(str(policy.get("rule_id")))
-                == str(policy.get("validator_id"))
-            ],
-            limiter=validation_limiter,
+        # Only what the batches did not already carry. Everything before
+        # `sent_candidates` is durable in the API and must not be sent twice: the
+        # findings would dedupe, but the tallies and coverage would not (#143).
+        remaining = candidates[batcher.sent_candidates :] if batcher else candidates
+        findings, suppressed = _prepare(
+            remaining, suppression_rules, validator, validate=not cancelled
         )
-        # Cancellation is an explicit revocation of further sensitive work. Keep
-        # finalization for coverage accounting, but initiate no provider calls
-        # after the heartbeat has observed it.
-        if not cancelled:
-            for candidate in filtered.kept:
-                validation = validator.validate(
-                    rule_id=candidate.rule_id,
-                    secret_hash=str(candidate.payload["secret_hash"]),
-                    secret=candidate.secret,
-                )
-                if validation is not None:
-                    candidate.payload["validation"] = validation.as_payload()
 
-        report.findings = [candidate.payload for candidate in filtered.kept]
-        report.counts = {
-            **outcome.as_counts(),
-            **tallies,
-            "prefiltered": filtered.suppressed_count,
-        }
-        report.coverage = outcome.coverage
+        report.findings = findings
+        counts = {**outcome.as_counts(), **tallies}
+        if batcher is not None:
+            report.checkpoint_sequence = batcher.sequence
+            report.counts = {
+                key: value - batcher.sent_counts.get(key, 0) for key, value in counts.items()
+            }
+            report.counts["prefiltered"] = suppressed
+            report.coverage_payload = _coverage_delta(outcome.as_coverage(), batcher.sent_coverage)
+        else:
+            report.counts = {**counts, "prefiltered": suppressed}
+            report.coverage = outcome.coverage
+        if outcome.cursor is not None:
+            report.cursor = outcome.cursor.as_payload()
+
+        # Task-wide totals, never the remainder: whether the *task* read everything
+        # it was asked to is not a property of its last batch.
         if error := _incomplete_content_error(outcome.failed, tallies["units_truncated"]):
             # Findings from readable units are still valuable and the API ingests
             # them even for a failed task.  The status is nevertheless failed:

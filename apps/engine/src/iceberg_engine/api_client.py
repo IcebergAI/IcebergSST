@@ -168,6 +168,33 @@ class Lease:
         return [dict(policy) for policy in policies if isinstance(policy, dict)]
 
     @property
+    def checkpoint(self) -> dict[str, Any]:
+        """Where a previous attempt of this task got to, if any (#143).
+
+        Empty when there is none *or* when the API judged the stored one no longer
+        valid under this scan's configuration. The engine does not have to tell
+        those apart: both mean start from the top.
+        """
+        checkpoint = self.payload.get("checkpoint")
+        return dict(checkpoint) if isinstance(checkpoint, dict) else {}
+
+    @property
+    def checkpoint_sequence(self) -> int:
+        """How many batches this task has already had accepted (#143)."""
+        return int(self.payload.get("checkpoint_sequence", 0))
+
+    @property
+    def cursors(self) -> dict[str, Any]:
+        """Per-scope watermarks for an incremental scan; empty for a full one."""
+        cursors = self.payload.get("cursors")
+        return dict(cursors) if isinstance(cursors, dict) else {}
+
+    @property
+    def incremental(self) -> bool:
+        """Whether this scan undertook to read only what changed (#143)."""
+        return str(self.payload.get("mode", "full")) == "incremental"
+
+    @property
     def idempotency_key(self) -> str:
         """``<task id>:<attempt>`` — what makes a results retry a replay."""
         return f"{self.task_id}:{self.attempt}"
@@ -237,6 +264,21 @@ class EngineClient:
             # than letting the API 422 keeps the bug where it was written.
             raise EngineApiError("results submission requires an idempotency key")
         return self._request("POST", f"/scan-tasks/{task_id}/results", json=submission)
+
+    def submit_progress(self, task_id: uuid.UUID, batch: dict[str, Any]) -> dict[str, Any]:
+        """Durably store one batch of a running task and its resume point (#143).
+
+        Idempotent on ``sequence`` rather than on a key, because a batch is not a
+        retry of anything — it is the next slice. The API accepts it only when it
+        is exactly one ahead of what it recorded, so a resend after a lost response
+        is answered as a replay rather than ingested twice.
+        """
+        if not batch.get("sequence"):
+            # Sequence zero would be indistinguishable from "no batches at all",
+            # and the terminal submission uses that to mean the body is the whole
+            # task. Refuse here rather than letting the API 422.
+            raise EngineApiError("progress submission requires a sequence")
+        return self._request("POST", f"/scan-tasks/{task_id}/progress", json=batch)
 
     # ─── Transport ────────────────────────────────────────────────────────────
 
