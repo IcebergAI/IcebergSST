@@ -1,0 +1,39 @@
+{#- Confluence-only scope fields (#144).
+
+    Included unconditionally and toggled with `x-show`, so switching type does not
+    discard what an analyst already typed in the other block. Its inputs still post
+    when hidden; the route's per-type builder simply does not read them, and the
+    API's `extra="forbid"` model is the authority either way.
+
+    Nothing here carries a static `required`: a hidden required input blocks submit
+    with no visible cause. -#}
+<div x-show="type === 'confluence'" x-cloak>
+  <span class="field-label">Spaces</span>
+  <div class="row-inline" style="margin-bottom:8px">
+    <input class="field field--sm" style="max-width:220px"
+           x-model="spaceDraft" @keydown.enter.prevent="addSpace()"
+           placeholder="ENG" aria-label="Space key to add">
+    <button type="button" class="btn btn--ghost btn--sm" @click="addSpace()">
+      <svg class="btn-ic" aria-hidden="true"><use href="#ic-plus"/></svg>
+      Add
+    </button>
+  </div>
+  <div class="row-inline">
+    <template x-for="key in spaces" :key="key">
+      <span class="tag">
+        <span x-text="key"></span>
+        <button type="button" class="btn-link" style="line-height:1"
+                @click="removeSpace(key)" :aria-label="'Remove ' + key">×</button>
+        <input type="hidden" name="spaces" :value="key">
+      </span>
+    </template>
+    <span class="empty" x-show="spaces.length === 0">Every space the credential can read.</span>
+  </div>
+
+  <label class="check">
+    <input type="checkbox" name="include_personal_spaces"
+           {{ 'checked' if connection.get('include_personal_spaces', False) }}>
+    Include personal spaces
+    <span class="muted">— every user's drafts; a deliberate decision</span>
+  </label>
+</div>

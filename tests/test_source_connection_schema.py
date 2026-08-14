@@ -1,7 +1,7 @@
-"""Every connection key the Confluence connector reads is storable via the API.
+"""Every connection key a connector reads is storable via the API.
 
 The API validates a source's ``connection`` blob with ``extra="forbid"``
-(`iceberg_api.sources.schemas.ConfluenceConnection`), while the connector reads
+(`iceberg_api.sources.schemas`), while each connector reads
 keys out of that same blob inside an engine, delivered verbatim in the task
 lease. The two never import each other, so nothing structural stops them
 drifting — and a key the connector understands but the schema forbids is
@@ -19,9 +19,16 @@ import inspect
 from types import ModuleType
 
 import iceberg_connectors.confluence.connector as confluence_connector
+import iceberg_connectors.jira.connector as jira_connector
+import pytest
 from iceberg_api.sources import probe
-from iceberg_api.sources.schemas import ConfluenceConnection
+from iceberg_api.sources.schemas import (
+    CONNECTION_MODELS,
+    ConfluenceConnection,
+    JiraConnection,
+)
 from iceberg_connectors.confluence.client import ConfluenceClient
+from pydantic import BaseModel
 
 #: Keys the connector tolerates as fallbacks in hand-authored blobs, mapped to
 #: the canonical field the API stores instead. The schema deliberately offers
@@ -54,17 +61,36 @@ def _keys_read_from_connection(module: ModuleType) -> set[str]:
     return keys
 
 
-def test_every_key_the_connector_reads_is_a_schema_field() -> None:
-    read = _keys_read_from_connection(confluence_connector)
+#: Every shipped connector, paired with the model the API validates its blob with.
+#: Parametrised rather than written once: an un-parametrised guard silently covers
+#: only the first connector, which is exactly the drift this module exists to catch.
+CONNECTOR_SCHEMAS = [
+    pytest.param(confluence_connector, ConfluenceConnection, id="confluence"),
+    pytest.param(jira_connector, JiraConnection, id="jira"),
+]
+
+
+def test_every_shipped_connector_is_covered_by_this_guard() -> None:
+    """A new connector type must arrive here too, or it is unguarded."""
+    covered = {param.values[1] for param in CONNECTOR_SCHEMAS}
+
+    assert set(CONNECTION_MODELS.values()) == covered
+
+
+@pytest.mark.parametrize(("module", "model"), CONNECTOR_SCHEMAS)
+def test_every_key_the_connector_reads_is_a_schema_field(
+    module: ModuleType, model: type[BaseModel]
+) -> None:
+    read = _keys_read_from_connection(module)
     # The scan found the real reads: if a refactor renames the parameter, this
     # fails loudly rather than the invariant silently checking nothing.
     assert {"base_url", "email"} <= read
 
-    fields = set(ConfluenceConnection.model_fields)
+    fields = set(model.model_fields)
     unknown = {key for key in read if key not in fields and key not in TOLERATED_ALIASES}
     assert not unknown, (
-        f"the Confluence connector reads connection key(s) {sorted(unknown)} that "
-        f"ConfluenceConnection forbids — no admin can store them (extra='forbid'), "
+        f"{module.__name__} reads connection key(s) {sorted(unknown)} that "
+        f"{model.__name__} forbids — no admin can store them (extra='forbid'), "
         f"so no engine will ever receive them; add the field(s) to the schema"
     )
     # Every alias must resolve to a field that actually exists.
@@ -72,10 +98,12 @@ def test_every_key_the_connector_reads_is_a_schema_field() -> None:
 
 
 def test_the_probe_reads_only_storable_keys() -> None:
-    """The probe validates the blob through the same model the API stores."""
+    """The probe validates the blob through the same models the API stores."""
     read = _keys_read_from_connection(probe)
-    assert read <= set(ConfluenceConnection.model_fields)
-    assert "ConfluenceConnection.model_validate(source.connection)" in inspect.getsource(probe)
+    storable = {key for model in CONNECTION_MODELS.values() for key in model.model_fields}
+
+    assert read <= storable
+    assert "model.model_validate(source.connection)" in inspect.getsource(probe)
 
 
 def test_a_legacy_cloud_wiki_url_builds_the_v2_path_once() -> None:

@@ -72,7 +72,7 @@ bootstrap script (which the CSP would forbid anyway).
 
 ## What it does
 
-- **Discover & scan** content in Confluence (MVP), with Jira and SMB/NFS file shares to follow.
+- **Discover & scan** content in Confluence and Jira, with SMB/NFS file shares to follow.
 - **Detect** secrets with a custom regex + entropy + keyword-proximity engine driven by
   versioned rule packs.
 - **Never store plaintext** — findings keep only a redacted snippet and a salted fingerprint
@@ -139,7 +139,7 @@ apps/api        FastAPI control plane
 apps/engine     Dramatiq scanner worker
 packages/core   shared models, config, secret-store, fingerprinting, redaction
 packages/detect rule packs + detection engine
-packages/connectors  connector interface + Confluence (Jira/SMB later)
+packages/connectors  connector interface + Confluence and Jira (SMB later)
 apps/api/…/web  the console: Jinja templates, Alpine components, design system
 web/            frontend asset vendoring (no Node toolchain)
 deploy/compose  docker-compose development stack

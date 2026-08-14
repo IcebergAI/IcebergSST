@@ -181,8 +181,64 @@ storage→text → detect → fingerprint → redact → pre-filter → submissi
 acceptance in `apps/api/tests/test_controlled_pilot.py` crosses the real signed OIDC, CSRF/RBAC,
 engine lease/results, database ingest, triage/audit, outbox, and signed webhook boundaries as well.
 
+## Jira
+
+Cloud, through REST v3 (`packages/connectors/src/iceberg_connectors/jira/`). **Data Center is not
+certified.** The seams exist — bearer PATs, a configurable `api_prefix`, and a wiki-markup text path
+— but the fixture site models Cloud only, and issue search deliberately *refuses* Data Center's
+offset-shaped response rather than paging it blindly.
+
+**Auth** is the same flavor rule as Confluence, which is why one `Credential` serves both: an
+`email` in the connection blob selects Basic `email:token` (Cloud API token); its absence sends the
+credential as a bearer (Server/DC PAT).
+
+**Scope** is a list of project keys, or empty for every project the credential can read. Archived
+projects are excluded unless asked for. Content classes are chosen explicitly: comments and
+attachments default on, **issue history defaults off**.
+
+**Discovery windows a project by `created`.** One fetch task covers one project and one half-open
+`created` range, with the bounds taken from that project's own oldest and newest issue rather than
+from the clock — discovery must be reproducible, because the conformance kit runs it twice and
+compares payloads. `created` is immutable, so an issue never migrates between windows and a boundary
+cannot cause a skip or a double-scan on a rescan.
+
+That windowing **is** the resume story: a reclaimed task re-runs one bounded window rather than a
+whole project (ADR 0009 restarts a spec from the top), and windows that already finished are not
+re-fetched. Within a window the connector pages by `nextPageToken`. This is *not* checkpointed
+resume — a window reclaimed at 90% re-reads from its first issue — so the connector does **not**
+declare `ConnectorCapability.CHECKPOINTS`. That contract is tracked separately in #143.
+
+**Text.** Cloud v3 returns ADF (a JSON tree) and Data Center returns wiki markup (a string). Both
+flatten to prose through one accessor that dispatches on the *shape of the payload*, never on
+configuration, so an operator cannot mis-declare it. Rendered HTML is deliberately not requested,
+for the same reason Confluence uses `storage` over `view`. A field the response never carried is
+**unread**, not empty — conflating the two would let a missing field auto-resolve an older finding.
+
+**A 403 is one object, not the site.** Jira permission schemes are per-project and per-issue, so
+being refused one issue's comments is routine: it is counted, and the scan continues. Only a 401 and
+an exhausted rate-limit budget stop the task. (Confluence is the opposite — its permissions are
+space-shaped, so a 403 there means the credential.)
+
+**Known coverage limits.**
+- Issues the credential cannot browse are simply omitted by Jira, and the search endpoint no longer
+  returns a total, so the connector *cannot* say "5000 existed, I read 4997". The unknown remainder
+  becomes a scope gap, never an invented clean count.
+- The upper window bound is pinned at the minute discovery observed, so content created during a
+  scan belongs to the next one. Archived projects are requested explicitly rather than filtered out
+  of the response, because Jira's project search returns live projects only by default.
+- Issue history is capped per issue; the remainder is reported as a scope gap.
+- Custom fields are not scanned. Only `summary`, `description`, `environment`, comments,
+  attachments, and (opt-in) field history are.
+- There is no free-text JQL option, by design: operator-authored query text spliced into the scan's
+  own query would break both window reproducibility and scope reconciliation.
+- A rate-limited scan produces a partial manifest, which resolves nothing and sends no completion
+  notification. That is correct fail-closed behaviour, but it means a chronically throttled Jira
+  source never auto-resolves findings.
+
+**Required permissions.** A read-only account that can *Browse Projects* on every project in scope.
+`GET /rest/api/3/myself` must answer for the connectivity check.
+
 ## Post-MVP connectors
-- **Jira** — issues, comments, attachments (same interface, similar auth).
 - **SMB/NFS file shares** — walk shares, stream files, apply the same text-extraction step.
 
 ## Text extraction

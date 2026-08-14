@@ -60,6 +60,22 @@ Confluence-scan-to-triaged-finding flow). M3–M4 complete the product.
 - **Epic: Hardening** — security review, rate limiting, audit logging, data-retention policy,
   key + pepper rotation runbook, docs polish.
 
+## M5 — Source coverage and scan assurance
+- **Epic: Connector SDK & conformance kit (#149)** *(shipped)* — the published `Connector` protocol,
+  `ConnectorMetadata`/capabilities, and `assert_connector_conformance`.
+- **Epic: Scan coverage & gap manifest (#148)** *(shipped)* — every enumerated object gets exactly
+  one disposition; unknown remainder is a scope gap, never an invented clean count.
+- **Epic: Jira connector (#144)** — Cloud (REST v3): projects, issues, comments, attachments, and
+  opt-in field history. First consumer of the #149 SDK. Discovery windows each project by the
+  immutable `created` field, which bounds what an interrupted task re-reads; **not** checkpointed
+  resume, which stays with #143. Data Center seams exist but are uncertified. Shares its transport
+  with Confluence via `iceberg_connectors.http`, which is also where the 401-vs-403 split lives —
+  Jira permissions are per-issue, so a 403 is one object rather than the site.
+  See [`connectors.md`](./connectors.md) § Jira.
+- **Epic: Incremental & resumable scanning (#143)** — connector cursors, durable checkpoints, and
+  the `CHECKPOINTS` capability, which no connector may declare until it lands.
+- **Epic: SMB/NFS file-share connector (#145)**.
+
 ## M6 — Remediation and exposure closure
 - **Epic: Exposure clusters (#140)** *(shipped)* — correlate findings that contain the same secret
   value into one exposure cluster without exposing the value: API-minted correlation ids under a
@@ -73,5 +89,5 @@ Confluence-scan-to-triaged-finding flow). M3–M4 complete the product.
   its remediation history intact.
 
 ## MVP non-goals
-Jira/SMB connectors, incremental/delta scanning, image OCR, external ticket creation,
+SMB connectors, incremental/delta scanning, image OCR, external ticket creation,
 multi-tenancy.

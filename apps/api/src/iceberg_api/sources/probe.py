@@ -34,9 +34,26 @@ from iceberg_core.enums import SourceType
 from iceberg_core.models import Source
 from pydantic import SecretStr
 
-from iceberg_api.sources.schemas import ConfluenceConnection, ConnectivityResult
+from iceberg_api.sources.schemas import (
+    ConfluenceConnection,
+    ConnectivityResult,
+    JiraConnection,
+)
 
 CONFLUENCE_DEFAULT_API_PREFIX = "/wiki/api/v2"
+JIRA_DEFAULT_API_PREFIX = "/rest/api/3"
+
+#: Per type: the connection model, the default API mount, and the collection to
+#: probe. Each is the same one a real discovery starts with, so a custom mount
+#: stays aligned with the connector without importing engine-side connector code
+#: (the API must not — ADR 0002).
+_PROBES: dict[SourceType, tuple[type[ConfluenceConnection] | type[JiraConnection], str, str]] = {
+    SourceType.CONFLUENCE: (ConfluenceConnection, CONFLUENCE_DEFAULT_API_PREFIX, "/spaces"),
+    # `/myself` rather than `/project/search`: it answers for any credential
+    # that authenticates at all, so a token with no project visibility still
+    # reports 'reachable' instead of looking like a bad credential.
+    SourceType.JIRA: (JiraConnection, JIRA_DEFAULT_API_PREFIX, "/myself"),
+}
 
 TIMEOUT_SECONDS = 10.0
 
@@ -75,16 +92,18 @@ async def probe_source(
     transport: httpx2.AsyncBaseTransport | None = None,
 ) -> ConnectivityResult:
     """Make one authenticated request and describe what happened."""
-    if source.type is not SourceType.CONFLUENCE:
+    probe = _PROBES.get(source.type)
+    if probe is None:
         raise ProbeError(f"no connectivity check is defined for {source.type.value} sources yet")
+    model, default_prefix, collection = probe
 
     try:
-        connection = ConfluenceConnection.model_validate(source.connection)
+        connection = model.model_validate(source.connection)
     except ValueError as exc:
         raise ProbeError("source connection has an invalid base_url or API configuration") from exc
 
-    api_prefix = connection.api_prefix or CONFLUENCE_DEFAULT_API_PREFIX
-    url = f"{connection.base_url}{api_prefix}/spaces"
+    api_prefix = connection.api_prefix or default_prefix
+    url = f"{connection.base_url}{api_prefix}{collection}"
     email = connection.email
     headers = {
         "Authorization": authorization_header(credential, email=email),
@@ -97,9 +116,9 @@ async def probe_source(
             follow_redirects=False,
             transport=transport,
         ) as client:
-            # Probe the same v2 collection a real discovery starts with. This
-            # keeps custom Server/DC mounts and Cloud's `/wiki` prefix aligned
-            # with the connector without importing engine-side connector code.
+            # `limit=1` is meaningless to endpoints that do not paginate and
+            # harmless to them; keeping one request shape keeps this a
+            # connectivity check rather than a second connector.
             response = await client.get(url, headers=headers, params={"limit": 1})
     except httpx2.HTTPError as exc:
         # Type name only: an exception string can contain the URL with credentials

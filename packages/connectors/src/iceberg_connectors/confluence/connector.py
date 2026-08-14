@@ -31,7 +31,7 @@ failures abort immediately because no later unit can recover from them.
 from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx2
 import structlog
@@ -78,6 +78,15 @@ class ConfluenceConnector:
     ``transport`` and ``sleep`` exist so tests drive the real client against the
     fixture server in ``packages/connectors/tests/confluence_server.py`` (#71).
     """
+
+    #: How this connector names its scopes: the connection-blob key an operator
+    #: fills in, and the ``TaskSpec.params`` key a discovered scope comes back
+    #: under. The engine reads both to reconcile "requested" against "discovered"
+    #: without knowing what a space is (``runner._scope_keys``).
+    scope_key: ClassVar[str] = "spaces"
+    scope_param: ClassVar[str] = "space_key"
+    #: What a ``ContentOrigin.BODY`` unit is, for coverage accounting.
+    body_kind: ClassVar[CoverageObjectKind] = CoverageObjectKind.PAGE
 
     connector_type: str = CONFLUENCE_CONNECTOR_TYPE
     metadata: ConnectorMetadata = field(

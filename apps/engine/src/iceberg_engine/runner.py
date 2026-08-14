@@ -168,6 +168,11 @@ def run_task(
     report = TaskReport()
     held = tasks.holding(task_id) if tasks else nullcontext()
 
+    # Bound inside the `try`, but read by the handlers below to learn how this
+    # connector names its scopes. An unknown source type never gets that far, so the
+    # handlers must tolerate it still being None.
+    connector: Connector | None = None
+
     try:
         with held:
             connector = registry.get(lease.source_type)
@@ -202,7 +207,7 @@ def run_task(
         report.status = "failed"
         reason = _coverage_reason(exc)
         report.error = f"{type(exc).__name__}: {reason.value}"
-        _record_task_gap(report, lease, reason)
+        _record_task_gap(report, lease, reason, connector)
         log.warning("scan_task_connector_failed", error=report.error)
         ENGINE_CONNECTOR_FAILURES.labels(source_type=lease.source_type).inc()
     except Interrupt as exc:
@@ -213,7 +218,7 @@ def run_task(
         # through, then let the interrupt go on killing the thread it was raised in.
         report.status = "failed"
         report.error = type(exc).__name__
-        _record_task_gap(report, lease, CoverageReason.TIMEOUT)
+        _record_task_gap(report, lease, CoverageReason.TIMEOUT, connector)
         log.warning("scan_task_interrupted", error=report.error)
         _submit(client, lease, report, pack, log)
         ENGINE_TASKS_RUN.labels(kind=lease.kind, outcome="interrupted").inc()
@@ -224,7 +229,7 @@ def run_task(
         # a secret — so only the exception *type* is reported or logged (ADR 0004).
         report.status = "failed"
         report.error = type(exc).__name__
-        _record_task_gap(report, lease, CoverageReason.CONNECTOR_ERROR)
+        _record_task_gap(report, lease, CoverageReason.CONNECTOR_ERROR, connector)
         log.error("scan_task_failed", error_type=type(exc).__name__)
 
     if not _submit(client, lease, report, pack, log):
@@ -288,9 +293,10 @@ def _discover(connector: Connector, lease: Lease, report: TaskReport) -> None:
     this one, so a crash cannot record the discovery as done yet lose what it
     found (ADR 0009).
     """
+    scope_key, scope_param = _scope_keys(connector)
     configured_scopes = {
         str(value).strip().casefold()
-        for value in lease.connection.get("spaces") or ()
+        for value in lease.connection.get(scope_key) or ()
         if str(value).strip()
     }
     coverage = TaskCoverage(
@@ -302,6 +308,7 @@ def _discover(connector: Connector, lease: Lease, report: TaskReport) -> None:
         scope_requested=len(configured_scopes) or None,
     )
     report.coverage = coverage
+    seen_scopes: set[str] = set()
     try:
         for spec in connector.discover(lease.connection, lease.credential):
             # Append as discovery progresses so a late failure (for example one
@@ -309,6 +316,17 @@ def _discover(connector: Connector, lease: Lease, report: TaskReport) -> None:
             # matched spaces.  The failed discovery keeps the overall scan partial,
             # so fetching these specs can surface findings but cannot reconcile.
             report.task_specs.append(spec.as_payload())
+
+            # One *scope*, however many specs cover it. A connector that splits a
+            # scope into several fetch specs — Jira windows a project by `created`
+            # — would otherwise report more scopes discovered than were requested,
+            # and the API nulls the whole manifest's `scope.requested` when the
+            # equation does not balance (scans/coverage.py). The operator silently
+            # loses "you asked for three projects and we enumerated three".
+            scope = str(spec.params.get(scope_param) or "")
+            if scope and scope in seen_scopes:
+                continue
+            seen_scopes.add(scope)
             coverage.scope_found(spec.params)
     finally:
         report.counts["specs_discovered"] = len(report.task_specs)
@@ -352,7 +370,7 @@ def _fetch(
             if result.truncated and not unit.display.get("truncated", False):
                 outcome.scanned_but_incomplete(
                     CoverageReason.OUTPUT_LIMIT,
-                    _coverage_kind(unit),
+                    _coverage_kind(unit, connector),
                     unit.locator.canonical_parts(),
                 )
             candidates.extend(
@@ -427,6 +445,7 @@ def _record_task_gap(
     report: TaskReport,
     lease: Lease,
     reason: CoverageReason,
+    connector: Connector | None = None,
 ) -> None:
     """Preserve a task-wide blind spot without inventing an object count."""
     try:
@@ -439,10 +458,11 @@ def _record_task_gap(
     )
     report.coverage = coverage
 
+    scope_key, scope_param = _scope_keys(connector)
     if phase is ScanTaskKind.DISCOVERY and coverage.scope_requested is not None:
-        wanted = {str(value).casefold(): value for value in lease.connection.get("spaces") or ()}
+        wanted = {str(value).casefold(): value for value in lease.connection.get(scope_key) or ()}
         found = {
-            str(spec.get("params", {}).get("space_key") or "").casefold()
+            str(spec.get("params", {}).get(scope_param) or "").casefold()
             for spec in report.task_specs
         }
         missing = [value for key, value in wanted.items() if key not in found]
@@ -472,12 +492,32 @@ def _coverage_key(lease: Lease) -> bytes | None:
         return None
 
 
-def _coverage_kind(unit: ContentUnit) -> CoverageObjectKind:
+def _scope_keys(connector: Connector | None) -> tuple[str, str]:
+    """How this connector names its scopes, in the blob and in a spec's params.
+
+    Read with ``getattr`` rather than added to the ``Connector`` protocol: it is a
+    ``@runtime_checkable`` Protocol, so a new required attribute would break
+    ``isinstance`` for every third-party connector and force an SDK major bump
+    (``CONNECTOR_SDK_VERSION`` is "1.0", and ``docs/connector-sdk.md`` promises that
+    a minor release adds only optional things). The defaults are Confluence's, which
+    is what every connector predating this meant.
+    """
+    return (
+        getattr(connector, "scope_key", "spaces"),
+        getattr(connector, "scope_param", "space_key"),
+    )
+
+
+def _coverage_kind(unit: ContentUnit, connector: Connector | None = None) -> CoverageObjectKind:
     if unit.origin.value == "comment":
         return CoverageObjectKind.COMMENT
     if unit.origin.value == "attachment":
         return CoverageObjectKind.ATTACHMENT
-    return CoverageObjectKind.PAGE
+    # A body's object kind is the connector's word, because the kind is domain-
+    # separated into the gap's HMAC. A Jira issue counted as `record` by the
+    # connector but marked incomplete as `page` here would still reconcile
+    # numerically while growing a phantom `page` gap on a source that has none.
+    return getattr(connector, "body_kind", CoverageObjectKind.PAGE)
 
 
 def _candidates(

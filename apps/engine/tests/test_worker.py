@@ -92,6 +92,7 @@ def test_bootstrap_serves_metrics_and_connects_a_broker() -> None:
         # Without this the registry is empty and every task fails with "no
         # connector for source type" — a whole fleet scanning nothing.
         assert "confluence" in registry.registered_types()
+        assert "jira" in registry.registered_types()
     finally:
         server.shutdown()
         server.server_close()
@@ -137,8 +138,9 @@ def test_the_shipped_connectors_are_registered() -> None:
 
     types = register_connectors()
 
-    assert "confluence" in types
-    assert registry.get("confluence").connector_type == "confluence"
+    for source_type in ("confluence", "jira"):
+        assert source_type in types
+        assert registry.get(source_type).connector_type == source_type
 
 
 def test_registering_twice_is_not_an_error() -> None:
