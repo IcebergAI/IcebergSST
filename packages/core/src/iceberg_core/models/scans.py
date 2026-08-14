@@ -9,7 +9,9 @@ from sqlmodel import Field
 
 from iceberg_core.enums import (
     ACTIVE_SCAN_STATUSES,
+    CursorInvalidationReason,
     EngineStatus,
+    ScanMode,
     ScanStatus,
     ScanTaskKind,
     ScanTaskStatus,
@@ -89,6 +91,35 @@ class Scan(TimestampedModel, table=True):
         sa_type=enum_type(ScanStatus, name="scan_status"),
     )
 
+    #: Whether this scan read the whole source or only what changed (#143). It
+    #: gates reconciliation: only a full scan's silence is evidence a finding is
+    #: gone. Defaults to full, so every scan predating this column reads as one.
+    mode: ScanMode = Field(
+        default=ScanMode.FULL,
+        sa_type=enum_type(ScanMode, name="scan_mode"),
+        sa_column_kwargs={"server_default": ScanMode.FULL.value},
+    )
+
+    #: Set when an incremental scan was launched as a full one anyway, with the
+    #: trigger. An operator seeing an unexpectedly long scan should be able to read
+    #: why from the scan itself rather than inferring it from cursor state that has
+    #: since moved on.
+    promoted_from: ScanMode | None = Field(
+        default=None,
+        sa_type=enum_type(ScanMode, name="scan_promoted_from"),
+    )
+    promotion_reason: CursorInvalidationReason | None = Field(
+        default=None,
+        sa_type=enum_type(CursorInvalidationReason, name="cursor_invalidation_reason"),
+    )
+
+    #: For an incremental scan, when the cursors it consumed were minted — the
+    #: point in time before which this scan looked at nothing.
+    incremental_baseline_at: datetime | None = Field(
+        default=None,
+        sa_type=utc_timestamp_type(),
+    )
+
     #: The rule-pack version that produced this scan's findings, reported by the
     #: engines that ran it — results are only reproducible if it is recorded.
     rulepack_version: str | None = Field(default=None, max_length=64)
@@ -155,10 +186,39 @@ class ScanTask(TimestampedModel, table=True):
     #: replay is a no-op instead of a second set of findings (ADR 0009 §2).
     result_key: str | None = Field(default=None, max_length=128)
 
-    #: The accepted versioned coverage report for this task. It is written in the
-    #: same idempotent transaction as ``result_key`` and never includes task specs,
-    #: errors, source locators, filenames, paths, or content.
+    #: The accepted versioned coverage report for this task. Accumulated across
+    #: every progress batch and the terminal submission, so it is a merge rather
+    #: than a replace once batching is in play. Never includes task specs, errors,
+    #: source locators, filenames, paths, or content.
     coverage: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_type=json_type(),
+        sa_column_kwargs={"server_default": text("'{}'")},
+    )
+
+    #: The connector-authored position a reclaimed attempt restarts from (#143):
+    #: ``{"version": …, "position": {…}}``. Advanced only in the same transaction
+    #: that ingests the findings up to it — a checkpoint ahead of its findings
+    #: would lose them silently, which is the whole hazard this design exists to
+    #: avoid. May hold a provider cursor, so it is never logged or exported.
+    checkpoint: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_type=json_type(),
+        sa_column_kwargs={"server_default": text("'{}'")},
+    )
+
+    #: Monotonic batch counter, per task rather than per attempt: a reclaimed
+    #: attempt continues the sequence instead of restarting it, so the conditional
+    #: UPDATE that advances it rejects a duplicate, an out-of-order, and a stale
+    #: engine's batch with one predicate.
+    checkpoint_sequence: int = Field(default=0, sa_column_kwargs={"server_default": "0"})
+
+    #: What the checkpoint above is only valid under: the source configuration
+    #: version and rule-pack version in force when it was written. If either has
+    #: moved by the time the task is re-leased, the position is discarded and the
+    #: spec restarts — resuming into content the new configuration does not cover
+    #: would report a scan of the wrong thing.
+    checkpoint_context: dict[str, Any] = Field(
         default_factory=dict,
         sa_type=json_type(),
         sa_column_kwargs={"server_default": text("'{}'")},

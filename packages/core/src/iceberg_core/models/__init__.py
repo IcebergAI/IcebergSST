@@ -67,7 +67,7 @@ from iceberg_core.models.identity import User
 from iceberg_core.models.notifications import NotificationChannel, NotificationDelivery
 from iceberg_core.models.remediation import RemediationAction
 from iceberg_core.models.scans import Engine, Scan, ScanTask
-from iceberg_core.models.sources import Schedule, Source
+from iceberg_core.models.sources import Schedule, Source, SourceCursor
 from iceberg_core.models.validation import ValidationPolicy
 
 __all__ = [
@@ -122,6 +122,7 @@ __all__ = [
     "ScanTask",
     "Schedule",
     "Source",
+    "SourceCursor",
     "Suppression",
     "TimestampedModel",
     "User",
