@@ -15,6 +15,7 @@ from iceberg_connectors import (
     CredentialError,
     FakeConnector,
     FakePage,
+    JiraConnector,
     RateLimitError,
     assert_connector_conformance,
     assert_failure_contract,
@@ -95,10 +96,11 @@ def test_registry_rejects_missing_mismatched_and_incompatible_metadata() -> None
 def test_registry_exposes_a_sorted_content_free_capability_manifest() -> None:
     registry.register(FakeConnector())
     registry.register(ConfluenceConnector())
+    registry.register(JiraConnector())
 
     payload = registry.capability_manifest()
 
-    assert [entry["connector_type"] for entry in payload] == ["confluence", "fake"]
+    assert [entry["connector_type"] for entry in payload] == ["confluence", "fake", "jira"]
     capabilities = payload[0]["capabilities"]
     assert isinstance(capabilities, list)
     assert ConnectorCapability.ATTACHMENTS.value in capabilities
@@ -125,11 +127,19 @@ def test_failure_contract_is_stable_and_machine_readable(
     assert error.retryable is retryable
 
 
-def test_both_shipped_connectors_declare_the_current_sdk_contract() -> None:
-    connectors = (FakeConnector(), ConfluenceConnector())
+def test_every_shipped_connector_declares_the_current_sdk_contract() -> None:
+    connectors = (FakeConnector(), ConfluenceConnector(), JiraConnector())
 
-    assert {connector.connector_type for connector in connectors} == {"fake", "confluence"}
+    assert {connector.connector_type for connector in connectors} == {
+        "fake",
+        "confluence",
+        "jira",
+    }
     assert all(connector.metadata.sdk_version == CONNECTOR_SDK_VERSION for connector in connectors)
-    assert ConnectorCapability.PAGINATION in connectors[1].metadata.capabilities
-    assert ConnectorCapability.COMMENTS in connectors[1].metadata.capabilities
-    assert ConnectorCapability.ATTACHMENTS in connectors[1].metadata.capabilities
+    for sourced in connectors[1:]:
+        assert ConnectorCapability.PAGINATION in sourced.metadata.capabilities
+        assert ConnectorCapability.COMMENTS in sourced.metadata.capabilities
+        assert ConnectorCapability.ATTACHMENTS in sourced.metadata.capabilities
+        # Reserved for #143; docs/connector-sdk.md forbids declaring it until
+        # the resumable-scan contract exists.
+        assert ConnectorCapability.CHECKPOINTS not in sourced.metadata.capabilities

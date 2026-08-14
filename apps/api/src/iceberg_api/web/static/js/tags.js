@@ -127,27 +127,39 @@ document.addEventListener('alpine:init', () => {
   /* ----------------------------------------------------------------------- *
    * sourceForm — the create/edit form for a source (#55).
    *
-   * Two jobs the server cannot do without a round trip:
-   *   - the space list is a set of chips, added and removed before submit;
-   *   - Confluence Cloud is selected by *supplying an email* (Basic
-   *     email:token) and Server/DC by omitting it, which is a rule nobody
-   *     should have to know — the radio makes it explicit and the hidden email
-   *     field carries the actual API contract.
+   * Three jobs the server cannot do without a round trip:
+   *   - the scope list is a set of chips, added and removed before submit;
+   *   - Cloud is selected by *supplying an email* (Basic email:token) and
+   *     Server/DC by omitting it, which is a rule nobody should have to know —
+   *     the select makes it explicit and the hidden email field carries the
+   *     actual API contract;
+   *   - `type` toggles which scope block is shown (#144). Both stay in the DOM,
+   *     so switching back does not discard what was already typed.
    *
-   * The spaces go to the server as repeated `spaces` inputs rather than JSON:
-   * the route assembles the connection blob, so there is exactly one place that
-   * knows the shape and the API's validation is the only validation that counts.
+   * The scope keys go to the server as repeated `spaces`/`projects` inputs
+   * rather than JSON: the route assembles the connection blob, so there is
+   * exactly one place that knows the shape and the API's validation is the only
+   * validation that counts. The block that is hidden still posts its inputs; the
+   * route reads only the ones belonging to the source's type.
+   *
+   * The Cloud-vs-DC email rule is identical for both products, which is the
+   * whole point of sharing one credential type across connectors.
    * ----------------------------------------------------------------------- */
   Alpine.data('sourceForm', () => ({
+    type: 'confluence',
     deployment: 'cloud',
     email: '',
     spaces: [],
     spaceDraft: '',
+    projects: [],
+    projectDraft: '',
     rotating: false,
     hasCredential: false,
     init() {
       const data = readIsland(this.$el);
+      this.type = typeof data.type === 'string' ? data.type : 'confluence';
       this.spaces = Array.isArray(data.spaces) ? data.spaces.slice() : [];
+      this.projects = Array.isArray(data.projects) ? data.projects.slice() : [];
       this.email = typeof data.email === 'string' ? data.email : '';
       this.deployment = this.email ? 'cloud' : (data.isNew ? 'cloud' : 'server');
       this.hasCredential = data.hasCredential === true;
@@ -167,6 +179,14 @@ document.addEventListener('alpine:init', () => {
     },
     removeSpace(key) {
       this.spaces = this.spaces.filter((item) => item !== key);
+    },
+    addProject() {
+      const key = this.projectDraft.trim().toUpperCase();
+      if (key && !this.projects.includes(key)) this.projects.push(key);
+      this.projectDraft = '';
+    },
+    removeProject(key) {
+      this.projects = this.projects.filter((item) => item !== key);
     },
     startRotation() {
       this.rotating = true;

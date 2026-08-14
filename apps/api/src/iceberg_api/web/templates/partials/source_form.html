@@ -31,12 +31,12 @@
         Name
         <input class="field" name="name" required maxlength="255"
                value="{{ source.name if source else '' }}"
-               placeholder="confluence-engineering">
+               placeholder="confluence-engineering or jira-eng">
       </label>
       {% if not source %}
       <label>
         Type
-        <select class="field" name="type">
+        <select class="field" name="type" x-model="type">
           {% for source_type in types %}
           <option value="{{ source_type.value }}">{{ source_type.value }}</option>
           {% endfor %}
@@ -50,13 +50,18 @@
       <input class="field" name="base_url" required inputmode="url"
              value="{{ connection.get('base_url', '') }}"
              placeholder="https://example.atlassian.net">
-      <span class="field-hint">The site root without <code>/wiki</code>. Validated on save.</span>
+      <span class="field-hint" x-show="type === 'confluence'" x-cloak>
+        The site root without <code>/wiki</code>. Validated on save.
+      </span>
+      <span class="field-hint" x-show="type === 'jira'" x-cloak>
+        The site root, e.g. <code>https://example.atlassian.net</code>. Validated on save.
+      </span>
     </label>
 
     <label>
       Deployment
       <select class="field" x-model="deployment">
-        <option value="cloud">Confluence Cloud — email + API token</option>
+        <option value="cloud">Cloud — email + API token</option>
         <option value="server">Server / Data Center — personal access token</option>
       </select>
       <span class="field-hint">
@@ -78,33 +83,12 @@
       API prefix <span class="muted">(optional)</span>
       <input class="field field-mono" name="api_prefix"
              value="{{ connection.get('api_prefix', '') }}"
-             placeholder="/wiki/api/v2">
-      <span class="field-hint">Leave blank for Cloud. Server/DC deployments mount the v2 API elsewhere.</span>
+             :placeholder="type === 'jira' ? '/rest/api/3' : '/wiki/api/v2'">
+      <span class="field-hint">Leave blank for Cloud. Server/DC deployments mount the API elsewhere.</span>
     </label>
 
-    <div>
-      <span class="field-label">Spaces</span>
-      <div class="row-inline" style="margin-bottom:8px">
-        <input class="field field--sm" style="max-width:220px"
-               x-model="spaceDraft" @keydown.enter.prevent="addSpace()"
-               placeholder="ENG" aria-label="Space key to add">
-        <button type="button" class="btn btn--ghost btn--sm" @click="addSpace()">
-          <svg class="btn-ic" aria-hidden="true"><use href="#ic-plus"/></svg>
-          Add
-        </button>
-      </div>
-      <div class="row-inline">
-        <template x-for="key in spaces" :key="key">
-          <span class="tag">
-            <span x-text="key"></span>
-            <button type="button" class="btn-link" style="line-height:1"
-                    @click="removeSpace(key)" :aria-label="'Remove ' + key">×</button>
-            <input type="hidden" name="spaces" :value="key">
-          </span>
-        </template>
-        <span class="empty" x-show="spaces.length === 0">Every space the credential can read.</span>
-      </div>
-    </div>
+    {% include "partials/source_fields_confluence.html" %}
+    {% include "partials/source_fields_jira.html" %}
 
     <label class="check">
       <input type="checkbox" name="include_comments"
@@ -115,12 +99,6 @@
       <input type="checkbox" name="include_attachments"
              {{ 'checked' if connection.get('include_attachments', True) }}>
       Scan text-extractable attachments
-    </label>
-    <label class="check">
-      <input type="checkbox" name="include_personal_spaces"
-             {{ 'checked' if connection.get('include_personal_spaces', False) }}>
-      Include personal spaces
-      <span class="muted">— every user's drafts; a deliberate decision</span>
     </label>
 
     {% if source and source.has_credential %}

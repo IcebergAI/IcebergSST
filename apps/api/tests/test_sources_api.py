@@ -230,7 +230,7 @@ def test_a_trailing_slash_in_the_base_url_is_normalised(
     assert body["connection"]["base_url"] == "https://example.atlassian.net"  # type: ignore[index]
 
 
-@pytest.mark.parametrize("unsupported", ["jira", "smb"])
+@pytest.mark.parametrize("unsupported", ["smb"])
 def test_post_mvp_connectors_are_refused_with_an_explanation(
     client: TestClient,
     make_user: Callable[..., User],
@@ -244,6 +244,82 @@ def test_post_mvp_connectors_are_refused_with_an_explanation(
 
     assert response.status_code == 422
     assert "not available yet" in response.text
+
+
+def test_a_jira_source_can_be_created_with_its_own_scope_options(
+    client: TestClient,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    headers = login_as(make_user(UserRole.ADMIN))
+
+    response = client.post(
+        SOURCES,
+        json=_payload(
+            type="jira",
+            connection={
+                "base_url": "https://example.atlassian.net",
+                "email": "scanner@example.test",
+                "projects": ["ENG", "OPS"],
+                "include_history": True,
+            },
+        ),
+        headers=headers,
+    )
+
+    assert response.status_code == 201, response.text
+    connection = response.json()["connection"]
+    assert connection["projects"] == ["ENG", "OPS"]
+    assert connection["include_history"] is True
+    # Defaulted rather than omitted, so an engine never has to guess.
+    assert connection["include_archived_projects"] is False
+
+
+def test_a_jira_source_refuses_a_project_key_that_could_reach_jql(
+    client: TestClient,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """A 422 at save time beats a failed scan hours later."""
+    headers = login_as(make_user(UserRole.ADMIN))
+
+    response = client.post(
+        SOURCES,
+        json=_payload(
+            type="jira",
+            connection={
+                "base_url": "https://example.atlassian.net",
+                "projects": ['ENG" OR project = "OPS'],
+            },
+        ),
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+
+
+def test_a_jira_source_refuses_a_free_text_jql_field(
+    client: TestClient,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """`extra="forbid"` is what keeps operator query text out of the scan's own
+    query, which would break both discovery determinism and scope reconciliation."""
+    headers = login_as(make_user(UserRole.ADMIN))
+
+    response = client.post(
+        SOURCES,
+        json=_payload(
+            type="jira",
+            connection={
+                "base_url": "https://example.atlassian.net",
+                "jql_filter": "project = ENG",
+            },
+        ),
+        headers=headers,
+    )
+
+    assert response.status_code == 422
 
 
 def test_updating_a_source_records_what_changed(

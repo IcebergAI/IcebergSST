@@ -1,0 +1,37 @@
+{#- Jira-only scope fields (#144). See source_fields_confluence.html for why both
+    blocks stay in the DOM and why nothing here is statically `required`. -#}
+<div x-show="type === 'jira'" x-cloak>
+  <span class="field-label">Projects</span>
+  <div class="row-inline" style="margin-bottom:8px">
+    <input class="field field--sm" style="max-width:220px"
+           x-model="projectDraft" @keydown.enter.prevent="addProject()"
+           placeholder="ENG" aria-label="Project key to add">
+    <button type="button" class="btn btn--ghost btn--sm" @click="addProject()">
+      <svg class="btn-ic" aria-hidden="true"><use href="#ic-plus"/></svg>
+      Add
+    </button>
+  </div>
+  <div class="row-inline">
+    <template x-for="key in projects" :key="key">
+      <span class="tag">
+        <span x-text="key"></span>
+        <button type="button" class="btn-link" style="line-height:1"
+                @click="removeProject(key)" :aria-label="'Remove ' + key">×</button>
+        <input type="hidden" name="projects" :value="key">
+      </span>
+    </template>
+    <span class="empty" x-show="projects.length === 0">Every project the credential can read.</span>
+  </div>
+
+  <label class="check">
+    <input type="checkbox" name="include_history"
+           {{ 'checked' if connection.get('include_history', False) }}>
+    Scan issue history
+    <span class="muted">— values pasted and later removed; multiplies what a scan reads</span>
+  </label>
+  <label class="check">
+    <input type="checkbox" name="include_archived_projects"
+           {{ 'checked' if connection.get('include_archived_projects', False) }}>
+    Include archived projects
+  </label>
+</div>

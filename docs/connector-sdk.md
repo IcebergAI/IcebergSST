@@ -7,7 +7,7 @@ the API never imports or auto-discovers connector code.
 
 ## Minimal connector
 
-`FakeConnector` is the shipped, network-free reference implementation. A connector must expose
+`FakeConnector` is the shipped, network-free reference implementation, and the Jira connector (#144) is the worked example of a real one built against this contract from the outside. A connector must expose
 immutable `ConnectorMetadata`, stream `TaskSpec` values from `discover()`, stream `ContentUnit`
 values from `fetch()`, and classify every observed object through `FetchOutcome`.
 

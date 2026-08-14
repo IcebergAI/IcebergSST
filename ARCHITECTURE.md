@@ -11,7 +11,7 @@ inappropriately stored in enterprise collaboration systems and file shares. It d
 targets sources that git-oriented scanners miss:
 
 - **Confluence** — pages, comments, and text-extractable attachments (MVP).
-- **Jira** — issues, comments, attachments (post-MVP).
+- **Jira** — issues, comments, attachments, and opt-in field history (Cloud; DC not certified).
 - **File shares** — SMB/CIFS and NFS (post-MVP).
 
 It is a **single-organization** internal security tool: one deployment serves one org. There is
@@ -164,5 +164,5 @@ connector credentials, full audit trail on finding state changes, and RBAC on ev
   same route handlers the JSON API exposes ([`docs/web.md`](./docs/web.md)).
 - **M4 — Notifications & prod deploy:** notification dispatch, Helm, hardening.
 
-Non-goals for MVP: Jira/SMB connectors, incremental/delta scanning, image OCR, external ticket
+Non-goals for MVP: SMB connectors, incremental/delta scanning, image OCR, external ticket
 creation, multi-tenancy.

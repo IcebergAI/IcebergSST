@@ -91,6 +91,56 @@ def test_creating_a_source_from_the_form_drives_the_sources_api(
     assert "super-secret-api-token" not in str(source.credential_ref)
 
 
+def test_creating_a_jira_source_posts_a_jira_shaped_blob(
+    client: TestClient,
+    session: Session,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """Both scope blocks post; the route reads only the chosen type's fields."""
+    headers = login_as(make_user(UserRole.ADMIN))
+
+    response = client.post(
+        "/sources",
+        data=CONFLUENCE_FORM
+        | {
+            "csrf_token": headers["X-CSRF-Token"],
+            "name": "jira-eng",
+            "type": "jira",
+            "base_url": "https://example.atlassian.net",
+            "projects": ["ENG"],
+            # The hidden Confluence block still posts these; they must be ignored
+            # rather than land in a Jira blob that `extra="forbid"` would reject.
+            "spaces": ["DOCS"],
+            "include_personal_spaces": "on",
+            "include_history": "on",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 204, response.text
+
+    source = session.exec(select(Source).where(Source.name == "jira-eng")).one()
+    assert source.type is SourceType.JIRA
+    assert source.connection["projects"] == ["ENG"]
+    assert source.connection["include_history"] is True
+    assert "spaces" not in source.connection
+    assert "include_personal_spaces" not in source.connection
+
+
+def test_the_source_type_select_offers_every_supported_connector(
+    client: TestClient,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    headers = login_as(make_user(UserRole.ADMIN))
+
+    body = client.get("/sources", headers=headers).text
+
+    assert 'value="confluence"' in body
+    assert 'value="jira"' in body
+
+
 def test_the_source_form_never_echoes_the_credential_back(
     client: TestClient,
     session: Session,

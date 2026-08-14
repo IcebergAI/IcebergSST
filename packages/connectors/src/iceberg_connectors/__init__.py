@@ -1,4 +1,4 @@
-"""Connector interface and source connectors (Confluence MVP; Jira/SMB later).
+"""Connector interface and source connectors (Confluence and Jira; SMB later).
 
 A connector turns a source into :class:`ContentUnit`\\ s for detection. The
 interface is two methods — :meth:`~iceberg_connectors.protocol.Connector.discover`
@@ -27,6 +27,7 @@ from iceberg_connectors.extraction import (
     extract_text,
 )
 from iceberg_connectors.fake import FAKE_CONNECTOR_TYPE, FakeConnector, FakePage
+from iceberg_connectors.jira import JIRA_CONNECTOR_TYPE, JiraConnector
 from iceberg_connectors.protocol import (
     CONNECTOR_SDK_VERSION,
     Connector,
@@ -56,6 +57,7 @@ __all__ = [
     "CONNECTOR_SDK_VERSION",
     "FAKE_CONNECTOR_TYPE",
     "GLOB_FRIENDLY_KEYS",
+    "JIRA_CONNECTOR_TYPE",
     "ConfluenceConnector",
     "ConformanceCase",
     "Connector",
@@ -74,6 +76,7 @@ __all__ = [
     "FakeConnector",
     "FakePage",
     "FetchOutcome",
+    "JiraConnector",
     "RateLimitError",
     "TaskCoverage",
     "TaskSpec",

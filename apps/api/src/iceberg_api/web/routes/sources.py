@@ -27,37 +27,56 @@ from iceberg_api.web.templating import hx_redirect, render_fragment, render_page
 
 router = APIRouter(include_in_schema=False)
 
-#: MVP scope. The select renders these and nothing else, because
-#: `validate_connection` refuses the rest with an explanation anyway — offering a
-#: choice the API will reject is a worse experience than not offering it.
-SELECTABLE_TYPES = (SourceType.CONFLUENCE,)
+#: The select renders these and nothing else, because `validate_connection`
+#: refuses the rest with an explanation anyway — offering a choice the API will
+#: reject is a worse experience than not offering it.
+SELECTABLE_TYPES = (SourceType.CONFLUENCE, SourceType.JIRA)
 
 
 def _connection_form(
+    source_type: SourceType,
     *,
     base_url: str,
     email: str | None,
     api_prefix: str | None,
     spaces: list[str],
+    projects: list[str],
     include_comments: bool,
     include_attachments: bool,
     include_personal_spaces: bool,
+    include_history: bool,
+    include_archived_projects: bool,
 ) -> dict[str, Any]:
-    """Assemble the Confluence connection blob from the form's flat fields.
+    """Assemble a connection blob from the form's flat fields, per source type.
 
     Built here rather than in JavaScript so there is one description of the shape
-    and the API's `ConfluenceConnection` model is the only thing that validates
-    it. An empty ``email`` is dropped rather than sent: its *presence* is what
-    selects Basic ``email:token`` auth, so a blank string would read as
-    "configured" (docs/connectors.md § Auth).
+    and the API's connection model is the only thing that validates it. An empty
+    ``email`` is dropped rather than sent: its *presence* is what selects Basic
+    ``email:token`` auth, so a blank string would read as "configured"
+    (docs/connectors.md § Auth).
+
+    Both types' inputs are posted on every save — the form keeps both blocks in the
+    DOM so switching type does not discard typing — so the fields belonging to the
+    other type are simply not read here. The API's ``extra="forbid"`` model is the
+    authority either way.
     """
     connection: dict[str, Any] = {
         "base_url": base_url.strip(),
-        "spaces": spaces,
         "include_comments": include_comments,
         "include_attachments": include_attachments,
-        "include_personal_spaces": include_personal_spaces,
     }
+    if source_type is SourceType.CONFLUENCE:
+        connection["spaces"] = spaces
+        connection["include_personal_spaces"] = include_personal_spaces
+    elif source_type is SourceType.JIRA:
+        connection["projects"] = projects
+        connection["include_history"] = include_history
+        connection["include_archived_projects"] = include_archived_projects
+    else:
+        # Never reached through the select, but a hand-posted type must not
+        # silently produce a Confluence-shaped blob for something else.
+        raise ValueError(f"the {source_type.value} connector is not available yet")
+
     if email:
         connection["email"] = email
     if api_prefix:
@@ -72,7 +91,9 @@ def _form_state(source: SourceRead | None, connection: dict[str, Any]) -> dict[s
         "connection": connection,
         "types": SELECTABLE_TYPES,
         "island": {
+            "type": (source.type.value if source else SELECTABLE_TYPES[0].value),
             "spaces": connection.get("spaces", []),
+            "projects": connection.get("projects", []),
             "email": connection.get("email", ""),
             "hasCredential": source.has_credential if source else False,
             "isNew": source is None,
@@ -152,9 +173,12 @@ async def create_source(  # one parameter per form field
     email: Annotated[str, Form()] = "",
     api_prefix: Annotated[str, Form()] = "",
     spaces: Annotated[list[str], Form()] = [],  # noqa: B006  # FastAPI reads the default, never mutates it
+    projects: Annotated[list[str], Form()] = [],  # noqa: B006  # see spaces
     include_comments: Annotated[str | None, Form()] = None,
     include_attachments: Annotated[str | None, Form()] = None,
     include_personal_spaces: Annotated[str | None, Form()] = None,
+    include_history: Annotated[str | None, Form()] = None,
+    include_archived_projects: Annotated[str | None, Form()] = None,
     enabled: Annotated[str | None, Form()] = None,
     csrf_token: Annotated[str, Form()] = "",
 ) -> Response:
@@ -164,19 +188,28 @@ async def create_source(  # one parameter per form field
     rather than an error page: the analyst's typed values are still on screen,
     which is the whole reason to swap a fragment instead of navigating.
     """
+    try:
+        chosen = SourceType(source_type)
+    except ValueError:
+        return _form_error(request, viewer, None, {}, ValueError("unknown source type"))
+
     connection = _connection_form(
+        chosen,
         base_url=base_url,
         email=optional(email),
         api_prefix=optional(api_prefix),
         spaces=string_list(spaces),
+        projects=string_list(projects),
         include_comments=checkbox(include_comments),
         include_attachments=checkbox(include_attachments),
         include_personal_spaces=checkbox(include_personal_spaces),
+        include_history=checkbox(include_history),
+        include_archived_projects=checkbox(include_archived_projects),
     )
     try:
         body = SourceCreate(
             name=name.strip(),
-            type=SourceType(source_type),
+            type=chosen,
             connection=connection,
             credential=SecretStr(credential) if credential else None,
             enabled=checkbox(enabled),
@@ -202,21 +235,34 @@ async def update_source(  # one parameter per form field
     email: Annotated[str, Form()] = "",
     api_prefix: Annotated[str, Form()] = "",
     spaces: Annotated[list[str], Form()] = [],  # noqa: B006  # see create_source
+    projects: Annotated[list[str], Form()] = [],  # noqa: B006  # see create_source
     include_comments: Annotated[str | None, Form()] = None,
     include_attachments: Annotated[str | None, Form()] = None,
     include_personal_spaces: Annotated[str | None, Form()] = None,
+    include_history: Annotated[str | None, Form()] = None,
+    include_archived_projects: Annotated[str | None, Form()] = None,
     enabled: Annotated[str | None, Form()] = None,
     csrf_token: Annotated[str, Form()] = "",
 ) -> Response:
     """Save an edit. A blank credential field leaves the stored one alone."""
+    # Read first, because the blob's shape depends on the type and the type is not
+    # posted: `SourceUpdate` has no `type` field, so a source's type is immutable
+    # after creation. Trusting a client-supplied one would let a form post decide
+    # how to interpret a stored source.
+    source = await api.read_source(source_id=source_id, user=admin, db=db)
+
     connection = _connection_form(
+        source.type,
         base_url=base_url,
         email=optional(email),
         api_prefix=optional(api_prefix),
         spaces=string_list(spaces),
+        projects=string_list(projects),
         include_comments=checkbox(include_comments),
         include_attachments=checkbox(include_attachments),
         include_personal_spaces=checkbox(include_personal_spaces),
+        include_history=checkbox(include_history),
+        include_archived_projects=checkbox(include_archived_projects),
     )
     try:
         changes = SourceUpdate(
@@ -231,7 +277,6 @@ async def update_source(  # one parameter per form field
             source_id=source_id, changes=changes, admin=admin, db=db, store=store
         )
     except (HTTPException, ValidationError, ValueError) as exc:
-        source = await api.read_source(source_id=source_id, user=admin, db=db)
         return _form_error(request, viewer, source, connection, exc)
 
     return hx_redirect(f"/sources/{source_id}")

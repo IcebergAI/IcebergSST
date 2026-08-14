@@ -10,6 +10,7 @@ Two rules shape these:
   not hours later inside a scan task.
 """
 
+import re
 import uuid
 from typing import Any, Self
 from urllib.parse import urlsplit, urlunsplit
@@ -27,9 +28,12 @@ from pydantic import (
 
 from iceberg_api.schemas import UtcDatetime
 
-#: MVP scope (ARCHITECTURE.md §1). Jira and file shares are post-MVP connectors,
+#: Types an engine can actually scan. File shares are still a post-MVP connector,
 #: and a source nothing can scan is worse than a clear refusal.
-SUPPORTED_SOURCE_TYPES = frozenset({SourceType.CONFLUENCE})
+SUPPORTED_SOURCE_TYPES = frozenset({SourceType.CONFLUENCE, SourceType.JIRA})
+
+#: A Jira project key as Atlassian defines it. Mirrors the connector's own guard.
+_JIRA_PROJECT_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,254}$")
 
 
 class ConfluenceConnection(BaseModel):
@@ -125,8 +129,98 @@ class ConfluenceConnection(BaseModel):
         return cleaned
 
 
+class JiraConnection(BaseModel):
+    """Where a Jira instance lives and how much of it is in scope.
+
+    Every key the Jira connector reads must be a field here: the blob is validated
+    with ``extra="forbid"``, so a key this model omits is one no admin can store and
+    no engine will ever receive — ``tests/test_source_connection_schema.py`` holds
+    the two in step.
+
+    There is deliberately **no free-text JQL field**. Operator-authored query text
+    would be spliced into the connector's own windowed query, which would break both
+    the reproducibility discovery depends on and the scope reconciliation the
+    coverage manifest depends on.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Site root, e.g. ``https://example.atlassian.net``. The connector appends
+    #: ``api_prefix`` (Cloud's default is ``/rest/api/3``) and builds UI links as
+    #: ``base_url`` + ``/browse/KEY``.
+    base_url: str
+    #: The Cloud account email. Its presence is what selects Basic ``email:token``
+    #: auth; absent means the credential is a Server/DC PAT sent as a Bearer.
+    email: str | None = None
+    #: Where the REST API is mounted. Cloud's ``/rest/api/3`` is the connector's
+    #: default; Data Center serves ``/rest/api/2`` and is not certified yet.
+    api_prefix: str | None = None
+    #: Project keys to scan. Empty means every project the credential can read.
+    projects: list[str] = Field(default_factory=list)
+    include_comments: bool = True
+    include_attachments: bool = True
+    #: Off by default. Issue history holds values that were pasted and later
+    #: removed — often the most productive hiding place in the product — but it
+    #: multiplies the objects a scan enumerates, so it is a deliberate choice.
+    include_history: bool = False
+    #: Off by default: an archived project is usually deliberately out of scope.
+    include_archived_projects: bool = False
+
+    @field_validator("base_url")
+    @classmethod
+    def _sane_base_url(cls, value: str) -> str:
+        trimmed = value.strip().rstrip("/")
+        if not trimmed.startswith(("http://", "https://")):
+            raise ValueError("base_url must start with http:// or https://")
+        if " " in trimmed:
+            raise ValueError("base_url must not contain spaces")
+        return trimmed
+
+    @field_validator("email")
+    @classmethod
+    def _clean_email(cls, value: str | None) -> str | None:
+        # Empty selects Bearer auth exactly like an omitted field, so normalise
+        # rather than store a blank that reads as "email configured".
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @field_validator("api_prefix")
+    @classmethod
+    def _sane_api_prefix(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        trimmed = value.strip().rstrip("/")
+        if not trimmed:
+            return None
+        if not trimmed.startswith("/") or " " in trimmed:
+            # The client builds URLs as base_url + api_prefix + path; a prefix
+            # missing its leading slash fails hours later inside a scan task.
+            raise ValueError("api_prefix must be an absolute path like /rest/api/3")
+        return trimmed
+
+    @field_validator("projects")
+    @classmethod
+    def _clean_projects(cls, value: list[str]) -> list[str]:
+        cleaned = [key.strip() for key in value if key.strip()]
+        if len({key.casefold() for key in cleaned}) != len(cleaned):
+            raise ValueError("projects must not repeat")
+        for key in cleaned:
+            # Rejected here as well as in the connector. The connector validates
+            # what the *server* named before it reaches JQL; this validates what an
+            # operator typed, so a bad key is a 422 at save time rather than a
+            # failed scan hours later.
+            if not _JIRA_PROJECT_KEY.fullmatch(key):
+                raise ValueError(
+                    "project keys must start with a letter and contain only "
+                    "letters, digits, and underscores"
+                )
+        return cleaned
+
+
 CONNECTION_MODELS: dict[SourceType, type[BaseModel]] = {
     SourceType.CONFLUENCE: ConfluenceConnection,
+    SourceType.JIRA: JiraConnection,
 }
 
 

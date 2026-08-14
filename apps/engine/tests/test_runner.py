@@ -830,3 +830,93 @@ def test_a_running_task_is_registered_so_the_heartbeat_can_renew_it() -> None:
 
     assert seen == [[TASK_ID]]
     assert tasks.held() == []  # ...and released once done
+
+
+# ─── Connector-declared scope naming (#144) ───────────────────────────────────
+
+
+def test_several_specs_for_one_scope_count_as_one_discovered_scope() -> None:
+    """A connector may split one scope into many fetch specs.
+
+    Jira windows a project by `created`, so three specs can cover one project.
+    Counting each as a discovered scope would make discovered exceed requested, and
+    the API nulls the whole manifest's `scope.requested` when the equation does not
+    balance — silently losing "you asked for one project and we enumerated it".
+    """
+
+    class Windowed(FakeConnector):
+        scope_key = "projects"
+        scope_param = "project_key"
+
+        def discover(self, *args: Any, **kwargs: Any) -> Iterator[TaskSpec]:
+            for window in range(3):
+                yield TaskSpec(
+                    label=f"ENG window {window}",
+                    params={"project_key": "ENG", "window": window},
+                )
+
+    registry.clear()
+    registry.register(Windowed())
+    api = Api(_lease(kind="discovery", spec={}, connection={"projects": ["ENG"]}))
+
+    run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    assert len(api.submission["task_specs"]) == 3
+    assert api.submission["coverage"]["scope"] == {"requested": 1, "discovered": 1, "gaps": 0}
+
+
+def test_a_missing_configured_scope_is_found_under_the_connectors_own_param() -> None:
+    """The gap attribution has to read the same key the connector writes."""
+
+    class Windowed(FakeConnector):
+        scope_key = "projects"
+        scope_param = "project_key"
+
+        def discover(self, *args: Any, **kwargs: Any) -> Iterator[TaskSpec]:
+            yield TaskSpec(label="ENG", params={"project_key": "ENG"})
+            raise ConnectorError("configured Jira projects were not found")
+
+    registry.clear()
+    registry.register(Windowed())
+    api = Api(_lease(kind="discovery", spec={}, connection={"projects": ["ENG", "OPS"]}))
+
+    run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    coverage = api.submission["coverage"]
+    assert coverage["scope"] == {"requested": 2, "discovered": 1, "gaps": 1}
+    assert "OPS" not in json.dumps(api.submission)
+
+
+def test_a_connector_that_names_no_scope_keys_keeps_the_confluence_defaults() -> None:
+    """Every connector predating #144 meant "spaces"/"space_key"."""
+    api = Api(_lease(kind="discovery", spec={}, connection={"spaces": ["DOCS"]}))
+
+    run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    assert api.submission["coverage"]["scope"] == {"requested": 1, "discovered": 1, "gaps": 0}
+
+
+def test_a_body_units_coverage_kind_is_the_connectors_word() -> None:
+    """The kind is domain-separated into a gap's HMAC.
+
+    A Jira issue the connector counted as `record` but the runner marked incomplete
+    as `page` still reconciles numerically, while growing a phantom `page` gap on a
+    source that has no pages.
+    """
+    from iceberg_connectors.units import ContentOrigin, ContentUnit
+    from iceberg_core.enums import CoverageObjectKind
+    from iceberg_core.fingerprint import CoarseLocator
+    from iceberg_engine.runner import _coverage_kind
+
+    unit = ContentUnit(
+        locator=CoarseLocator(connector_type="jira", resource_id="10001"),
+        text="x",
+        origin=ContentOrigin.BODY,
+    )
+
+    class Recorded(FakeConnector):
+        body_kind = CoverageObjectKind.RECORD
+
+    assert _coverage_kind(unit, Recorded()) is CoverageObjectKind.RECORD
+    assert _coverage_kind(unit, FakeConnector()) is CoverageObjectKind.PAGE
+    assert _coverage_kind(unit, None) is CoverageObjectKind.PAGE
