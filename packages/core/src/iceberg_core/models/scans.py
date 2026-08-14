@@ -213,6 +213,17 @@ class ScanTask(TimestampedModel, table=True):
     #: engine's batch with one predicate.
     checkpoint_sequence: int = Field(default=0, sa_column_kwargs={"server_default": "0"})
 
+    #: Where this task's scope proposes the next scan should start (#143):
+    #: ``{"scope": …, "version": …, "position": {…}}``, authored by the connector.
+    #: Held here rather than applied on arrival because a proposal is only worth
+    #: anything if the *whole* scan completes with complete coverage, which is not
+    #: knowable until the last task reports.
+    cursor_proposal: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_type=json_type(),
+        sa_column_kwargs={"server_default": text("'{}'")},
+    )
+
     #: What the checkpoint above is only valid under: the source configuration
     #: version and rule-pack version in force when it was written. If either has
     #: moved by the time the task is re-leased, the position is discarded and the

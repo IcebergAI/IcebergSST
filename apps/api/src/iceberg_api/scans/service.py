@@ -26,6 +26,7 @@ from iceberg_core.enums import (
     ACTIVE_SCAN_STATUSES,
     CoverageReason,
     CoverageState,
+    ScanMode,
     ScanStatus,
     ScanTaskKind,
     ScanTaskStatus,
@@ -39,6 +40,7 @@ from sqlmodel import Session, col, select, update
 from iceberg_api.dispatch import Dispatcher
 from iceberg_api.notifications import dispatch as notification_dispatch
 from iceberg_api.scans import coverage as coverage_service
+from iceberg_api.scans import cursors
 from iceberg_api.scans.reconcile import reconcile_scan
 
 #: How long a lease is good for without a heartbeat. Long enough for a slow
@@ -77,6 +79,9 @@ def launch_scan(
     *,
     trigger: ScanTrigger,
     dispatcher: Dispatcher,
+    mode: ScanMode = ScanMode.FULL,
+    rulepack_version: str | None = None,
+    pepper_rotating: bool = False,
     now: datetime | None = None,
 ) -> Scan:
     """Create a scan with its discovery task and dispatch it.
@@ -90,6 +95,12 @@ def launch_scan(
     schedules' bookkeeping pending on it, and a plain rollback here would discard
     it — leaving those schedules due again next beat and launching duplicate scans
     (#33).
+
+    ``mode`` is a *request*, not a decision (#143). It is promoted to a full scan
+    whenever the source's watermarks cannot be trusted, which is what makes the
+    periodic full reconciliation a guarantee rather than a convention: an
+    incremental scan never auto-resolves, so a schedule left on incremental forever
+    must still produce full scans on its own.
     """
     started_at = now or datetime.now(UTC)
     # Serialize launch against source edits. Every later lease reads the source row,
@@ -98,10 +109,23 @@ def launch_scan(
     locked_source = db.exec(
         select(Source).where(col(Source.id) == source.id).with_for_update()
     ).one()
+
+    resolved, reason, baseline = cursors.plan_mode(
+        db,
+        locked_source,
+        requested=mode,
+        rulepack_version=rulepack_version,
+        pepper_rotating=pepper_rotating,
+        now=started_at,
+    )
     scan = Scan(
         source_id=locked_source.id,
         trigger=trigger,
         status=ScanStatus.QUEUED,
+        mode=resolved,
+        promoted_from=mode if resolved is not mode else None,
+        promotion_reason=reason,
+        incremental_baseline_at=baseline,
         started_at=started_at,
         source_configuration_version=locked_source.updated_at,
     )
@@ -136,6 +160,8 @@ def launch_scan(
         scan_id=str(scan.id),
         source_id=str(source.id),
         trigger=trigger.value,
+        mode=scan.mode.value,
+        promotion_reason=reason.value if reason else None,
         discovery_task_id=str(task.id),
     )
     return scan
@@ -456,6 +482,7 @@ def finalize_and_reconcile(
     # finding was remediated.
     scan = db.get(Scan, scan_id)
     manifest = None
+    tasks: list[ScanTask] = []
     if scan is not None:  # pragma: no branch - the status UPDATE just matched it
         db.refresh(scan)
         tasks = list(
@@ -475,11 +502,25 @@ def finalize_and_reconcile(
         and manifest is not None
         and manifest.coverage_state is CoverageState.COMPLETE
     ):
-        reconcile_scan(db, scan, now=now)
-        # Queue announcements for what this scan opened (#60). Written after
-        # reconciliation, so a finding auto-resolved in the same pass is not
-        # announced. Sending happens in the maintenance loop; nothing here
-        # talks to SMTP or a webhook.
+        if scan.mode is ScanMode.FULL:
+            # Only a full scan's silence about a finding is evidence the secret is
+            # gone. An incremental scan deliberately never looked at unchanged
+            # content, so every finding outside its window is "not seen by this
+            # scan" for a reason that has nothing to do with remediation —
+            # reconciling on it would mass-resolve the whole source (ADR 0013).
+            reconcile_scan(db, scan, now=now)
+
+        # Every scope this scan completely covered may now advance its watermark.
+        # Inside the same gate as reconciliation and for the same reason: a scan
+        # that cannot be trusted to have read everything cannot be trusted to say
+        # where the next one should start.
+        cursors.commit_proposals(db, scan, tasks, now=now)
+
+        # Queue announcements for what this scan opened (#60). Deliberately outside
+        # the mode check: an incremental scan is the common case and the whole
+        # point of it is finding new secrets sooner. Written after reconciliation,
+        # so a finding auto-resolved in the same pass is not announced. Sending
+        # happens in the maintenance loop; nothing here talks to SMTP or a webhook.
         notification_dispatch.enqueue_for_scan(db, scan, now=now)
 
     db.commit()

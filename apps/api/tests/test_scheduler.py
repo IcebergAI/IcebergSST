@@ -1,13 +1,13 @@
 """The scheduler tick: cadence, leader election, and bookkeeping (#33)."""
 
 import uuid
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 from conftest import RecordingDispatcher
 from iceberg_api.scans import service
 from iceberg_api.scheduler import (
     SCHEDULER_LOCK_KEY,
+    ScanLauncher,
     TickResult,
     due_schedules,
     next_fire_time,
@@ -15,7 +15,7 @@ from iceberg_api.scheduler import (
     tick,
 )
 from iceberg_api.scheduler_launcher import build_launcher
-from iceberg_core.enums import ScanTrigger, SourceType
+from iceberg_core.enums import ScanMode, ScanTrigger, SourceType
 from iceberg_core.models import Scan, Schedule, Source
 from sqlmodel import Session, select
 
@@ -53,12 +53,10 @@ def _schedule(
     return schedule
 
 
-def _recording_launcher() -> tuple[
-    Callable[[Session, uuid.UUID], uuid.UUID | None], list[uuid.UUID]
-]:
+def _recording_launcher() -> tuple[ScanLauncher, list[uuid.UUID]]:
     launched: list[uuid.UUID] = []
 
-    def launcher(db: Session, source_id: uuid.UUID) -> uuid.UUID | None:
+    def launcher(db: Session, source_id: uuid.UUID, mode: ScanMode) -> uuid.UUID | None:
         launched.append(source_id)
         return uuid.uuid4()
 
@@ -156,7 +154,7 @@ def test_a_failing_launcher_does_not_take_the_round_down(session: Session) -> No
     broken = _schedule(session, first_source, next_run_at=now - timedelta(minutes=5))
     healthy = _schedule(session, second_source, next_run_at=now - timedelta(minutes=5))
 
-    def launcher(db: Session, source_id: uuid.UUID) -> uuid.UUID | None:
+    def launcher(db: Session, source_id: uuid.UUID, mode: ScanMode) -> uuid.UUID | None:
         if source_id == first_source.id:
             raise RuntimeError("broker unreachable")
         return uuid.uuid4()

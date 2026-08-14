@@ -18,14 +18,33 @@ a place in a result set, so it is never logged and never exported.
 """
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from iceberg_core.enums import CursorInvalidationReason
-from iceberg_core.models import Scan, Source, SourceCursor
+from iceberg_core.enums import (
+    CursorInvalidationReason,
+    EngineStatus,
+    ScanMode,
+    ScanTaskStatus,
+)
+from iceberg_core.models import Engine, Scan, ScanTask, Source, SourceCursor
 from sqlmodel import Session, col, select
 
 logger = structlog.get_logger()
+
+
+def _utc(value: datetime | None) -> datetime | None:
+    """SQLite hands back naive datetimes even for TIMESTAMPTZ columns.
+
+    Normalised on every comparison rather than trusted: a naive value compared to
+    an aware one raises on subtraction and is silently unequal on ``!=``, and the
+    silent branch is the dangerous one — it would invalidate every cursor on every
+    launch and quietly turn incremental scanning off.
+    """
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
 
 
 def active_cursors(db: Session, source_id: uuid.UUID) -> dict[str, SourceCursor]:
@@ -47,8 +66,6 @@ def positions_for_scan(db: Session, scan: Scan) -> dict[str, dict[str, object]]:
     without the API ever intending it, and the resulting scan would auto-resolve
     against content it never looked at.
     """
-    from iceberg_core.enums import ScanMode
-
     if scan.mode is not ScanMode.FULL:
         return {
             scope: dict(cursor.position)
@@ -74,7 +91,7 @@ def invalidation_for(
         return CursorInvalidationReason.NO_CURSOR
     if cursor.invalidated_at is not None:
         return cursor.invalidation_reason or CursorInvalidationReason.OPERATOR_REQUESTED
-    if cursor.source_configuration_version != source.updated_at:
+    if _utc(cursor.source_configuration_version) != _utc(source.updated_at):
         # Scope filters or the base URL moved, so the watermark covers a different
         # set of content than the one this scan is about to enumerate.
         return CursorInvalidationReason.SOURCE_CONFIGURATION_CHANGED
@@ -86,13 +103,139 @@ def invalidation_for(
         # Every fingerprint moves during a rotation, so nothing an incremental scan
         # reported would match what is stored (ADR 0006/0007).
         return CursorInvalidationReason.PEPPER_ROTATING
-    if now - cursor.minted_at >= timedelta(days=source.full_scan_interval_days):
+    minted = _utc(cursor.minted_at)
+    if minted is not None and now - minted >= timedelta(days=source.full_scan_interval_days):
         # The periodic full reconciliation this source is configured for. This is
         # what makes it a guarantee: an incremental scan never auto-resolves, so
         # without this ceiling a source scheduled incrementally forever would never
         # resolve a remediated finding.
         return CursorInvalidationReason.INTERVAL_ELAPSED
     return None
+
+
+def fleet_rulepack_version(db: Session) -> str | None:
+    """The rule-pack version the fleet is running, if they agree on one.
+
+    Rule packs ship inside engine images (ADR 0008), so the fleet is the only place
+    that knows which rules are actually running. During a rolling deploy more than
+    one answer is correct at once — and "we cannot say" has to read as *changed*,
+    because a watermark validated against the wrong version would skip content the
+    new rules have never been shown. So disagreement returns ``None``, and ``None``
+    invalidates.
+    """
+    versions = {
+        str(engine.rulepack.get("version"))
+        for engine in db.exec(select(Engine).where(col(Engine.status) == EngineStatus.ACTIVE))
+        if isinstance(engine.rulepack, dict) and engine.rulepack.get("version")
+    }
+    return versions.pop() if len(versions) == 1 else None
+
+
+def plan_mode(
+    db: Session,
+    source: Source,
+    *,
+    requested: ScanMode,
+    rulepack_version: str | None,
+    pepper_rotating: bool,
+    now: datetime,
+) -> tuple[ScanMode, CursorInvalidationReason | None, datetime | None]:
+    """Decide what mode a scan actually runs in, and why (#143).
+
+    A schedule can ask for an incremental scan; it cannot have one on terms that
+    would make the result untrustworthy. **Every** live cursor for the source has
+    to survive validation, not just some: a scan running incrementally over the
+    spaces that still have watermarks and fully over those that do not would be
+    incremental for reconciliation purposes — it would still never auto-resolve —
+    while costing as much as a full scan for the rest. Promoting the whole scan is
+    both simpler and the only version an operator can reason about.
+
+    Returns the resolved mode, the reason it was promoted (``None`` if it was not),
+    and the baseline instant an incremental scan is starting from.
+    """
+    if requested is ScanMode.FULL:
+        return ScanMode.FULL, None, None
+
+    live = active_cursors(db, source.id)
+    if not live:
+        return ScanMode.FULL, CursorInvalidationReason.NO_CURSOR, None
+
+    for cursor in live.values():
+        reason = invalidation_for(
+            cursor,
+            source=source,
+            rulepack_version=rulepack_version,
+            pepper_rotating=pepper_rotating,
+            now=now,
+        )
+        if reason is not None:
+            invalidate(db, source.id, reason, now=now)
+            return ScanMode.FULL, reason, None
+
+    # The oldest watermark, because that is the point before which *nothing* in
+    # this scan looked — the honest thing to put in the manifest.
+    baseline = min(_utc(cursor.minted_at) or now for cursor in live.values())
+    return ScanMode.INCREMENTAL, None, baseline
+
+
+def commit_proposals(
+    db: Session,
+    scan: Scan,
+    tasks: Sequence[ScanTask],
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Store the watermarks a completed scan's tasks proposed. No commit.
+
+    Called only from inside the gate that authorises reconciliation, and for the
+    same reason: a scan that cannot be trusted to have read everything cannot be
+    trusted to say where the next one should start.
+
+    A task that *failed* proposes nothing even within a complete scan — the scan's
+    coverage being complete means every object reached a disposition, not that
+    every task succeeded — so its scope simply keeps the watermark it had and is
+    re-read next time.
+    """
+    at = now or datetime.now(UTC)
+    existing = dict(active_cursors(db, scan.source_id))
+    stored = 0
+
+    for task in tasks:
+        if task.status is not ScanTaskStatus.COMPLETED:
+            continue
+        proposal = task.cursor_proposal
+        if not proposal:
+            continue
+        scope = str(proposal.get("scope") or "")
+        position = proposal.get("position")
+        version = str(proposal.get("version") or "")
+        if not scope or not version or not isinstance(position, dict):
+            logger.warning("source_cursor_proposal_malformed", scan_id=str(scan.id))
+            continue
+
+        cursor = existing.get(scope)
+        if cursor is None:
+            cursor = SourceCursor(
+                source_id=scan.source_id,
+                scope=scope,
+                position={},
+                minted_by_scan_id=scan.id,
+                minted_at=at,
+            )
+            existing[scope] = cursor
+        cursor.position = {"version": version, **position}
+        cursor.rulepack_version = scan.rulepack_version
+        cursor.source_configuration_version = scan.source_configuration_version
+        cursor.minted_by_scan_id = scan.id
+        cursor.minted_at = at
+        cursor.invalidated_at = None
+        cursor.invalidation_reason = None
+        db.add(cursor)
+        stored += 1
+
+    if stored:
+        logger.info("source_cursors_stored", scan_id=str(scan.id), count=stored)
+    return stored
 
 
 def invalidate(

@@ -36,6 +36,7 @@ from iceberg_api.remediation.guidance import load_catalog
 from iceberg_api.remediation.routes import router as remediation_router
 from iceberg_api.rules import router as rules_router
 from iceberg_api.scans.routes import router as scans_router
+from iceberg_api.sources.cursor_routes import router as source_cursors_router
 from iceberg_api.sources.routes import router as sources_router
 from iceberg_api.sources.schedule_routes import router as schedules_router
 from iceberg_api.users.routes import router as users_router
@@ -128,6 +129,7 @@ def create_app(settings: ApiSettings | None = None, *, background: bool = True) 
     app.include_router(rules_router, prefix=API_PREFIX)
     app.include_router(scans_router, prefix=API_PREFIX)
     app.include_router(schedules_router, prefix=API_PREFIX)
+    app.include_router(source_cursors_router, prefix=API_PREFIX)
     app.include_router(sources_router, prefix=API_PREFIX)
     app.include_router(suppressions_router, prefix=API_PREFIX)
     app.include_router(users_router, prefix=API_PREFIX)

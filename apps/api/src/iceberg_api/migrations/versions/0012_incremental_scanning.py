@@ -101,6 +101,9 @@ def upgrade() -> None:
         batch_op.add_column(
             sa.Column("checkpoint_context", _JSON, nullable=False, server_default=sa.text("'{}'"))
         )
+        batch_op.add_column(
+            sa.Column("cursor_proposal", _JSON, nullable=False, server_default=sa.text("'{}'"))
+        )
 
     with op.batch_alter_table("schedule", schema=None) as batch_op:
         batch_op.add_column(
@@ -178,6 +181,7 @@ def downgrade() -> None:
         batch_op.drop_column("mode")
 
     with op.batch_alter_table("scan_task", schema=None) as batch_op:
+        batch_op.drop_column("cursor_proposal")
         batch_op.drop_column("checkpoint_context")
         batch_op.drop_column("checkpoint_sequence")
         batch_op.drop_column("checkpoint")

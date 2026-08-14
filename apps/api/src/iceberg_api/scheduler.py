@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 
 import structlog
 from croniter import croniter
+from iceberg_core.enums import ScanMode
 from iceberg_core.models import Schedule
 from sqlalchemy import text
 from sqlmodel import Session, select
@@ -34,7 +35,9 @@ SCHEDULER_LOCK_KEY = 0x1CEB_0001
 
 #: Something has to launch the scan. Returns the launched scan's id, or None if it
 #: declined (for example: this source already has an active scan — ADR 0009).
-ScanLauncher = Callable[[Session, uuid.UUID], uuid.UUID | None]
+#: A source id and the mode its schedule asked for. The launcher is free to
+#: promote it — a schedule requests, the API decides (#143).
+ScanLauncher = Callable[[Session, uuid.UUID, ScanMode], uuid.UUID | None]
 
 #: Takes the tick lock. Returns True if this replica is the leader for this round.
 LeaderLock = Callable[[Session], bool]
@@ -115,7 +118,7 @@ def tick(
 
     for schedule in due_schedules(db, now):
         try:
-            scan_id = launcher(db, schedule.source_id)
+            scan_id = launcher(db, schedule.source_id, schedule.mode)
         except Exception:  # one bad source must not stop the round
             logger.exception("scheduled_scan_launch_failed", schedule_id=str(schedule.id))
             skipped.append(schedule.id)
@@ -145,7 +148,7 @@ def no_launcher() -> Iterator[ScanLauncher]:
     is exercised, without pretending a scan happened.
     """
 
-    def launcher(db: Session, source_id: uuid.UUID) -> uuid.UUID | None:
+    def launcher(db: Session, source_id: uuid.UUID, mode: ScanMode) -> uuid.UUID | None:
         logger.warning("scan_launch_not_implemented", source_id=str(source_id))
         return None
 

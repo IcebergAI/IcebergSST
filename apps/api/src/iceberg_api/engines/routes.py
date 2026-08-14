@@ -650,6 +650,11 @@ async def submit_results(
     ingest.merge_scan_counts(scan, outcome, body.counts)
     if body.rulepack_version:
         scan.rulepack_version = body.rulepack_version
+    if body.cursor is not None:
+        # Held, not applied. A proposal is worth something only if the whole scan
+        # completes with complete coverage, which is not knowable until the last
+        # task reports — `finalize_and_reconcile` commits them together (#143).
+        task.cursor_proposal = body.cursor.model_dump(mode="json")
     service.complete_task(
         db,
         task,
