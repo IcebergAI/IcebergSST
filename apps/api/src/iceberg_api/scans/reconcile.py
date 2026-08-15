@@ -125,6 +125,10 @@ def reconcile_scan(
                 finding_id=finding.id,
                 # No actor: nobody decided this, a scan observed it.
                 actor_id=None,
+                # Provenance, and what makes this row idempotent: a partial unique
+                # index refuses a second auto-resolve of this finding by this scan
+                # (`models/findings.py`).
+                scan_id=scan.id,
                 kind=FindingEventKind.STATE_CHANGE,
                 from_value=FindingState.OPEN.value,
                 to_value=FindingState.RESOLVED.value,

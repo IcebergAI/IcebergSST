@@ -463,5 +463,7 @@ def test_the_jira_connector_satisfies_the_published_sdk_contract() -> None:
     metadata = payload["metadata"]
     assert isinstance(metadata, dict)
     assert metadata["connector_type"] == "jira"
-    # Reserved for #143 until the resumable-scan contract exists.
-    assert "checkpoints" not in metadata["capabilities"]
+    # Landed with #143. Declaring them is a promise the kit then holds it to:
+    # `assert_checkpoint_resume` proves a resumed fetch neither skips nor repeats.
+    assert "checkpoints" in metadata["capabilities"]
+    assert "incremental" in metadata["capabilities"]

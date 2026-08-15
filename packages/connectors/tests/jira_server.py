@@ -142,8 +142,12 @@ class Issue:
     id: str
     key: str
     #: `YYYY-MM-DDTHH:MM`, the ordering and windowing field. Immutable in Jira, which
-    #: is why the connector windows on it.
+    #: is why the connector windows on it for a full scan.
     created: str = "2024-01-01T00:00"
+    #: When the issue was last edited. Jira returns it on every issue and it is
+    #: never older than `created`, so an unset value models an issue nobody has
+    #: touched since it was filed rather than one with no timestamp.
+    updated: str = ""
     summary: str = "an issue"
     description: Any = None
     environment: Any = None
@@ -158,6 +162,7 @@ class Issue:
         fields: dict[str, Any] = {
             "summary": self.summary,
             "created": f"{self.created}:00.000+0000",
+            "updated": f"{self.updated or self.created}:00.000+0000",
             "environment": self.environment,
             "attachment": [a.as_payload() for a in self.attachments],
             "project": {"key": project_key},
@@ -185,9 +190,9 @@ class Project:
 
 
 _PROJECT_CLAUSE = re.compile(r'project\s*=\s*"([^"]+)"', re.IGNORECASE)
-_FROM_CLAUSE = re.compile(r'created\s*>=\s*"([^"]+)"', re.IGNORECASE)
-_TO_CLAUSE = re.compile(r'created\s*<\s*"([^"]+)"', re.IGNORECASE)
-_ORDER_CLAUSE = re.compile(r"ORDER\s+BY\s+created\s+(ASC|DESC)", re.IGNORECASE)
+_FROM_CLAUSE = re.compile(r'(created|updated)\s*>=\s*"([^"]+)"', re.IGNORECASE)
+_TO_CLAUSE = re.compile(r'(created|updated)\s*<\s*"([^"]+)"', re.IGNORECASE)
+_ORDER_CLAUSE = re.compile(r"ORDER\s+BY\s+(created|updated)\s+(ASC|DESC)", re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -344,21 +349,26 @@ class FakeJira:
         wanted = _PROJECT_CLAUSE.search(jql)
         lower = _FROM_CLAUSE.search(jql)
         upper = _TO_CLAUSE.search(jql)
+        order = _ORDER_CLAUSE.search(jql)
+        # Whichever date field the query names. Bounds and ordering always agree in
+        # what the connector emits, so one field governs both.
+        named = lower or upper or order
+        field_name = named[1].lower() if named is not None else "created"
 
         rows: list[tuple[str, dict[str, Any]]] = []
         for project in self.projects:
             if wanted and project.key.casefold() != wanted[1].casefold():
                 continue
             for issue in project.issues:
-                stamp = issue.created.replace("T", " ")
-                if lower and stamp < lower[1]:
+                value = issue.updated or issue.created if field_name == "updated" else issue.created
+                stamp = value.replace("T", " ")
+                if lower and stamp < lower[2]:
                     continue
-                if upper and stamp >= upper[1]:
+                if upper and stamp >= upper[2]:
                     continue
                 rows.append((stamp, issue.as_payload(project.key)))
 
-        order = _ORDER_CLAUSE.search(jql)
-        rows.sort(key=lambda row: row[0], reverse=bool(order and order[1].upper() == "DESC"))
+        rows.sort(key=lambda row: row[0], reverse=bool(order and order[2].upper() == "DESC"))
         return [payload for _stamp, payload in rows]
 
     def _offset(

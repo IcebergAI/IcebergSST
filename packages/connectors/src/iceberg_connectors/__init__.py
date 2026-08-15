@@ -30,6 +30,7 @@ from iceberg_connectors.fake import FAKE_CONNECTOR_TYPE, FakeConnector, FakePage
 from iceberg_connectors.jira import JIRA_CONNECTOR_TYPE, JiraConnector
 from iceberg_connectors.protocol import (
     CONNECTOR_SDK_VERSION,
+    Checkpoint,
     Connector,
     ConnectorCapability,
     ConnectorError,
@@ -37,7 +38,10 @@ from iceberg_connectors.protocol import (
     ConnectorMetadata,
     CredentialError,
     FetchOutcome,
+    IncrementalConnector,
     RateLimitError,
+    ResumableConnector,
+    SourceCursor,
     TaskCoverage,
     TaskSpec,
 )
@@ -45,8 +49,10 @@ from iceberg_connectors.registry import UnknownConnectorError
 from iceberg_connectors.sandbox import ExtractionSandbox
 from iceberg_connectors.testing import (
     ConformanceCase,
+    assert_checkpoint_resume,
     assert_connector_conformance,
     assert_failure_contract,
+    assert_incremental_contract,
 )
 from iceberg_connectors.units import GLOB_FRIENDLY_KEYS, ContentOrigin, ContentUnit
 
@@ -58,6 +64,7 @@ __all__ = [
     "FAKE_CONNECTOR_TYPE",
     "GLOB_FRIENDLY_KEYS",
     "JIRA_CONNECTOR_TYPE",
+    "Checkpoint",
     "ConfluenceConnector",
     "ConformanceCase",
     "Connector",
@@ -76,14 +83,19 @@ __all__ = [
     "FakeConnector",
     "FakePage",
     "FetchOutcome",
+    "IncrementalConnector",
     "JiraConnector",
     "RateLimitError",
+    "ResumableConnector",
+    "SourceCursor",
     "TaskCoverage",
     "TaskSpec",
     "UnknownConnectorError",
     "__version__",
+    "assert_checkpoint_resume",
     "assert_connector_conformance",
     "assert_failure_contract",
+    "assert_incremental_contract",
     "classify",
     "extract_text",
 ]

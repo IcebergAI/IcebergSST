@@ -9,6 +9,8 @@ from iceberg_core.enums import (
     CoverageObjectKind,
     CoverageReason,
     CoverageState,
+    CursorInvalidationReason,
+    ScanMode,
     ScanStatus,
     ScanTaskKind,
     ScanTrigger,
@@ -69,7 +71,11 @@ class CoverageManifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    manifest_version: Literal["1"] = "1"
+    #: Bumped for #143. A ``complete`` **incremental** manifest means "everything
+    #: that changed since the baseline", not "everything" — so an exporter reading
+    #: a v1 manifest must not silently read a v2 one as full coverage. Stored v1
+    #: manifests still validate: the added fields default to what they described.
+    manifest_version: Literal["1", "2"] = "2"
     scan_id: uuid.UUID
     source_id: uuid.UUID
     scan_status: ScanStatus
@@ -83,3 +89,14 @@ class CoverageManifest(BaseModel):
     task_counts: CoverageTaskCounts
     gaps: list[CoverageManifestGap] = Field(max_length=MAX_COVERAGE_GAP_REFERENCES)
     gaps_omitted: int = Field(ge=0)
+
+    #: What this scan undertook to read (#143). The field that decides what a
+    #: ``complete`` coverage state is a claim *about*.
+    scan_mode: ScanMode = ScanMode.FULL
+    #: For an incremental scan, when the watermarks it consumed were minted — the
+    #: instant before which this scan looked at nothing.
+    incremental_baseline: UtcDatetime | None = None
+    #: Set when an incremental scan was run as a full one anyway, with the trigger,
+    #: so an unexpectedly long scan explains itself from its own manifest.
+    promoted_from: ScanMode | None = None
+    promotion_reason: CursorInvalidationReason | None = None

@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Index, UniqueConstraint
+from sqlalchemy import Index, UniqueConstraint, text
 from sqlmodel import Field
 
 from iceberg_core.enums import (
@@ -22,6 +22,26 @@ from iceberg_core.models.base import (
     enum_type,
     json_type,
     utc_timestamp_type,
+)
+
+#: System event kinds a single scan can only cause **once** for a finding, because
+#: each is a transition out of a state the same scan then leaves it in. Validation
+#: is deliberately absent: a scan whose tasks observe a credential changing status
+#: mid-run may legitimately record two, and a unique index over those would turn a
+#: truthful second observation into a failed results submission.
+IDEMPOTENT_SYSTEM_EVENTS: frozenset[FindingEventKind] = frozenset(
+    {FindingEventKind.STATE_CHANGE, FindingEventKind.REOPENED}
+)
+
+#: Built from the enum so the index and the code cannot drift apart, as the
+#: active-scan index is (`models/scans.py`).
+_IDEMPOTENT_SQL = ", ".join(f"'{kind.value}'" for kind in sorted(IDEMPOTENT_SYSTEM_EVENTS))
+
+#: Predicate for the finding-event idempotency index: a *system* event, caused by a
+#: known scan, of a kind that can only happen once per scan. Analyst rows carry an
+#: actor and no scan, and are unconstrained.
+_SYSTEM_EVENT_WHERE = text(
+    f"actor_id IS NULL AND scan_id IS NOT NULL AND kind IN ({_IDEMPOTENT_SQL})"
 )
 
 
@@ -132,6 +152,23 @@ class FindingEvent(IcebergModel, table=True):
     """
 
     __tablename__ = "finding_event"
+    __table_args__ = (
+        # One system event of a given kind per finding per scan (#143). Results
+        # ingest is idempotent for *findings* through the source/fingerprint
+        # unique constraint, but until this index existed nothing stopped a
+        # re-ingested batch appending a second identical reopen or auto-resolve
+        # row. Analyst events are exempt: two people may legitimately record the
+        # same transition, and their rows carry no scan.
+        Index(
+            "uq_finding_event_system_per_scan",
+            "finding_id",
+            "kind",
+            "scan_id",
+            unique=True,
+            postgresql_where=_SYSTEM_EVENT_WHERE,
+            sqlite_where=_SYSTEM_EVENT_WHERE,
+        ),
+    )
 
     finding_id: uuid.UUID = Field(foreign_key="finding.id", ondelete="CASCADE", index=True)
 
@@ -141,6 +178,16 @@ class FindingEvent(IcebergModel, table=True):
         foreign_key="app_user.id",
         ondelete="SET NULL",
     )
+
+    #: The scan that caused a system event, and null for an analyst action. It is
+    #: what makes a system event idempotent; see the partial index above. RESTRICT
+    #: for the same reason the finding's own scan columns are.
+    scan_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="scan.id",
+        ondelete="RESTRICT",
+    )
+
     kind: FindingEventKind = Field(sa_type=enum_type(FindingEventKind, name="finding_event_kind"))
     from_value: str | None = Field(default=None, max_length=255)
     to_value: str | None = Field(default=None, max_length=255)

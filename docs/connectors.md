@@ -98,6 +98,21 @@ fastest part of a scan into a serial prologue and produce a task table with a ro
 would skip or repeat results whenever content changes mid-scan — on a large space, missing secrets
 with no sign it happened.
 
+**Resume here is best-effort, and says so** (#143). Because that cursor is opaque and short-lived, a
+position cannot be stored and replayed; what is stored is the last page id, and a reclaimed task
+re-enumerates the listing until it turns up. The listing calls are paid again — the bodies, comments
+and attachments are not. If the page is gone, the enumeration runs to the end without finding it and
+the space is reported as a **scope gap** rather than as having read cleanly, which would have
+auto-resolved every finding in it.
+
+**Incremental narrowing skips pages; it does not stop early.** v2 has no `lastModified`, so
+`version.createdAt` is the only signal and a page the site declines to date has no comparable
+revision at all. Stopping at the first page older than the watermark would mean trusting `sort` to
+order the whole listing — and an undated page has no position in that order, so it could sit anywhere
+past the cutoff and never be looked at. The listing is enumerated to the end and pages are skipped
+individually: the listing calls are cheap and bounded, and what incremental scanning actually saves —
+the bodies, comments and attachments — is still saved.
+
 **The context path comes from the server, not from us.** Cloud serves the API under `/wiki` and
 returns `webui`/`downloadLink` relative to it, while Server/DC has no context path at all. The
 client learns `_links.base` from responses and resolves relative links through it rather than
@@ -202,11 +217,24 @@ from the clock — discovery must be reproducible, because the conformance kit r
 compares payloads. `created` is immutable, so an issue never migrates between windows and a boundary
 cannot cause a skip or a double-scan on a rescan.
 
-That windowing **is** the resume story: a reclaimed task re-runs one bounded window rather than a
-whole project (ADR 0009 restarts a spec from the top), and windows that already finished are not
-re-fetched. Within a window the connector pages by `nextPageToken`. This is *not* checkpointed
-resume — a window reclaimed at 90% re-reads from its first issue — so the connector does **not**
-declare `ConnectorCapability.CHECKPOINTS`. That contract is tracked separately in #143.
+Windowing bounds what an interruption costs; **checkpointing removes most of it** (#143). Within a
+window the connector publishes a resume position after each finished issue, so a reclaimed task
+restarts at the issue after the last one it completed rather than at the window's first. The boundary
+is a whole issue — body, comments, attachments, history — because a position taken between an issue's
+own units would let a resumed attempt start at the next issue and never read the rest of them.
+
+JQL resolves to the minute and orders on the date alone, so several issues can share a boundary value
+in an order Jira does not define. The whole boundary minute is therefore re-queried, and the position
+names the issues actually finished in it — nothing is skipped without that evidence. An id comparison
+would not do: a lower-numbered issue can be delivered *after* the one the checkpoint names.
+
+**An incremental scan narrows a project to one `updated` window instead.** `updated` is mutable, so
+an issue edited mid-scan moves forward in the order and is at worst read twice. The upper bound is
+probed *before* the `created` bounds, which is what closes the gap between them: anything created or
+edited after the probes has an `updated` beyond the bound and belongs to the next scan rather than
+falling between the two. The watermark handed to the *next* scan sits one minute behind that window's
+end, so the boundary minute is read twice rather than an edit landing later in it being read by
+neither scan.
 
 **Text.** Cloud v3 returns ADF (a JSON tree) and Data Center returns wiki markup (a string). Both
 flatten to prose through one accessor that dispatches on the *shape of the payload*, never on
@@ -234,6 +262,9 @@ space-shaped, so a 403 there means the credential.)
 - A rate-limited scan produces a partial manifest, which resolves nothing and sends no completion
   notification. That is correct fail-closed behaviour, but it means a chronically throttled Jira
   source never auto-resolves findings.
+- An incremental scan is one window per project rather than a laddered set. The changed set is
+  bounded by how often full scans are forced (`Source.full_scan_interval_days`), so a project cannot
+  accumulate an unbounded backlog of edits behind it.
 
 **Required permissions.** A read-only account that can *Browse Projects* on every project in scope.
 `GET /rest/api/3/myself` must answer for the connectivity check.

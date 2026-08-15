@@ -16,13 +16,22 @@ the database, none of which an engine has access to (ADR 0007/0009).
 Connectors are generators by contract. A source with fifty thousand pages must not
 have to exist in memory before detection sees the first one, and a task that is
 cancelled mid-fetch should stop fetching rather than finish and discard.
+
+SDK 1.1 adds two *optional* behaviours for #143, both declared as capabilities and
+neither changing a method signature — a signature change would be a major release,
+and an engine image must not mix connector majors (``docs/connector-sdk.md``):
+
+* :attr:`ConnectorCapability.CHECKPOINTS` — the connector can resume a fetch from a
+  position it published earlier, via :class:`FetchOutcome`.
+* :attr:`ConnectorCapability.INCREMENTAL` — the connector can narrow discovery to
+  what changed since a cursor the API minted from a previous complete scan.
 """
 
 import hashlib
 import hmac
 import json
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
@@ -39,7 +48,7 @@ from iceberg_core.enums import (
 from iceberg_connectors.units import ContentUnit
 
 _REFERENCE_DOMAIN = b"IcebergSST coverage reference v1\0"
-CONNECTOR_SDK_VERSION = "1.0"
+CONNECTOR_SDK_VERSION = "1.1"
 
 
 class ConnectorCapability(StrEnum):
@@ -50,7 +59,10 @@ class ConnectorCapability(StrEnum):
     ATTACHMENTS = "attachments"
     COMMENTS = "comments"
     GAP_REPORTING = "gap_reporting"
+    #: Fetch publishes resume positions and honours one handed back to it (#143).
     CHECKPOINTS = "checkpoints"
+    #: Discovery narrows to changed content when given a cursor (#143).
+    INCREMENTAL = "incremental"
     ANONYMOUS_AUTH = "anonymous_auth"
 
 
@@ -136,6 +148,66 @@ class TaskSpec:
         if "params" not in payload:
             return cls(label=str(payload.get("label", "fetch")), params=dict(payload))
         return cls(label=str(payload.get("label", "fetch")), params=dict(payload["params"]))
+
+
+@dataclass(frozen=True, slots=True)
+class Checkpoint:
+    """A position within one fetch that the connector can restart from (#143).
+
+    A checkpoint means something narrower than "how far I got": it is a boundary
+    at which **every unit before it has already been yielded**, so a resumed fetch
+    that starts here can neither repeat nor skip. A connector that cannot make that
+    promise at a given moment must not publish one there.
+
+    ``version`` belongs to the connector, not the SDK. A connector that changes how
+    it resumes bumps its own version, and the engine discards a stored checkpoint
+    it no longer understands rather than misreading it as a position.
+
+    ``position`` is plain JSON and is persisted by the API. It may hold a provider
+    cursor — a bearer-ish token for a place in a result set — so it is never logged
+    and never leaves the control plane. It must never hold a credential or source
+    content; the conformance kit scans it for both.
+    """
+
+    version: str
+    position: dict[str, Any] = field(default_factory=dict)
+
+    def as_payload(self) -> dict[str, Any]:
+        return {"version": self.version, "position": self.position}
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any] | None) -> Checkpoint | None:
+        """Rebuild a checkpoint from the lease, or ``None`` if it is unusable.
+
+        Tolerant on purpose: an unreadable checkpoint costs a task a restart from
+        the top, which is exactly today's behaviour, whereas raising would fail a
+        task over stored state it could simply ignore.
+        """
+        if not isinstance(payload, Mapping):
+            return None
+        version = payload.get("version")
+        position = payload.get("position")
+        if not isinstance(version, str) or not version or not isinstance(position, Mapping):
+            return None
+        return cls(version=version, position=dict(position))
+
+
+@dataclass(frozen=True, slots=True)
+class SourceCursor:
+    """What a completed scope proposes as the starting point for the next scan.
+
+    Scoped rather than source-wide: spaces and projects complete independently, so
+    a scope whose tasks failed simply does not advance and gets re-read next time.
+    The API commits a proposal only when the whole scan reached ``completed`` with
+    complete coverage, so a partial scan can never move a watermark forward.
+    """
+
+    scope: str
+    version: str
+    position: dict[str, Any] = field(default_factory=dict)
+
+    def as_payload(self) -> dict[str, Any]:
+        return {"scope": self.scope, "version": self.version, "position": self.position}
 
 
 @dataclass(slots=True)
@@ -308,7 +380,14 @@ class FetchOutcome:
     skipped: int = 0
     #: Resources that should have been readable and were not.
     failed: int = 0
+    #: Where a previous attempt of this task got to, if the API had one to hand
+    #: back. Appended rather than inserted so positional construction still works.
+    resume_from: Checkpoint | None = None
     coverage: TaskCoverage = field(init=False)
+    #: The most recent boundary the connector published this run.
+    checkpoint: Checkpoint | None = field(init=False, default=None)
+    #: What this scope proposes as the next scan's starting point.
+    cursor: SourceCursor | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         self.coverage = TaskCoverage(phase=ScanTaskKind.FETCH, reference_key=self.reference_key)
@@ -347,6 +426,25 @@ class FetchOutcome:
         reference: object,
     ) -> None:
         self.coverage.scanned_but_incomplete(reason, kind, reference)
+
+    def checkpoint_at(self, version: str, position: Mapping[str, Any]) -> None:
+        """Publish a boundary this fetch could be restarted from (#143).
+
+        Call it only where every unit before the boundary has already been yielded.
+        The engine may flush findings and persist this position at any point after
+        the call, and a later attempt will resume here — so publishing early, "to
+        be safe", is precisely how content gets skipped.
+        """
+        self.checkpoint = Checkpoint(version=version, position=dict(position))
+
+    def cursor_at(self, scope: str, version: str, position: Mapping[str, Any]) -> None:
+        """Propose where the *next* scan of this scope should start (#143).
+
+        Only a proposal. The API stores it if — and only if — the whole scan
+        reaches ``completed`` with complete coverage, so a connector does not have
+        to reason about whether the rest of the scan succeeded.
+        """
+        self.cursor = SourceCursor(scope=scope, version=version, position=dict(position))
 
     def as_counts(self) -> dict[str, int]:
         """The shape merged into the scan's counts by results ingest."""
@@ -395,6 +493,59 @@ class Connector(Protocol):
 
         ``outcome`` is passed in rather than returned because this is a generator:
         the caller needs the tallies even if it stops consuming early, which a
-        return value could not give it.
+        return value could not give it. It is also how a connector receives a
+        resume point and publishes new ones (:attr:`FetchOutcome.resume_from`,
+        :meth:`FetchOutcome.checkpoint_at`) without a signature change.
         """
         ...
+
+
+@runtime_checkable
+class IncrementalConnector(Protocol):
+    """A connector that can narrow discovery to changed content (#143).
+
+    Published for implementers to type against. The engine does **not** use it for
+    dispatch: :func:`isinstance` against a runtime-checkable Protocol only checks
+    that a method exists, not that it takes ``cursors``, so a connector written
+    against SDK 1.0 would pass the check and then fail on the call. The engine
+    branches on the declared :attr:`ConnectorCapability.INCREMENTAL` instead.
+    """
+
+    def discover(
+        self,
+        connection: dict[str, Any],
+        credential: str | None,
+        *,
+        cursors: Mapping[str, Any] | None = None,
+    ) -> Iterator[TaskSpec]:
+        """Split a source into fetch specs, optionally only where it changed.
+
+        ``cursors`` maps a scope identifier to the position the API last committed
+        for it. A scope absent from the mapping has no watermark and must be
+        enumerated in full. ``None`` means scan everything, which is what every
+        caller passes for a full scan.
+
+        Discovery stays deterministic for an unchanged source and an unchanged
+        ``cursors`` mapping: the conformance kit runs it twice and compares.
+        """
+        ...
+
+
+@runtime_checkable
+class ResumableConnector(Protocol):
+    """A connector whose fetch can restart from a published boundary (#143).
+
+    Same caveat as :class:`IncrementalConnector`: for implementers, not dispatch.
+    The contract lives entirely on :class:`FetchOutcome`, so the signature is the
+    ordinary one — what makes a connector resumable is that it reads
+    ``outcome.resume_from`` before enumerating and calls ``outcome.checkpoint_at``
+    at boundaries it can honestly restart from.
+    """
+
+    def fetch(
+        self,
+        connection: dict[str, Any],
+        spec: TaskSpec,
+        credential: str | None,
+        outcome: FetchOutcome,
+    ) -> Iterator[ContentUnit]: ...

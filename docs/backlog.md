@@ -72,8 +72,12 @@ Confluence-scan-to-triaged-finding flow). M3–M4 complete the product.
   with Confluence via `iceberg_connectors.http`, which is also where the 401-vs-403 split lives —
   Jira permissions are per-issue, so a 403 is one object rather than the site.
   See [`connectors.md`](./connectors.md) § Jira.
-- **Epic: Incremental & resumable scanning (#143)** — connector cursors, durable checkpoints, and
-  the `CHECKPOINTS` capability, which no connector may declare until it lands.
+- **Epic: Incremental & resumable scanning (#143)** *(shipped)* — durable checkpoints via batched
+  result submission (`POST /scan-tasks/{id}/progress`), per-scope source cursors, and SDK 1.1's
+  `CHECKPOINTS`/`INCREMENTAL` capabilities, both declared by Confluence and Jira. The load-bearing
+  rule: an incremental scan **never** auto-resolves, and the API promotes one to a full scan whenever
+  a watermark cannot be trusted — which is what makes the periodic full reconciliation a guarantee
+  rather than a convention. See [`adr/0013-incremental-scanning.md`](./adr/0013-incremental-scanning.md).
 - **Epic: SMB/NFS file-share connector (#145)**.
 
 ## M6 — Remediation and exposure closure
@@ -89,5 +93,5 @@ Confluence-scan-to-triaged-finding flow). M3–M4 complete the product.
   its remediation history intact.
 
 ## MVP non-goals
-SMB connectors, incremental/delta scanning, image OCR, external ticket creation,
-multi-tenancy.
+SMB connectors, image OCR, external ticket creation, multi-tenancy. (Incremental/delta scanning
+was an MVP non-goal and shipped in M5 as #143.)

@@ -88,6 +88,7 @@ async def create_schedule(
         source_id=body.source_id,
         cron=body.cron,
         enabled=body.enabled,
+        mode=body.mode,
         next_run_at=next_fire_time(body.cron, now) if body.enabled else None,
     )
     db.add(schedule)
@@ -125,6 +126,10 @@ async def update_schedule(
     if changes.enabled is not None and changes.enabled != schedule.enabled:
         schedule.enabled = changes.enabled
         changed.append("enabled")
+
+    if changes.mode is not None and changes.mode != schedule.mode:
+        schedule.mode = changes.mode
+        changed.append("mode")
 
     if changed:
         # Recomputed from now, not from the old next_run_at: a schedule re-enabled

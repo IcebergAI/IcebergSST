@@ -11,7 +11,7 @@ tallies skips, and can be told to fail in the specific ways a real source does �
 because a double that cannot fail only ever proves the happy path works.
 """
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,6 +29,14 @@ from iceberg_connectors.units import ContentOrigin, ContentUnit
 
 FAKE_CONNECTOR_TYPE = "fake"
 
+#: The fake's own resume protocol version, independent of the SDK's (#143).
+FAKE_CHECKPOINT_VERSION = "1"
+
+#: Stand-in for "the caller did not supply metadata", so `__post_init__` can fold
+#: the `resumable`/`incremental` flags into the declared capability set. Frozen, so
+#: sharing one instance across every default-constructed fake is safe.
+_PLACEHOLDER_METADATA = ConnectorMetadata(connector_type=FAKE_CONNECTOR_TYPE)
+
 
 @dataclass(slots=True)
 class FakePage:
@@ -44,6 +52,10 @@ class FakePage:
     unreadable: bool = False
     #: Counted as skipped rather than scanned — an image, an unsupported format.
     skip: bool = False
+    #: A monotonic revision tick, not a wall clock: incremental discovery has to
+    #: be reproducible, and anything keyed on `now` differs between the two
+    #: `discover()` calls the conformance kit compares.
+    revision: int = 0
 
 
 @dataclass(slots=True)
@@ -57,22 +69,41 @@ class FakeConnector:
     expected_credential: str | None = None
     #: Raise from `discover`, as an unreachable source would.
     discovery_fails: bool = False
+    #: Declare CHECKPOINTS and honour `outcome.resume_from` (#143). Off by default
+    #: so a case that has not opted in keeps the pre-1.1 capability list.
+    resumable: bool = False
+    #: Declare INCREMENTAL and accept a `cursors` mapping in discovery (#143).
+    incremental: bool = False
 
     connector_type: str = FAKE_CONNECTOR_TYPE
-    metadata: ConnectorMetadata = field(
-        default_factory=lambda: ConnectorMetadata(
-            connector_type=FAKE_CONNECTOR_TYPE,
-            capabilities=frozenset(
-                {
-                    ConnectorCapability.DISCOVERY,
-                    ConnectorCapability.GAP_REPORTING,
-                    ConnectorCapability.ANONYMOUS_AUTH,
-                }
-            ),
-        )
-    )
+    #: Replaced in `__post_init__` unless the caller supplied their own. Identity,
+    #: not equality: a caller may legitimately pass metadata equal to the default.
+    metadata: ConnectorMetadata = _PLACEHOLDER_METADATA
 
-    def discover(self, connection: dict[str, Any], credential: str | None) -> Iterator[TaskSpec]:
+    def __post_init__(self) -> None:
+        if self.metadata is not _PLACEHOLDER_METADATA:
+            return
+        capabilities = {
+            ConnectorCapability.DISCOVERY,
+            ConnectorCapability.GAP_REPORTING,
+            ConnectorCapability.ANONYMOUS_AUTH,
+        }
+        if self.resumable:
+            capabilities.add(ConnectorCapability.CHECKPOINTS)
+        if self.incremental:
+            capabilities.add(ConnectorCapability.INCREMENTAL)
+        self.metadata = ConnectorMetadata(
+            connector_type=FAKE_CONNECTOR_TYPE,
+            capabilities=frozenset(capabilities),
+        )
+
+    def discover(
+        self,
+        connection: dict[str, Any],
+        credential: str | None,
+        *,
+        cursors: Mapping[str, Any] | None = None,
+    ) -> Iterator[TaskSpec]:
         if self.discovery_fails:
             raise ConnectionError("fake source is unreachable")
         self._check_credential(credential)
@@ -83,7 +114,18 @@ class FakeConnector:
         for space in sorted(self.spaces):
             if wanted and space not in wanted:
                 continue
-            yield TaskSpec(label=f"space {space}", params={"space": space})
+            since = self._since(space, cursors)
+            if since is not None and not any(
+                page.revision > since for page in self.spaces.get(space, [])
+            ):
+                # Nothing in this space changed. Yielding no spec at all is what
+                # makes an incremental scan cheap — and why it must never be
+                # allowed to auto-resolve.
+                continue
+            params: dict[str, Any] = {"space": space}
+            if since is not None:
+                params["since_revision"] = since
+            yield TaskSpec(label=f"space {space}", params=params)
 
     def fetch(
         self,
@@ -94,8 +136,22 @@ class FakeConnector:
     ) -> Iterator[ContentUnit]:
         self._check_credential(credential)
         space = str(spec.params.get("space", ""))
+        since = spec.params.get("since_revision")
+        pages = [
+            page
+            for page in self.spaces.get(space, [])
+            if not isinstance(since, int) or page.revision > since
+        ]
+        skip_until = self._resume_after(outcome)
 
-        for page in self.spaces.get(space, []):
+        for page in pages:
+            if skip_until is not None:
+                # Already yielded, already ingested by an earlier attempt's batch.
+                # Re-counting it here would double it in the merged coverage.
+                if page.resource_id == skip_until:
+                    skip_until = None
+                continue
+
             if page.skip:
                 outcome.skipped_for(
                     CoverageReason.UNSUPPORTED_TYPE,
@@ -124,6 +180,39 @@ class FakeConnector:
                 origin=page.origin,
                 display={"space": space, **page.display},
             )
+            if self.resumable:
+                # After the yield, never before: the boundary has to mean "this one
+                # is out", or a resume here would skip it.
+                outcome.checkpoint_at(FAKE_CHECKPOINT_VERSION, {"after": page.resource_id})
+
+        if self.incremental and pages:
+            outcome.cursor_at(
+                space,
+                FAKE_CHECKPOINT_VERSION,
+                {"revision": max(page.revision for page in pages)},
+            )
+
+    def _resume_after(self, outcome: FetchOutcome) -> str | None:
+        """The resource the last attempt finished on, if we can still trust it."""
+        resume = outcome.resume_from
+        if not self.resumable or resume is None:
+            return None
+        if resume.version != FAKE_CHECKPOINT_VERSION:
+            # A checkpoint from a resume protocol this build no longer speaks.
+            # Restarting the spec costs a re-read; guessing costs correctness.
+            return None
+        after = resume.position.get("after")
+        return after if isinstance(after, str) and after else None
+
+    def _since(self, space: str, cursors: Mapping[str, Any] | None) -> int | None:
+        """The revision this space was last scanned through, if it has a cursor."""
+        if not self.incremental or not cursors:
+            return None
+        position = cursors.get(space)
+        if not isinstance(position, Mapping):
+            return None
+        revision = position.get("revision")
+        return revision if isinstance(revision, int) else None
 
     def _check_credential(self, credential: str | None) -> None:
         if self.expected_credential is not None and credential != self.expected_credential:

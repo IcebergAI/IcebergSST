@@ -16,7 +16,7 @@ from typing import Any, Self
 from urllib.parse import urlsplit, urlunsplit
 
 from croniter import croniter
-from iceberg_core.enums import SourceType
+from iceberg_core.enums import ScanMode, SourceType
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -302,6 +302,10 @@ class ScheduleCreate(BaseModel):
     source_id: uuid.UUID
     cron: str = Field(min_length=1, max_length=128)
     enabled: bool = True
+    #: What this cadence asks for. The API promotes it to a full scan whenever the
+    #: source's watermarks cannot be trusted, so asking for incremental can make
+    #: scans cheaper but can never stop reconciliation happening (#143).
+    mode: ScanMode = ScanMode.FULL
 
     @field_validator("cron")
     @classmethod
@@ -319,6 +323,7 @@ class ScheduleUpdate(BaseModel):
 
     cron: str | None = Field(default=None, min_length=1, max_length=128)
     enabled: bool | None = None
+    mode: ScanMode | None = None
 
     @model_validator(mode="after")
     def _valid_cron(self) -> ScheduleUpdate:
@@ -336,6 +341,7 @@ class ScheduleRead(BaseModel):
     source_id: uuid.UUID
     cron: str
     enabled: bool
+    mode: ScanMode
     next_run_at: UtcDatetime | None
     last_run_at: UtcDatetime | None
     created_at: UtcDatetime

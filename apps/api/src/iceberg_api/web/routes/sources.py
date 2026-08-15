@@ -18,10 +18,17 @@ from iceberg_api.auth.dependencies import CsrfProtected, SecretStoreDep, Session
 from iceberg_api.pagination import DEFAULT_LIMIT
 from iceberg_api.scans.routes import list_scans, read_source_coverage
 from iceberg_api.sources import routes as api
+from iceberg_api.sources.cursor_routes import invalidate_source_cursors, read_source_cursors
 from iceberg_api.sources.routes import ProberDep
 from iceberg_api.sources.schedule_routes import list_schedules
 from iceberg_api.sources.schemas import SourceCreate, SourceRead, SourceUpdate
-from iceberg_api.web.dependencies import CurrentViewer, Viewer, WebAdmin, WebViewer
+from iceberg_api.web.dependencies import (
+    CurrentViewer,
+    Viewer,
+    WebAdmin,
+    WebAnalyst,
+    WebViewer,
+)
 from iceberg_api.web.forms import checkbox, error_text, optional, string_list
 from iceberg_api.web.templating import hx_redirect, render_fragment, render_page
 
@@ -319,6 +326,42 @@ async def test_source(
             request, "connectivity.html", viewer, {"result": None, "error": error_text(exc)}
         )
     return render_fragment(request, "connectivity.html", viewer, {"result": result, "error": None})
+
+
+@router.get("/sources/{source_id}/cursors")
+async def source_cursors_panel(
+    request: Request,
+    source_id: uuid.UUID,
+    viewer: CurrentViewer,
+    user: WebAnalyst,
+    db: SessionDep,
+) -> Response:
+    """What this source has read incrementally (#143).
+
+    Its own route rather than part of the detail page because the cursor API is
+    analyst-only while the detail page is viewer-accessible. Weakening the API's
+    dependency to fit the page would have moved the RBAC decision into the console,
+    which is exactly what invariant 4 forbids.
+    """
+    watermarks = await read_source_cursors(source_id=source_id, analyst=user, db=db)
+    return render_fragment(request, "source_cursors.html", viewer, {"watermarks": watermarks})
+
+
+@router.delete("/sources/{source_id}/cursors", dependencies=[CsrfProtected])
+async def drop_source_cursors(
+    request: Request,
+    source_id: uuid.UUID,
+    viewer: CurrentViewer,
+    admin: WebAdmin,
+    db: SessionDep,
+) -> Response:
+    """Force the next scan of this source to be a full one."""
+    # No local error handling: the only failure is a 404 for a source that cannot
+    # have gone missing between rendering this page and clicking the button, and the
+    # shell already retargets a genuine 4xx into its error region.
+    await invalidate_source_cursors(source_id=source_id, admin=admin, db=db)
+    watermarks = await read_source_cursors(source_id=source_id, analyst=admin, db=db)
+    return render_fragment(request, "source_cursors.html", viewer, {"watermarks": watermarks})
 
 
 def _form_error(

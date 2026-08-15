@@ -102,6 +102,14 @@ class Page:
     #: Independently omit it from the detail response to model a malformed 200.
     body_in_detail: bool = True
     body_representation: str = "storage"
+    #: When this revision was published. v2 returns a `version` object on every
+    #: page, and its `createdAt` is the only "when did this change" signal the API
+    #: offers — there is no `lastModified` on a v2 page.
+    version_created_at: str = "2024-01-01T00:00:00.000Z"
+    version_number: int = 1
+    #: Omit `version` entirely, as a deployment predating it would. Unknown, which
+    #: an incremental scan must treat as "read it" rather than "skip it".
+    include_version: bool = True
 
     def as_payload(self, space_id: str, *, with_body: bool) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -111,6 +119,11 @@ class Page:
             "status": "current",
             "_links": {"webui": f"/spaces/SPACE/pages/{self.id}/{self.title}"},
         }
+        if self.include_version:
+            payload["version"] = {
+                "createdAt": self.version_created_at,
+                "number": self.version_number,
+            }
         if with_body:
             payload["body"] = {
                 self.body_representation: {
@@ -179,6 +192,9 @@ class FakeConfluence:
 
     requests: list[httpx2.Request] = field(default_factory=list)
     throttled: int = 0
+    #: Every `sort` the site was actually asked for, so a test of the opt-in can
+    #: prove it reached the server rather than being applied to the response.
+    sorts_requested: list[str] = field(default_factory=list)
 
     # ─── Transport ────────────────────────────────────────────────────────────
 
@@ -243,8 +259,19 @@ class FakeConfluence:
             space = self._space(match[1])
             if space is None:
                 return httpx2.Response(404, json={"errors": ["no such space"]})
+            pages = list(space.pages)
+            # `sort` is opt-in upstream: without it the order is the site's own and
+            # a connector that assumed newest-first would be reading whatever came
+            # back. Honoured here so a test of the opt-in fails when it is not sent.
+            sort = str(params.get("sort") or "")
+            if sort in ("-modified-date", "modified-date"):
+                pages.sort(
+                    key=lambda page: page.version_created_at,
+                    reverse=sort.startswith("-"),
+                )
+                self.sorts_requested.append(sort)
             return self._collection(
-                [p.as_payload(space.id, with_body=p.body_in_list) for p in space.pages],
+                [p.as_payload(space.id, with_body=p.body_in_list) for p in pages],
                 path,
                 params,
             )
@@ -336,8 +363,19 @@ class FakeConfluence:
             # not consistent about it, and a client that prepended the context to
             # this one would ask for `/wiki/wiki/api/v2`. That inconsistency is a
             # fixture detail worth keeping, because it is the real one.
+            #
+            # The sort rides along because a cursor is a position *in a result set*,
+            # and a result set is defined by its ordering. Real v2 encodes the query
+            # into the cursor; dropping it here would page the second request
+            # against a differently-ordered list, silently repeating some rows and
+            # skipping others — which is exactly the bug an opaque cursor exists to
+            # make impossible, so the fake has to model it.
+            sort = str(params.get("sort") or "")
+            ordering = f"&sort={sort}" if sort else ""
             body["_links"] = {
-                "next": f"/wiki/api/v2{path}?cursor=cursor-{start + limit}&limit={limit}"
+                "next": (
+                    f"/wiki/api/v2{path}?cursor=cursor-{start + limit}&limit={limit}{ordering}"
+                )
             }
         return httpx2.Response(200, json=self._with_base(body))
 

@@ -62,8 +62,9 @@ deterministic and unique task identity, discovery/fetch streaming, coverage reco
 evidence, JSON serialization, and that supplied secret/content sentinels do not cross the
 connector's public metadata, task-spec, or coverage boundary. Connector-specific shared fixtures
 remain required for redirects, multi-page cursors, bounded retry exhaustion, authorization
-failures, malformed responses, size/output limits, partial reads, and (when the capability ships)
-checkpoint restoration. The Confluence suite demonstrates these network fixtures; the fake
+failures, malformed responses, size/output limits, partial reads, and checkpoint restoration.
+`assert_checkpoint_resume` and `assert_incremental_contract` cover the last two: both are gated on
+the declared capability, so a case may call them unconditionally. The Confluence suite demonstrates these network fixtures; the fake
 connector demonstrates the complete base contract without a network.
 
 ## Compatibility policy
@@ -74,8 +75,30 @@ connector demonstrates the complete base contract without a network.
 - A minor SDK release may add optional capabilities or helpers without changing existing behavior.
 - A major SDK release may change method signatures, required capabilities, or serialized contracts.
   An engine image must not mix incompatible connector majors.
-- Capabilities describe implemented behavior; they are not permissions. `CHECKPOINTS` is reserved
-  for the resumable-scan work and must not be declared until the connector implements that contract.
+- Capabilities describe implemented behavior; they are not permissions. Declaring one is a promise
+  the conformance kit then holds you to — `CHECKPOINTS` means `assert_checkpoint_resume` passes,
+  `INCREMENTAL` means `assert_incremental_contract` does.
+
+## Resumable and incremental connectors (SDK 1.1)
+
+Both are optional, both ride on `FetchOutcome`, and neither changes a method signature.
+
+**`CHECKPOINTS`.** Read `outcome.resume_from` before enumerating; call
+`outcome.checkpoint_at(version, position)` at a boundary you can honestly restart from. A checkpoint
+means something narrower than "how far I got": it is a point at which *every unit before it has
+already been yielded*. Publish one only after a whole object and its parts — an issue and its
+comments, a page and its attachments — or a resumed attempt will skip the rest of them. `version` is
+yours, not the SDK's; bump it when the meaning of a position changes, and the engine will discard
+positions it no longer understands rather than misread them.
+
+**`INCREMENTAL`.** Accept `cursors: Mapping[str, Any] | None = None` on `discover` and narrow to what
+changed. A scope absent from the mapping has no watermark and must be enumerated in full. Call
+`outcome.cursor_at(scope, version, position)` to propose the next watermark; the API stores it only
+if the whole scan completes with complete coverage, so you do not have to reason about whether the
+rest of the scan succeeded.
+
+Discovery must stay deterministic **with** a cursor as well as without one: the kit runs it twice and
+compares. Derive bounds from the source's own data, never from the clock.
 
 The registry's `capability_manifest()` is a content-free inventory suitable for engine diagnostics.
 It contains connector type, SDK version, and capability names only.

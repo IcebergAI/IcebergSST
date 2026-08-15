@@ -28,6 +28,46 @@ class ScanTrigger(StrEnum):
     SCHEDULED = "scheduled"
 
 
+class ScanMode(StrEnum):
+    """How much of a source one scan undertook to read (#143).
+
+    The distinction is load-bearing rather than informational: a ``FULL`` scan's
+    absence of a finding is evidence the secret is gone, and reconciliation
+    auto-resolves on it. An ``INCREMENTAL`` scan deliberately never looked at
+    unchanged content, so the same absence means nothing and must never resolve
+    anything (ADR 0013).
+    """
+
+    FULL = "full"
+    INCREMENTAL = "incremental"
+
+
+class CursorInvalidationReason(StrEnum):
+    """Why an incremental scan was promoted to a full one, or a cursor dropped.
+
+    Operator-facing and part of the coverage manifest, so these are stable values
+    rather than free text: "why am I paying for a full scan again?" has to be
+    answerable from an exported manifest months later.
+    """
+
+    #: This scope has never completed a scan, so nothing has been read.
+    NO_CURSOR = "no_cursor"
+    #: Scope filters or the base URL moved; the old watermark covers other content.
+    SOURCE_CONFIGURATION_CHANGED = "source_configuration_changed"
+    #: New rules must see content the old rules already passed over.
+    RULEPACK_CHANGED = "rulepack_changed"
+    #: Fingerprints move during a pepper rotation, so nothing would match.
+    PEPPER_ROTATING = "pepper_rotating"
+    #: The periodic full reconciliation this source is configured for came due.
+    INTERVAL_ELAPSED = "interval_elapsed"
+    #: The connector does not declare `INCREMENTAL`; full is the only honest scan.
+    CONNECTOR_UNSUPPORTED = "connector_unsupported"
+    #: An operator asked for the cursor to be dropped.
+    OPERATOR_REQUESTED = "operator_requested"
+    #: The source itself refused the stored position — an expired change token.
+    SOURCE_REJECTED_CURSOR = "source_rejected_cursor"
+
+
 class ScanStatus(StrEnum):
     QUEUED = "queued"
     DISCOVERING = "discovering"

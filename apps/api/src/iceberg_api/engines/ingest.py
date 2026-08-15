@@ -20,6 +20,7 @@ never overwritten by a scan, but an *automatic* resolution is, because that was 
 ever an inference from absence.
 """
 
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -214,7 +215,7 @@ def _create(
     )
     db.add(finding)
     db.flush()
-    _record_validation(db, finding, payload, from_status=None, at=at)
+    _record_validation(db, finding, payload, from_status=None, scan_id=scan.id, at=at)
     if suppression is not None:
         suppressions.suppress(db, finding, suppression, at=at)
     return finding
@@ -263,7 +264,9 @@ def _refresh(
             payload.validation.reason,
         )
         if current_validation_identity != prior_validation_identity:
-            _record_validation(db, finding, payload, from_status=prior_validation, at=at)
+            _record_validation(
+                db, finding, payload, from_status=prior_validation, scan_id=scan.id, at=at
+            )
 
     reopened = False
     if finding.state is FindingState.RESOLVED:
@@ -279,6 +282,9 @@ def _refresh(
             FindingEvent(
                 finding_id=finding.id,
                 actor_id=None,
+                # Idempotent per scan by index: a batched task that re-reports the
+                # same finding cannot append a second reopen.
+                scan_id=scan.id,
                 kind=FindingEventKind.REOPENED,
                 from_value=FindingState.RESOLVED.value,
                 to_value=FindingState.OPEN.value,
@@ -304,6 +310,7 @@ def _record_validation(
     payload: FindingPayload,
     *,
     from_status: ValidationStatus | None,
+    scan_id: uuid.UUID,
     at: datetime,
 ) -> None:
     """Persist structured metadata and its content-free status transition."""
@@ -321,6 +328,10 @@ def _record_validation(
         FindingEvent(
             finding_id=finding.id,
             actor_id=None,
+            # Provenance only. Validation is *not* in the idempotency index: a scan
+            # whose tasks see a credential change status mid-run may truthfully
+            # record two, and constraining that would fail the submission.
+            scan_id=scan_id,
             kind=FindingEventKind.VALIDATION,
             from_value=getattr(from_status, "value", None),
             to_value=result.status.value,

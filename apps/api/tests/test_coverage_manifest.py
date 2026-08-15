@@ -12,6 +12,8 @@ from iceberg_api.scans import service
 from iceberg_api.scans.coverage import failure_report
 from iceberg_core.enums import (
     CoverageReason,
+    CursorInvalidationReason,
+    ScanMode,
     ScanStatus,
     ScanTaskKind,
     ScanTaskStatus,
@@ -178,7 +180,7 @@ def test_every_terminal_state_has_an_explicit_manifest(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["manifest_version"] == "1"
+    assert body["manifest_version"] == "2"
     assert body["scan_status"] == scan_status.value
     assert body["coverage_state"] == coverage_state
     assert body["task_counts"]["total"] == 1
@@ -413,3 +415,48 @@ def test_cancel_freezes_cancelled_evidence_for_unfinished_tasks(
     assert task.coverage["reasons"][0]["reason"] == "cancelled"
     assert scan.coverage_manifest["coverage_state"] == "cancelled"
     assert scan.coverage_manifest["task_counts"]["cancelled"] == 1
+
+
+def test_a_manifest_says_which_mode_the_scan_ran_in(
+    client: TestClient, session: Session, login_as: Any, make_user: Any
+) -> None:
+    """A `complete` incremental manifest means "everything that changed", not
+    "everything" — so an exporter has to be able to tell the two apart (#143)."""
+    login_as(make_user(UserRole.VIEWER))
+    scan = _terminal_scan(
+        session,
+        _source(session, marker="mode"),
+        ScanStatus.COMPLETED,
+        _coverage(ScanTaskKind.FETCH, scanned=1),
+    )
+    scan.mode = ScanMode.INCREMENTAL
+    scan.incremental_baseline_at = datetime(2026, 8, 1, tzinfo=UTC)
+    session.add(scan)
+    session.commit()
+
+    body = client.get(f"/api/v1/scans/{scan.id}/coverage").json()
+
+    assert body["scan_mode"] == "incremental"
+    assert body["incremental_baseline"].startswith("2026-08-01")
+
+
+def test_a_promoted_scan_explains_itself_from_its_own_manifest(
+    client: TestClient, session: Session, login_as: Any, make_user: Any
+) -> None:
+    login_as(make_user(UserRole.VIEWER))
+    scan = _terminal_scan(
+        session,
+        _source(session, marker="promo"),
+        ScanStatus.COMPLETED,
+        _coverage(ScanTaskKind.FETCH, scanned=1),
+    )
+    scan.promoted_from = ScanMode.INCREMENTAL
+    scan.promotion_reason = CursorInvalidationReason.INTERVAL_ELAPSED
+    session.add(scan)
+    session.commit()
+
+    body = client.get(f"/api/v1/scans/{scan.id}/coverage").json()
+
+    assert body["scan_mode"] == "full"
+    assert body["promoted_from"] == "incremental"
+    assert body["promotion_reason"] == "interval_elapsed"
