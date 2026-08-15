@@ -571,3 +571,26 @@ def test_validation_events_are_outside_the_index_by_design(
         select(FindingEvent).where(FindingEvent.kind == FindingEventKind.VALIDATION)
     ).all()
     assert len(events) == 2
+
+
+def test_a_scope_whose_cursor_was_retired_can_mint_a_new_one(
+    session: Session, dispatcher: RecordingDispatcher
+) -> None:
+    """Retirement keeps the row, and `(source_id, scope)` is unique across live and
+    retired alike — so a later scan of the same scope must *revive* that row rather
+    than insert beside it. This is the ordinary path, not an edge case: every
+    promotion retires a cursor, and the full scan it promoted to then proposes a
+    replacement for the same scope."""
+    scan, _finding = _completed_scan_with_a_stale_finding(session, dispatcher, mode=ScanMode.FULL)
+    source = session.get(Source, scan.source_id)
+    assert source is not None
+    _cursor(session, source, _scan(session, source), scope="DOCS")
+    cursors.invalidate(session, source.id, CursorInvalidationReason.OPERATOR_REQUESTED)
+    session.commit()
+
+    service.finalize_and_reconcile(session, scan.id)
+
+    rows = session.exec(select(SourceCursor).where(SourceCursor.scope == "DOCS")).all()
+    assert len(rows) == 1
+    assert rows[0].invalidated_at is None
+    assert rows[0].position == {"version": "1", "modified": "2024-06"}

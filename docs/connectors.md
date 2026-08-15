@@ -105,11 +105,13 @@ and attachments are not. If the page is gone, the enumeration runs to the end wi
 the space is reported as a **scope gap** rather than as having read cleanly, which would have
 auto-resolved every finding in it.
 
-**Incremental narrowing depends on an ordering the site provides.** v2 has no `lastModified`;
-`version.createdAt` is the only signal, and stopping early relies on `sort=-modified-date` meaning
-what it says. A page arriving with no `version` has no place in that order, so the narrowing is
-abandoned for the whole space and everything is read. An incremental scan that costs a full one is a
-bad trade, and still the right one against skipping content silently.
+**Incremental narrowing skips pages; it does not stop early.** v2 has no `lastModified`, so
+`version.createdAt` is the only signal and a page the site declines to date has no comparable
+revision at all. Stopping at the first page older than the watermark would mean trusting `sort` to
+order the whole listing — and an undated page has no position in that order, so it could sit anywhere
+past the cutoff and never be looked at. The listing is enumerated to the end and pages are skipped
+individually: the listing calls are cheap and bounded, and what incremental scanning actually saves —
+the bodies, comments and attachments — is still saved.
 
 **The context path comes from the server, not from us.** Cloud serves the API under `/wiki` and
 returns `webui`/`downloadLink` relative to it, while Server/DC has no context path at all. The
@@ -222,14 +224,17 @@ is a whole issue — body, comments, attachments, history — because a position
 own units would let a resumed attempt start at the next issue and never read the rest of them.
 
 JQL resolves to the minute and orders on the date alone, so several issues can share a boundary value
-in an order Jira does not define. The tie is broken towards **re-reading**: a duplicate dedupes on
-fingerprint, whereas a skipped issue is a secret nobody reports.
+in an order Jira does not define. The whole boundary minute is therefore re-queried, and the position
+names the issues actually finished in it — nothing is skipped without that evidence. An id comparison
+would not do: a lower-numbered issue can be delivered *after* the one the checkpoint names.
 
 **An incremental scan narrows a project to one `updated` window instead.** `updated` is mutable, so
 an issue edited mid-scan moves forward in the order and is at worst read twice. The upper bound is
 probed *before* the `created` bounds, which is what closes the gap between them: anything created or
 edited after the probes has an `updated` beyond the bound and belongs to the next scan rather than
-falling between the two.
+falling between the two. The watermark handed to the *next* scan sits one minute behind that window's
+end, so the boundary minute is read twice rather than an edit landing later in it being read by
+neither scan.
 
 **Text.** Cloud v3 returns ADF (a JSON tree) and Data Center returns wiki markup (a string). Both
 flatten to prose through one accessor that dispatches on the *shape of the payload*, never on

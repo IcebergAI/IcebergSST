@@ -47,8 +47,18 @@ def _utc(value: datetime | None) -> datetime | None:
     return value if value.tzinfo else value.replace(tzinfo=UTC)
 
 
+def _all_cursors(db: Session, source_id: uuid.UUID) -> list[SourceCursor]:
+    """Every cursor row for a source, retired ones included."""
+    return list(db.exec(select(SourceCursor).where(col(SourceCursor.source_id) == source_id)))
+
+
 def active_cursors(db: Session, source_id: uuid.UUID) -> dict[str, SourceCursor]:
-    """Every live watermark for a source, keyed by the connector's scope name."""
+    """Every live watermark for a source, keyed by the connector's scope name.
+
+    Live only: a retired row is inert for planning a scan. Writers want
+    :func:`_all_cursors` instead, because the uniqueness index does not care
+    whether a row is retired.
+    """
     rows = db.exec(
         select(SourceCursor).where(
             col(SourceCursor.source_id) == source_id,
@@ -197,7 +207,14 @@ def commit_proposals(
     re-read next time.
     """
     at = now or datetime.now(UTC)
-    existing = dict(active_cursors(db, scan.source_id))
+    # Every row for the source, retired ones included. Retirement is modelled in
+    # place while `(source_id, scope)` is unique across live and retired alike, so
+    # a scope whose cursor was retired must have that row *revived* rather than a
+    # second one inserted beside it. Inserting would violate the index and take
+    # down the transaction that finalizes the scan — and this is the ordinary
+    # path, not an edge case: every promotion retires a cursor, and the full scan
+    # it promoted to then proposes a replacement for that same scope.
+    existing = {row.scope: row for row in _all_cursors(db, scan.source_id)}
     stored = 0
 
     for task in tasks:

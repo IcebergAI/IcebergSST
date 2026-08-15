@@ -88,7 +88,7 @@ def test_every_spec_of_a_project_carries_the_same_cursor_bound() -> None:
     """
     specs = _discover(_site(_issues(3, day=1)))
 
-    bounds = {spec.params["cursor_bound"] for spec in specs}
+    bounds = {spec.params["cursor_at"] for spec in specs}
     assert len(bounds) == 1
 
 
@@ -96,7 +96,7 @@ def test_a_project_with_no_issues_proposes_no_watermark() -> None:
     """There is nothing to have read, so there is nothing to claim."""
     specs = _discover(_site([]))
 
-    assert [spec.params.get("cursor_bound") for spec in specs] == [None]
+    assert [spec.params.get("cursor_at") for spec in specs] == [None]
 
 
 # ─── Discovery with a watermark ───────────────────────────────────────────────
@@ -165,15 +165,34 @@ def test_a_malformed_watermark_is_ignored_rather_than_trusted() -> None:
 # ─── Fetch: the cursor proposal ───────────────────────────────────────────────
 
 
-def test_a_fetched_window_proposes_the_bound_discovery_pinned() -> None:
+def test_the_proposed_watermark_sits_a_minute_behind_the_window_end() -> None:
+    """JQL resolves to the minute, so an edit at 09:00:45 is indistinguishable from
+    one at 09:00:10. The window must *end* at 09:01 for the newest issue to be
+    inside it; the next scan must *start* at 09:00 and re-read that minute, or an
+    edit landing after the probe falls between the two scans and neither reads it.
+    """
     site = _site(_issues(2, updated="2024-05-01T09:00"))
     spec = _discover(site)[0]
 
     _units, outcome = _fetch(site, spec)
 
     assert outcome.cursor == SourceCursor(
-        "ENG", JIRA_CHECKPOINT_VERSION, {"updated": "2024-05-01 09:01"}
+        "ENG", JIRA_CHECKPOINT_VERSION, {"updated": "2024-05-01 09:00"}
     )
+
+
+def test_the_next_scan_re_reads_the_watermark_minute() -> None:
+    """Which is what makes the overlap above worth having."""
+    site = _site(_issues(2, updated="2024-05-01T09:00"))
+
+    narrowed = _discover(site, {"ENG": {"updated": "2024-05-01 09:00"}})
+
+    assert len(narrowed) == 1
+    assert narrowed[0].params["window"] == {
+        "field": "updated",
+        "from": "2024-05-01 09:00",
+        "to": "2024-05-01 09:01",
+    }
 
 
 def test_a_spec_without_a_bound_proposes_nothing() -> None:
@@ -215,7 +234,7 @@ def test_a_checkpoint_is_published_only_once_an_issue_is_finished() -> None:
     assert [origin for origin, _ in seen] == ["body", "comment"]
     assert all(point is None for _origin, point in seen)
     assert outcome.checkpoint is not None
-    assert outcome.checkpoint.position["issue_id"] == "10001"
+    assert outcome.checkpoint.position["seen"] == ["10001"]
 
 
 def test_resuming_skips_the_issues_the_last_attempt_finished() -> None:
@@ -227,19 +246,47 @@ def test_resuming_skips_the_issues_the_last_attempt_finished() -> None:
         spec,
         resume_from=Checkpoint(
             JIRA_CHECKPOINT_VERSION,
-            {"field": "created", "at": "2024-01-02 00:00", "issue_id": "10001"},
+            {"field": "created", "at": "2024-01-02 00:00", "seen": ["10001"]},
         ),
     )
 
     assert outcome.as_coverage()["counts"]["scanned"] == 1
 
 
-def test_an_issue_sharing_the_boundary_minute_with_a_higher_id_is_read_again() -> None:
-    """Jira orders on the date alone, so within a minute the order is unspecified.
+def test_an_unread_issue_in_the_boundary_minute_is_not_skipped_by_its_id() -> None:
+    """The tie-break must rest on evidence, not on an ordering Jira never promises.
 
-    Re-reading costs a duplicate the API dedupes on fingerprint. Skipping would
-    cost the secret, so the tie is broken towards re-reading every time.
+    An earlier version compared numeric ids, assuming a lower id was read first.
+    JQL orders on the date alone, so within a minute the order is unspecified: the
+    issue with the *lower* id here is delivered second and was never read, yet an
+    id comparison would skip it. Only the ids the attempt recorded finishing are
+    evidence of anything.
     """
+    site = _site(
+        [
+            Issue("10009", "ENG-9", created="2024-01-01T00:00", description=leaky_description()),
+            Issue("10001", "ENG-1", created="2024-01-01T00:00", description=leaky_description()),
+        ]
+    )
+    spec = _discover(site)[0]
+
+    _units, outcome = _fetch(
+        site,
+        spec,
+        # The attempt finished 10009 only. 10001 sorts lower but was never read.
+        resume_from=Checkpoint(
+            JIRA_CHECKPOINT_VERSION,
+            {"field": "created", "at": "2024-01-01 00:00", "seen": ["10009"]},
+        ),
+    )
+
+    scanned = [unit.locator.resource_id for unit in _units]
+    assert "10001" in scanned
+    assert outcome.as_coverage()["counts"]["scanned"] == 1
+
+
+def test_the_boundary_minute_is_re_queried_so_its_unfinished_issues_return() -> None:
+    """Both issues share a minute; one was finished, one was not."""
     site = _site(
         [
             Issue("10001", "ENG-1", created="2024-01-01T00:00", description=leaky_description()),
@@ -248,16 +295,16 @@ def test_an_issue_sharing_the_boundary_minute_with_a_higher_id_is_read_again() -
     )
     spec = _discover(site)[0]
 
-    _units, outcome = _fetch(
+    _units, _outcome = _fetch(
         site,
         spec,
         resume_from=Checkpoint(
             JIRA_CHECKPOINT_VERSION,
-            {"field": "created", "at": "2024-01-01 00:00", "issue_id": "10001"},
+            {"field": "created", "at": "2024-01-01 00:00", "seen": ["10001"]},
         ),
     )
 
-    assert outcome.as_coverage()["counts"]["scanned"] == 1
+    assert [unit.locator.resource_id for unit in _units] == ["10002"]
 
 
 def test_a_checkpoint_from_the_other_date_field_is_refused() -> None:
@@ -272,7 +319,7 @@ def test_a_checkpoint_from_the_other_date_field_is_refused() -> None:
         spec,
         resume_from=Checkpoint(
             JIRA_CHECKPOINT_VERSION,
-            {"field": "created", "at": "2024-01-02 00:00", "issue_id": "10001"},
+            {"field": "created", "at": "2024-01-02 00:00", "seen": ["10001"]},
         ),
     )
 
@@ -287,7 +334,7 @@ def test_a_checkpoint_from_an_unknown_version_restarts_the_spec() -> None:
         site,
         spec,
         resume_from=Checkpoint(
-            "99", {"field": "created", "at": "2024-01-02 00:00", "issue_id": "10001"}
+            "99", {"field": "created", "at": "2024-01-02 00:00", "seen": ["10001"]}
         ),
     )
 

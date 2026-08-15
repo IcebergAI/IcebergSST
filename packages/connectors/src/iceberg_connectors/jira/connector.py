@@ -21,9 +21,10 @@ runs ``discover`` twice and compares payloads.
 boundary is a whole issue — body, comments, attachments, history — because a
 position taken between an issue's own units would let a reclaimed attempt start at
 the next issue and never read the rest of them. JQL resolves to the minute and
-orders on the date alone, so at a boundary minute the tie is broken towards
-*re-reading*: a duplicate dedupes on fingerprint, whereas a skipped issue is a
-secret nobody reports.
+orders on the date alone, so the whole boundary minute is re-queried and the
+position names the issues actually finished in it. Nothing is skipped without that
+evidence: a re-read dedupes on fingerprint, whereas a skipped issue is a secret
+nobody reports.
 
 **An incremental scan narrows a project to one ``updated`` window instead.**
 ``updated`` is mutable, so an issue edited mid-scan moves forward in the order and
@@ -117,6 +118,11 @@ MAX_TASK_SPECS = 5_000
 #: History entries read per issue. Past it the remainder is a scope gap rather than
 #: a silent truncation.
 MAX_HISTORY_ENTRIES = 1_000
+
+#: Issues recorded per boundary minute in a checkpoint. Past it the connector
+#: stops publishing until the minute rolls over: the position would otherwise grow
+#: without bound, and a resumed attempt re-reading one busy minute is cheap.
+MAX_MINUTE_IDS = 2_000
 
 #: This connector's own resume-protocol version, independent of the SDK's (#143).
 #: Bump it when the meaning of a stored position changes: the engine discards a
@@ -274,7 +280,7 @@ class JiraConnector:
                 # after them — then has an `updated` strictly greater than the
                 # bound, so the next incremental scan picks it up. Probing it last
                 # would leave a sliver of content that neither scan covers.
-                bound = self._cursor_bound(client, key)
+                bound, resume_at = self._cursor_bound(client, key)
                 since = _watermark(cursors, key)
 
                 for window in self._windows(client, key, since=since, bound=bound):
@@ -288,10 +294,12 @@ class JiraConnector:
                         "project_key": key,
                         "window": window.as_params(),
                     }
-                    if bound:
+                    if resume_at:
                         # The same value on every spec of this project, so whichever
                         # task reports last proposes the same watermark as the rest.
-                        params["cursor_bound"] = bound
+                        # A minute behind the window's end, on purpose: see
+                        # `_cursor_bound`.
+                        params["cursor_at"] = resume_at
                     yield TaskSpec(
                         label=(
                             f"{key} issues {window.field} {window.start or 'start'}…{window.end}"
@@ -312,24 +320,29 @@ class JiraConnector:
         finally:
             client.close()
 
-    def _cursor_bound(self, client: JiraClient, key: str) -> str:
-        """The ``updated`` instant the next scan of this project should start at.
+    def _cursor_bound(self, client: JiraClient, key: str) -> tuple[str, str]:
+        """Where this scan's window ends, and where the next one should start.
 
-        Pinned one minute past the most recently edited issue, so that issue is on
-        this side of the boundary and nothing edited afterwards is. Empty for a
-        project with no issues, which proposes no watermark at all — there is
-        nothing to have read.
+        They are deliberately a minute apart. JQL resolves to the minute, so an
+        issue edited at 10:00:45 and one edited at 10:00:10 are indistinguishable
+        to it. The window has to *end* at 10:01 for the newest issue to be inside
+        it — but the next scan must *start* at 10:00, re-reading that minute,
+        because an edit landing at 10:00:45 after the probe saw 10:00:10 would
+        otherwise fall between the two scans and be read by neither.
+
+        Both are empty for a project with no issues, which proposes no watermark at
+        all — there is nothing to have read.
 
         Derived from the project's own data rather than the clock, like every other
         bound here, because the conformance kit runs discovery twice and compares.
         """
         newest = client.search_one(f'project = "{key}" ORDER BY updated DESC')
         if newest is None:
-            return ""
+            return "", ""
         edited = _field_at(newest, "updated") or _field_at(newest, "created")
         if edited is None:
             raise ConnectorError(f"Jira returned an unreadable updated date for project {key}")
-        return _minute(edited + timedelta(minutes=1))
+        return _minute(edited + timedelta(minutes=1)), _minute(edited)
 
     def _windows(
         self,
@@ -440,6 +453,10 @@ class JiraConnector:
         window = spec.params.get("window")
         field = _window_field(window)
         resume = _resume_point(outcome.resume_from, window)
+        #: Issues finished at `minute`, which is what a resumed attempt skips on.
+        #: Reset whenever the minute rolls over, so it stays small.
+        minute = ""
+        finished: list[str] = []
 
         client = self._client(connection, credential)
         sandbox = _LazySandbox(self.sandbox_factory)
@@ -512,12 +529,21 @@ class JiraConnector:
                 # the rest of them (#143).
                 at = _field_at(issue, field)
                 if at is not None:
-                    outcome.checkpoint_at(
-                        JIRA_CHECKPOINT_VERSION,
-                        {"field": field, "at": _minute(at), "issue_id": issue_id},
-                    )
+                    stamp = _minute(at)
+                    if stamp != minute:
+                        minute, finished = stamp, []
+                    finished.append(issue_id)
+                    # The whole boundary minute is re-queried on resume, so the
+                    # position has to name which of its issues were finished. An id
+                    # comparison would not do: JQL orders on the date alone, so the
+                    # order within a minute is unspecified.
+                    if len(finished) <= MAX_MINUTE_IDS:
+                        outcome.checkpoint_at(
+                            JIRA_CHECKPOINT_VERSION,
+                            {"field": field, "at": stamp, "seen": list(finished)},
+                        )
 
-            bound = spec.params.get("cursor_bound")
+            bound = spec.params.get("cursor_at")
             if isinstance(bound, str) and bound:
                 # Proposed from the bound discovery pinned rather than from what
                 # this task happened to read: the API commits it only if the whole
@@ -899,31 +925,28 @@ class _Resume:
     """A point a previous attempt of this task reached (#143)."""
 
     at: str
-    issue_id: str
+    #: The issues the earlier attempt actually finished at minute :attr:`at`.
+    seen: frozenset[str]
 
     def covers(self, issue: Mapping[str, Any], field: str, issue_id: str) -> bool:
         """Whether the earlier attempt already reported this issue.
 
-        The query already excluded everything before ``at``; what is left to decide
-        is the tie, because JQL resolves to the minute and a busy project puts many
-        issues in one. Only issues at that same minute with an id at or below the
-        boundary are skipped.
+        The query re-includes the whole boundary minute, because JQL resolves to
+        the minute and a busy project puts many issues in one. Deciding which of
+        them to skip needs **positive evidence**, and the only evidence there is is
+        the list of ids the earlier attempt recorded having finished.
 
-        Deliberately asymmetric. Jira orders on the date alone, so within a minute
-        the order is unspecified and an issue with a *higher* id may already have
-        been read — it is read again, and its findings dedupe on fingerprint. The
-        other direction has no such safety net: skipping an unread issue loses its
-        secrets silently, so nothing is skipped without positive evidence.
+        An earlier version compared numeric ids instead, on the theory that a lower
+        id was read first. Jira orders on the date alone, so the order within a
+        minute is unspecified: an issue with a lower id can be delivered *after*
+        the one the checkpoint names, and would then be skipped having never been
+        read. Re-reading costs a duplicate that dedupes on fingerprint; skipping
+        costs the secret.
         """
+        if issue_id not in self.seen:
+            return False
         stamp = _field_at(issue, field)
-        if stamp is None or _minute(stamp) != self.at:
-            return False
-        try:
-            return int(issue_id) <= int(self.issue_id)
-        except ValueError:
-            # Non-numeric ids are not a Jira shape, and an unorderable id is not
-            # evidence of anything. Re-read it.
-            return False
+        return stamp is not None and _minute(stamp) == self.at
 
 
 def _resume_point(checkpoint: Checkpoint | None, window: Any) -> _Resume | None:
@@ -931,15 +954,17 @@ def _resume_point(checkpoint: Checkpoint | None, window: Any) -> _Resume | None:
     if checkpoint is None or checkpoint.version != JIRA_CHECKPOINT_VERSION:
         return None
     position = checkpoint.position
-    at, issue_id = position.get("at"), position.get("issue_id")
-    if not isinstance(at, str) or not at or not isinstance(issue_id, str) or not issue_id:
+    at, seen = position.get("at"), position.get("seen")
+    if not isinstance(at, str) or not at or not isinstance(seen, list) or not seen:
+        # Includes a position written before the boundary minute was recorded as a
+        # set of ids. Unusable is not the same as empty: restart the spec.
         return None
     if position.get("field") != _window_field(window):
         # A position taken over `created` cannot bound an `updated` window: the
         # two orderings have nothing to do with each other, and resuming across
         # them would skip whatever happens to sort earlier under the new field.
         return None
-    return _Resume(at=at, issue_id=issue_id)
+    return _Resume(at=at, seen=frozenset(str(item) for item in seen))
 
 
 def _watermark(cursors: Mapping[str, Any] | None, key: str) -> str:

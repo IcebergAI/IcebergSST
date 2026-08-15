@@ -249,7 +249,7 @@ def test_an_issue_deleted_between_attempts_does_not_strand_the_resume() -> None:
     first = ControlPlane(_lease(spec=spec), fail_batches_after=3)
     _run(site, first)
 
-    boundary = first.batches[-1]["checkpoint"]["position"]["issue_id"]
+    boundary = first.batches[-1]["checkpoint"]["position"]["seen"][-1]
     project = site.projects[0]
     project.issues = [issue for issue in project.issues if issue.id != boundary]
 

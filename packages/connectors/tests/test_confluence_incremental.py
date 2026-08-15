@@ -69,28 +69,23 @@ def _fetch(site: FakeConfluence, spec: TaskSpec, **kwargs: Any) -> tuple[list[An
 # ─── The watermark reaches the server ─────────────────────────────────────────
 
 
-def test_a_full_scan_asks_for_no_ordering_at_all() -> None:
-    """It reads everything either way, so an order it does not need is one more
-    thing the site could refuse."""
+def test_narrowing_never_asks_the_site_for_an_ordering() -> None:
+    """Correctness must not depend on the site ordering the listing.
+
+    An earlier version asked for `sort=-modified-date` and stopped at the first
+    page older than the watermark. A page the site declines to date has no position
+    in that order, so it could sit anywhere past the cutoff and never be looked at.
+    Skipping per page instead needs no ordering at all.
+    """
     site = _site(_pages(3))
 
     _fetch(site, _discover(site)[0])
+    _fetch(site, _discover(site, {"DOCS": {"modified": "2024-01-02T00:00:00.000Z"}})[0])
 
     assert site.sorts_requested == []
 
 
-def test_a_watermarked_scan_asks_the_server_to_sort() -> None:
-    """The opt-in has to reach the server: a page enumeration the site returned in
-    its own order cannot be stopped early, because "older" would mean nothing."""
-    site = _site(_pages(3))
-    spec = _discover(site, {"DOCS": {"modified": "2024-01-02T00:00:00.000Z"}})[0]
-
-    _fetch(site, spec)
-
-    assert set(site.sorts_requested) == {"-modified-date"}
-
-
-def test_enumeration_stops_at_the_watermark() -> None:
+def test_pages_at_or_below_the_watermark_are_skipped() -> None:
     site = _site(_pages(4))
     spec = _discover(site, {"DOCS": {"modified": "2024-01-02T00:00:00.000Z"}})[0]
 
@@ -100,33 +95,32 @@ def test_enumeration_stops_at_the_watermark() -> None:
     assert outcome.as_coverage()["counts"]["scanned"] == 2
 
 
-def test_a_page_the_site_will_not_date_abandons_the_narrowing_entirely() -> None:
-    """Unknown is not evidence that a page is unchanged.
+def test_an_undated_page_is_scanned_wherever_it_sits_in_the_listing() -> None:
+    """Unknown is never evidence that a page is unchanged.
 
-    Stopping early relies on the ordering meaning "newest first", and a page with
-    no revision has no place in that order — so the rest of the space could be
-    anywhere in it. The connector gives up the narrowing and reads all of it.
-    Paying for a full scan is a bad trade; skipping content silently is worse.
+    The page the site will not date comes *last*, behind pages the watermark
+    covers. An implementation that stopped at the first covered page would never
+    reach it — and would then advance the cursor, so no later scan would look
+    either. It has to be read.
     """
     pages = _pages(2)
-    # Dated by the site (so it sorts first) but not reported to us, which is the
-    # realistic shape of the problem: the site knows, and will not say.
-    pages.insert(
-        0,
+    pages.append(
         Page(
             id="page-9",
             title="Undated",
             storage=LEAKY,
-            version_created_at="2024-12-01T00:00:00.000Z",
+            version_created_at="2020-01-01T00:00:00.000Z",
             include_version=False,
-        ),
+        )
     )
     site = _site(pages)
     spec = _discover(site, {"DOCS": {"modified": "2024-09-01T00:00:00.000Z"}})[0]
 
     _units, outcome = _fetch(site, spec)
 
-    assert outcome.as_coverage()["counts"]["scanned"] == 3
+    scanned = [unit.locator.resource_id for unit in _units]
+    assert "page-9" in scanned
+    assert outcome.as_coverage()["counts"]["scanned"] == 1
 
 
 def test_a_space_with_no_watermark_carries_no_since_on_its_spec() -> None:

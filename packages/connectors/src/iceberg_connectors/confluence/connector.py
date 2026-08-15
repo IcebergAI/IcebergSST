@@ -27,12 +27,15 @@ listing calls are paid again — the bodies, comments and attachments are not. I
 page is gone, the enumeration runs to the end without finding it and the space is
 reported as a scope gap rather than as having read cleanly.
 
-**Incremental narrowing depends on an ordering the site has to provide.** v2 has no
-``lastModified``; ``version.createdAt`` is the only signal, and stopping early
-relies on ``sort=-modified-date`` meaning what it says. A page that arrives with no
-``version`` has no place in that order, so the narrowing is abandoned for the whole
-space and everything is read. Paying for a full scan is a bad trade, and still the
-right one against skipping content silently.
+**Incremental narrowing skips pages, it does not stop early.** v2 has no
+``lastModified``; ``version.createdAt`` is the only signal, and a page the site
+declines to date has no comparable revision at all. Stopping at the first page
+older than the watermark would mean trusting ``sort`` to order the whole listing —
+and an undated page has no position in that order, so it could sit anywhere past
+the cutoff and never be looked at. Enumerating the listing to the end and skipping
+per page costs the listing calls, which are cheap and bounded; what incremental
+scanning actually saves is the bodies, comments and attachments, and those are
+still skipped.
 
 **One bad page must not stop a scan of fifty thousand.** Every per-page failure
 below is counted into :class:`FetchOutcome` and stepped over so findings from
@@ -79,10 +82,6 @@ CONFLUENCE_CONNECTOR_TYPE = "confluence"
 
 #: This connector's own resume-protocol version, independent of the SDK's (#143).
 CONFLUENCE_CHECKPOINT_VERSION = "1"
-
-#: v2's newest-revision-first ordering. Opt-in: without it the site returns pages
-#: in its own order, and a watermark stop would be reading whatever came back.
-_MODIFIED_DESC = "-modified-date"
 
 #: Comment endpoints on a v2 page. Both are scanned: an inline comment on a
 #: paragraph is where someone answers "what's the password for staging?".
@@ -252,15 +251,11 @@ class ConfluenceConnector:
 
         since = str(spec.params.get("since") or "")
         resume = _resume_after(outcome.resume_from)
-        # Newest revision first *only* when there is a watermark to stop at. A full
-        # scan reads the whole space either way, and asking for an order it does
-        # not need would be one more thing the site could refuse.
-        params = {**_body_format(), "sort": _MODIFIED_DESC} if since else _body_format()
         newest = ""
         skipping = bool(resume)
 
         try:
-            for page in client.paginate(f"/spaces/{space_id}/pages", **params):
+            for page in client.paginate(f"/spaces/{space_id}/pages", **_body_format()):
                 page_id = str(page.get("id") or "")
                 if not page_id:
                     outcome.failed_for(
@@ -272,18 +267,19 @@ class ConfluenceConnector:
 
                 revision = _revision(page)
                 newest = max(newest, revision) if revision else newest
-                if since and not revision:
-                    # A page the site will not date. Stopping early relies on the
-                    # ordering meaning "newest first", and a page with no revision
-                    # has no place in that order — so the rest of this space might
-                    # be anywhere in it. Abandon the narrowing and read all of it:
-                    # an incremental scan that costs a full one is a bad trade, and
-                    # still the right one against skipping content silently.
-                    logger.warning("confluence_incremental_abandoned", space_id=space_id)
-                    since = ""
-                elif since and revision <= since:
-                    # Sorted newest-first, so everything after this is older still.
-                    break
+                if since and revision and revision <= since:
+                    # Unchanged since the watermark, so its body, comments and
+                    # attachments are not fetched — which is where a space's cost
+                    # actually is. The listing itself is enumerated to the end
+                    # regardless, and deliberately.
+                    #
+                    # Stopping early would mean trusting `sort=-modified-date` to
+                    # order the whole listing, and a page the site declines to date
+                    # has no position in that order at all: it could sit anywhere
+                    # after the cutoff and would simply never be looked at. Skipping
+                    # per page instead of stopping makes the narrowing independent
+                    # of the site's ordering, so an undated page is always read.
+                    continue
 
                 if skipping:
                     # Re-enumerating to find where the last attempt stopped. The v2
