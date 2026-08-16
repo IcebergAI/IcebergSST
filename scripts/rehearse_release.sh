@@ -38,6 +38,20 @@ PSQL_URL="${ICEBERG_DATABASE_URL/postgresql+psycopg:\/\//postgresql://}"
 
 step() { printf '\n\033[1m▸ %s\033[0m\n' "$1"; }
 
+require_matching_client() {
+  # `pg_dump` refuses to dump a server newer than itself, and says so in a way
+  # that reads like a bug in this script rather than a missing package. Checked
+  # up front, and named, because the failure otherwise arrives four rehearsals
+  # in — after several minutes of work that all succeeded.
+  local server client
+  server="$(psql "$PSQL_URL" -tAc 'SHOW server_version;' | cut -d. -f1)"
+  client="$(pg_dump --version | grep -oE '[0-9]+' | head -n 1)"
+  if [ "$client" -lt "$server" ]; then
+    echo "pg_dump $client cannot dump a Postgres $server server; install postgresql-client-$server" >&2
+    exit 1
+  fi
+}
+
 reset_database() {
   # `downgrade base` would only remove what the migrations know about; a rehearsal
   # has to start from nothing, or a leftover from an earlier step masks the very
@@ -53,6 +67,8 @@ revisions() {
 }
 
 # ─── 1. Stepwise upgrade ──────────────────────────────────────────────────────
+
+require_matching_client
 
 step "Applying every revision one at a time"
 reset_database
