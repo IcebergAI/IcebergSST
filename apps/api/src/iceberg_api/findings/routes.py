@@ -13,6 +13,7 @@ one nobody can reconcile a count against.
 """
 
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
 import structlog
@@ -24,7 +25,7 @@ from sqlmodel import col, select
 
 from iceberg_api.auth.dependencies import CsrfProtected, SessionDep, SettingsDep
 from iceberg_api.auth.rbac import ROLE_RANK, AnalystUser, ViewerUser
-from iceberg_api.findings import triage
+from iceberg_api.findings import ownership, triage
 from iceberg_api.findings.schemas import (
     CorrelationInfo,
     FindingDetail,
@@ -68,6 +69,9 @@ async def list_findings(
     rule_id: Annotated[str | None, Query()] = None,
     severity: Annotated[Severity | None, Query()] = None,
     assignee_id: Annotated[uuid.UUID | None, Query()] = None,
+    owner_group_id: Annotated[uuid.UUID | None, Query()] = None,
+    unowned: Annotated[bool | None, Query()] = None,
+    overdue: Annotated[bool | None, Query()] = None,
     suppressed: Annotated[bool | None, Query()] = None,
     correlation_id: Annotated[str | None, Query(pattern=r"^[0-9a-f]{64}$")] = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
@@ -96,6 +100,22 @@ async def list_findings(
         statement = statement.where(col(Finding.severity) == severity)
     if assignee_id is not None:
         statement = statement.where(col(Finding.assignee_id) == assignee_id)
+    if owner_group_id is not None:
+        statement = statement.where(col(Finding.owner_group_id) == owner_group_id)
+    if unowned is not None:
+        # The unowned queue (#146). A separate flag rather than `owner_group_id=`
+        # accepting a null, because "no owner" is a question about the column and
+        # an absent query parameter already means "do not filter" — overloading
+        # the two would make `?owner_group_id=` ambiguous.
+        missing = col(Finding.owner_group_id).is_(None)
+        statement = statement.where(missing if unowned else ~missing)
+    if overdue is not None:
+        # Past its target *and* actionable. A resolved or suppressed finding keeps
+        # its date but is nobody's late work, which is the same definition
+        # `ownership.overdue` applies to a single row — kept in one place so the
+        # queue and the badge on the finding cannot disagree.
+        late = col(Finding.due_at) < datetime.now(UTC)
+        statement = statement.where(*ownership.actionable()).where(late if overdue else ~late)
     if suppressed is not None:
         hidden = col(Finding.suppressed_at).is_not(None)
         statement = statement.where(hidden if suppressed else ~hidden)

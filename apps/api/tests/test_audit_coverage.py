@@ -26,6 +26,9 @@ import pytest
 from fastapi.testclient import TestClient
 from iceberg_core.enums import UserRole
 from iceberg_core.models import (
+    AUDIT_TARGET_OWNER_GROUP,
+    AUDIT_TARGET_RESPONSE_TARGET,
+    AUDIT_TARGET_ROUTING_RULE,
     AUDIT_TARGET_SOURCE,
     AUDIT_TARGET_SUPPRESSION,
     AUDIT_TARGET_USER,
@@ -68,6 +71,13 @@ REQUIRED_ACTIONS = {
     "remediation.recorded",
     "remediation.verified",
     "remediation.retracted",
+    "owner_group.created",
+    "owner_group.updated",
+    "owner_group.deleted",
+    "routing_rule.created",
+    "routing_rule.updated",
+    "routing_rule.deleted",
+    "response_target.updated",
 }
 
 
@@ -194,6 +204,43 @@ def test_suppression_lifecycle_is_audited(
 
     recorded = _actions(session, AUDIT_TARGET_SUPPRESSION)
     assert recorded == ["suppression.created", "suppression.deleted"]
+
+
+def test_ownership_policy_changes_are_audited(
+    client: TestClient,
+    api: str,
+    session: Session,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """Ownership policy decides who is answerable for a finding and how long they
+    have (#146). Triage of one finding is analyst work with its own richer
+    `finding_event` trail; rewriting the policy above it is administrative."""
+    headers = login_as(make_user(UserRole.ADMIN))
+    group = client.post(f"{api}/owner-groups", json={"name": "payments"}, headers=headers)
+    assert group.status_code == 201, group.text
+    group_id = group.json()["id"]
+    client.patch(f"{api}/owner-groups/{group_id}", json={"disabled": True}, headers=headers)
+    rule = client.post(
+        f"{api}/routing-rules",
+        json={"name": "catch-all", "owner_group_id": group_id},
+        headers=headers,
+    )
+    assert rule.status_code == 201, rule.text
+    client.patch(f"{api}/routing-rules/{rule.json()['id']}", json={"priority": 5}, headers=headers)
+    client.delete(f"{api}/routing-rules/{rule.json()['id']}", headers=headers)
+    client.put(f"{api}/response-targets/high", json={"hours": 12}, headers=headers)
+
+    assert _actions(session, AUDIT_TARGET_OWNER_GROUP) == [
+        "owner_group.created",
+        "owner_group.updated",
+    ]
+    assert _actions(session, AUDIT_TARGET_ROUTING_RULE) == [
+        "routing_rule.created",
+        "routing_rule.updated",
+        "routing_rule.deleted",
+    ]
+    assert _actions(session, AUDIT_TARGET_RESPONSE_TARGET) == ["response_target.updated"]
 
 
 def test_an_audit_row_never_carries_a_credential(
