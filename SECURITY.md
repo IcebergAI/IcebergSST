@@ -22,6 +22,17 @@ Provide the affected version or commit, deployment mode, a minimal reproduction 
 credentials, impact, and any proposed mitigation. Use synthetic canaries and redact all source
 identifiers that are not needed to reproduce the issue.
 
+## Supported versions
+
+Security fixes land on the current minor and are backported to the supported previous one. Which
+that is, and for how long, is in [`docs/releases.md`](docs/releases.md) — along with how to verify
+that the release you are running is the one this project published. Only tagged releases are
+supported; a commit on `main` may be perfectly good, but nothing rehearses an upgrade from it and
+no artifact is signed for it.
+
+Fixes are announced as a GitHub Security Advisory on this repository, which is also what populates
+the ecosystem vulnerability databases. The `CHANGELOG.md` entry carries the advisory identifier.
+
 ## Handling expectations
 
 The maintainers will acknowledge a private report when they can, reproduce it in an isolated

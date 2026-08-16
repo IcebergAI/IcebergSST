@@ -40,7 +40,7 @@ test: ## pytest across all workspace members
 
 check: lint type test ## Everything CI runs
 
-docs-check: ## Verify repository-local Markdown links
+docs-check: ## Verify links, documented make targets, and named settings
 	uv run python scripts/check_docs.py
 
 # A release is one number applied to both images, the chart's appVersion, and
