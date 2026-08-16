@@ -33,6 +33,39 @@ Each channel's **event filter** then decides whether that channel cares:
 | `min_severity` | Announce this severity and above. Omitted means every severity. |
 | `source_ids` | Restrict to these sources. Empty means all of them. |
 
+## Escalation: a finding that missed its target (#146)
+
+A second event, `finding.overdue`, for the opposite failure: not "a new secret appeared" but
+"nobody fixed the one we told you about". It fires when an **open, unsuppressed** finding passes
+the response target for its severity, which the maintenance loop notices — a deadline passing is
+not something that *happens* to a finding, so nothing else would.
+
+**Who hears about it** is deliberately narrower than an announcement:
+
+| Finding | Escalates to |
+|---|---|
+| Owned, team has a channel | that team's channel, and nowhere else |
+| Owned, team has no channel | nobody — silent by choice; the console's overdue queue is the record |
+| Unowned, or owned by a disbanded team | every enabled channel whose event filter selects it |
+
+Telling six channels about work that has an owner is how alerting becomes noise. The unowned
+fallback exists because "late, **and** nobody has picked it up" is the state most worth saying out
+loud, and it is exactly the state with no team to tell.
+
+**Once per deadline.** The outbox row carries the `due_at` it is about, and a partial unique index
+over `(channel_id, finding_id, due_at)` enforces one escalation per deadline per channel. The
+existing constraint cannot do this: it includes `scan_id`, which is NULL on an escalation, and
+NULLs do not collide — so without the index the loop would mail the owning team once a minute.
+
+A reopened finding gets a fresh clock and therefore a fresh escalation if it misses the new target.
+That is the intent: the team missed a new deadline, not the old one again. A message already queued
+still reports the deadline **it** was queued for — the outbox row records which event it is, and the
+finding only records where its clock is now.
+
+A channel added later does not hear about findings that went overdue before it existed: the queue
+is drained per (finding, deadline), the same rule an announcement follows when a new channel hears
+about the next scan rather than every finding in the table.
+
 ## How delivery works
 
 Dispatch is a **transactional outbox**, which is what makes "never lost silently" true rather
@@ -90,6 +123,23 @@ operator finding out.
   "scan": {"id": "…", "trigger": "scheduled"}
 }
 ```
+
+An escalation is the same envelope with `"event": "finding.overdue"`, the same `finding` and
+`source` blocks — so a receiver parses one shape and switches on `event` — no `scan` block, because
+nothing scanned, and one block of its own:
+
+```json
+{
+  "escalation": {
+    "due_at": "2026-08-15T06:00:00+00:00",
+    "overdue_by_hours": 30,
+    "owner_group": {"id": "…", "name": "payments"}
+  }
+}
+```
+
+`owner_group` is null when nobody owns the finding — which, given the routing table above, is why
+that message reached a general channel rather than a team's.
 
 `version` is bumped when a field is **removed or changes meaning**. Adding a field does not bump
 it, so receivers should ignore keys they do not recognise.

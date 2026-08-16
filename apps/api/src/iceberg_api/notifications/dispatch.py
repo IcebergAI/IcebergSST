@@ -33,6 +33,7 @@ from iceberg_core.enums import (
     FindingState,
     NotificationChannelType,
     NotificationDeliveryStatus,
+    NotificationEventKind,
     Severity,
 )
 from iceberg_core.models import (
@@ -40,13 +41,20 @@ from iceberg_core.models import (
     FindingEvent,
     NotificationChannel,
     NotificationDelivery,
+    OwnerGroup,
     Scan,
     Source,
 )
 from iceberg_core.secrets import SecretStore
 from sqlmodel import Session, col, select
 
-from iceberg_api.notifications.payload import email_subject, finding_opened
+from iceberg_api.findings import ownership
+from iceberg_api.notifications.payload import (
+    email_subject,
+    escalation_subject,
+    finding_opened,
+    finding_overdue,
+)
 from iceberg_api.notifications.schemas import EventFilter
 from iceberg_api.notifications.transports import (
     DeliveryError,
@@ -171,6 +179,121 @@ def enqueue_for_scan(db: Session, scan: Scan, *, now: datetime | None = None) ->
     return queued
 
 
+def escalate_overdue(db: Session, *, now: datetime | None = None, limit: int = 200) -> int:
+    """Announce findings that have passed their response target (#146).
+
+    Runs in the maintenance loop rather than at ingest, because nothing *happens*
+    when a finding goes overdue — a deadline passes. There is no transaction to
+    hang an outbox row off, so the clock is what notices.
+
+    **Who hears about it.** The owning team's channel, if the group has one: an
+    escalation is a message to the people accountable, not a broadcast. A finding
+    nobody owns has no such channel, so it falls back to every enabled channel
+    that would have announced it when it opened — those channels already hear
+    about this class of finding, and "late, and nobody has picked it up" is the
+    one state most worth saying out loud. A group with no channel configured is
+    silent by choice, and the console's overdue queue is still the record.
+
+    **Once per deadline.** The row carries the ``due_at`` it is about, and a
+    partial unique index enforces one escalation per (channel, finding, deadline).
+    A reopened finding gets a fresh deadline and therefore a fresh escalation,
+    which is right — the team missed a new target, not the old one again.
+
+    Does not commit; the caller owns the transaction, like every other outbox
+    write here. Returns how many rows were written.
+    """
+    at = now or datetime.now(UTC)
+    channels = list(db.exec(select(NotificationChannel).where(col(NotificationChannel.enabled))))
+    if not channels:
+        return 0
+
+    # Actionable, past the target, and **not already escalated for this deadline**.
+    #
+    # The exclusion is in SQL, before the limit, and that ordering is the whole
+    # point: filtering in Python afterwards would re-select the same oldest page
+    # on every beat, skip all of it as already queued, and never reach the 201st
+    # overdue finding. A backlog larger than one page would stall permanently.
+    #
+    # Keyed on (finding, deadline) rather than (channel, finding, deadline), so a
+    # finding already escalated somewhere is done. A channel added later therefore
+    # does not hear about findings that went overdue before it existed — the same
+    # rule `enqueue_for_scan` already follows, where a new channel hears about the
+    # next scan rather than every finding in the table.
+    escalated = (
+        select(NotificationDelivery.id)
+        .where(col(NotificationDelivery.kind) == NotificationEventKind.FINDING_OVERDUE)
+        .where(col(NotificationDelivery.finding_id) == col(Finding.id))
+        .where(col(NotificationDelivery.due_at) == col(Finding.due_at))
+    )
+    # Bounded, because a deployment that turns escalation on after months of
+    # backlog should not try to mail its whole history in one beat; with the
+    # exclusion above, each beat now takes the *next* page rather than the same one.
+    overdue = list(
+        db.exec(
+            select(Finding)
+            .where(*ownership.actionable())
+            .where(col(Finding.due_at).is_not(None), col(Finding.due_at) < at)
+            .where(~escalated.exists())
+            .order_by(col(Finding.due_at))
+            .limit(limit)
+        )
+    )
+    if not overdue:
+        return 0
+
+    by_id = {channel.id: channel for channel in channels}
+    queued = 0
+    for finding in overdue:
+        group = (
+            db.get(OwnerGroup, finding.owner_group_id)
+            if finding.owner_group_id is not None
+            else None
+        )
+        targets = _escalation_targets(finding, group, channels, by_id)
+        for channel in targets:
+            # No per-row dedup check here: the query above already excluded every
+            # finding that has an escalation for this deadline, and the partial
+            # unique index is the structural guard behind both.
+            db.add(
+                NotificationDelivery(
+                    channel_id=channel.id,
+                    finding_id=finding.id,
+                    kind=NotificationEventKind.FINDING_OVERDUE,
+                    # No scan caused this, and the deadline is the identity.
+                    scan_id=None,
+                    due_at=finding.due_at,
+                    status=NotificationDeliveryStatus.PENDING,
+                    next_attempt_at=at,
+                )
+            )
+            queued += 1
+
+    if queued:
+        logger.info("escalations_enqueued", overdue=len(overdue), queued=queued)
+    return queued
+
+
+def _escalation_targets(
+    finding: Finding,
+    group: OwnerGroup | None,
+    channels: list[NotificationChannel],
+    by_id: dict[uuid.UUID, NotificationChannel],
+) -> list[NotificationChannel]:
+    """Where one overdue finding's escalation goes.
+
+    An owned finding escalates to its team's channel and nowhere else — telling
+    six other channels about work that has an owner is how alerting becomes
+    noise. A disabled channel is not a target even if the group still names one,
+    because disabling a channel is an operator saying stop.
+    """
+    if group is not None and not group.disabled:
+        channel = (
+            by_id.get(group.notification_channel_id) if group.notification_channel_id else None
+        )
+        return [channel] if channel is not None else []
+    return [channel for channel in channels if channel_wants(channel, finding)]
+
+
 def deliver_pending(
     db: Session,
     settings: ApiSettings,
@@ -237,10 +360,12 @@ def _attempt(
 
     channel = db.get(NotificationChannel, delivery.channel_id)
     finding = db.get(Finding, delivery.finding_id)
-    scan = db.get(Scan, delivery.scan_id)
+    # Null by design on an escalation: a deadline passing is not a scan.
+    scan = db.get(Scan, delivery.scan_id) if delivery.scan_id is not None else None
     source = db.get(Source, finding.source_id) if finding is not None else None
+    escalation = delivery.kind is NotificationEventKind.FINDING_OVERDUE
 
-    if channel is None or finding is None or scan is None or source is None:
+    if channel is None or finding is None or source is None or (scan is None and not escalation):
         # Deleted between enqueue and delivery. Nothing to announce and nothing to
         # retry, so this is a terminal state rather than an error worth alarming on.
         return _fail(db, delivery, "referenced row no longer exists", at=at)
@@ -259,8 +384,29 @@ def _attempt(
     # sent — and re-sending all of them, every beat, until an operator noticed.
     # A poisoned row now fails itself.
     try:
-        payload = finding_opened(finding, source=source, scan=scan, channel=channel)
-        transport.send(channel, payload, subject=email_subject(finding, source))
+        if escalation:
+            payload = finding_overdue(
+                finding,
+                source=source,
+                channel=channel,
+                owner_group=(
+                    db.get(OwnerGroup, finding.owner_group_id)
+                    if finding.owner_group_id is not None
+                    else None
+                ),
+                # The deadline this row was queued for, not wherever the finding's
+                # clock has since moved to.
+                due_at=delivery.due_at,
+                at=at,
+            )
+            subject = escalation_subject(finding, source)
+        else:
+            # `scan` is non-None here: the guard above is terminal for a
+            # non-escalation without one.
+            assert scan is not None  # noqa: S101  # narrowing, not validation
+            payload = finding_opened(finding, source=source, scan=scan, channel=channel)
+            subject = email_subject(finding, source)
+        transport.send(channel, payload, subject=subject)
     except DeliveryError as exc:
         return _retry_or_fail(db, delivery, exc, settings, at=at)
     except Exception as exc:  # a formatter or transport bug must not strand the row
