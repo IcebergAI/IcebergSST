@@ -58,7 +58,13 @@ existing constraint cannot do this: it includes `scan_id`, which is NULL on an e
 NULLs do not collide — so without the index the loop would mail the owning team once a minute.
 
 A reopened finding gets a fresh clock and therefore a fresh escalation if it misses the new target.
-That is the intent: the team missed a new deadline, not the old one again.
+That is the intent: the team missed a new deadline, not the old one again. A message already queued
+still reports the deadline **it** was queued for — the outbox row records which event it is, and the
+finding only records where its clock is now.
+
+A channel added later does not hear about findings that went overdue before it existed: the queue
+is drained per (finding, deadline), the same rule an announcement follows when a new channel hears
+about the next scan rather than every finding in the table.
 
 ## How delivery works
 

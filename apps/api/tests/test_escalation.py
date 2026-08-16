@@ -290,6 +290,26 @@ def test_a_deployment_with_no_channels_does_no_work(
     assert dispatch.escalate_overdue(session, now=NOW) == 0
 
 
+def test_a_backlog_larger_than_one_beat_drains_across_beats(
+    session: Session,
+    make_channel: Callable[..., NotificationChannel],
+    make_finding: Callable[..., Finding],
+) -> None:
+    """The bound must not become a wall. Excluding already-escalated findings has
+    to happen *before* the limit: filtering afterwards would re-select the same
+    oldest page every beat, skip all of it, and never reach the rest — a backlog
+    that stalls permanently, silently, exactly when it is largest."""
+    make_channel()
+    for index in range(5):
+        make_finding(owner_group_id=None, due_at=LATE + timedelta(minutes=index))
+
+    beats = [dispatch.escalate_overdue(session, now=NOW, limit=2) for _ in range(4)]
+    session.commit()
+
+    assert beats == [2, 2, 1, 0]
+    assert len(_escalations(session)) == 5
+
+
 def test_a_beat_is_bounded_so_a_backlog_does_not_arrive_at_once(
     session: Session,
     make_channel: Callable[..., NotificationChannel],
@@ -302,6 +322,7 @@ def test_a_beat_is_bounded_so_a_backlog_does_not_arrive_at_once(
         make_finding(owner_group_id=None)
 
     assert dispatch.escalate_overdue(session, now=NOW, limit=2) == 2
+    assert len(_escalations(session)) == 2
 
 
 # ─── Once per deadline ────────────────────────────────────────────────────────
@@ -395,6 +416,41 @@ def test_an_escalation_does_not_collide_with_the_announcement_of_the_same_findin
         delivery.kind.value for delivery in session.exec(select(NotificationDelivery)).all()
     )
     assert kinds == ["finding_opened", "finding_overdue"]
+
+
+def test_a_retried_escalation_reports_the_deadline_it_was_queued_for(
+    session: Session,
+    dispatch_settings: ApiSettings,
+    secret_store: Any,
+    make_channel: Callable[..., NotificationChannel],
+    make_finding: Callable[..., Finding],
+) -> None:
+    """A delivery can be queued now and sent later. If the finding is resolved and
+    reopened in between it gets a *fresh* deadline — and the pending message would
+    then announce a deadline that has not passed yet, about an escalation queued
+    for one that had. The row records which event this is."""
+    make_channel()
+    finding = make_finding(owner_group_id=None)
+    dispatch.escalate_overdue(session, now=NOW)
+    session.commit()
+
+    # Reopened before the delivery went out: a new clock, a later deadline.
+    finding.due_at = NOW + timedelta(days=7)
+    session.add(finding)
+    session.commit()
+    transport = RecordingTransport()
+
+    dispatch.deliver_pending(
+        session,
+        dispatch_settings,
+        secret_store,
+        now=NOW,
+        transports=dict.fromkeys(NotificationChannelType, transport),
+    )
+
+    _channel, payload, _subject = transport.sent[0]
+    assert payload["escalation"]["due_at"] == LATE.isoformat()
+    assert payload["escalation"]["overdue_by_hours"] == 30
 
 
 # ─── What goes out ────────────────────────────────────────────────────────────

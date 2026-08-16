@@ -207,14 +207,33 @@ def escalate_overdue(db: Session, *, now: datetime | None = None, limit: int = 2
     if not channels:
         return 0
 
-    # Actionable and past the target. Bounded, because a deployment that turns
-    # escalation on after months of backlog should not try to mail its whole
-    # history in one beat; the rest go out on the next one.
+    # Actionable, past the target, and **not already escalated for this deadline**.
+    #
+    # The exclusion is in SQL, before the limit, and that ordering is the whole
+    # point: filtering in Python afterwards would re-select the same oldest page
+    # on every beat, skip all of it as already queued, and never reach the 201st
+    # overdue finding. A backlog larger than one page would stall permanently.
+    #
+    # Keyed on (finding, deadline) rather than (channel, finding, deadline), so a
+    # finding already escalated somewhere is done. A channel added later therefore
+    # does not hear about findings that went overdue before it existed — the same
+    # rule `enqueue_for_scan` already follows, where a new channel hears about the
+    # next scan rather than every finding in the table.
+    escalated = (
+        select(NotificationDelivery.id)
+        .where(col(NotificationDelivery.kind) == NotificationEventKind.FINDING_OVERDUE)
+        .where(col(NotificationDelivery.finding_id) == col(Finding.id))
+        .where(col(NotificationDelivery.due_at) == col(Finding.due_at))
+    )
+    # Bounded, because a deployment that turns escalation on after months of
+    # backlog should not try to mail its whole history in one beat; with the
+    # exclusion above, each beat now takes the *next* page rather than the same one.
     overdue = list(
         db.exec(
             select(Finding)
             .where(*ownership.actionable())
             .where(col(Finding.due_at).is_not(None), col(Finding.due_at) < at)
+            .where(~escalated.exists())
             .order_by(col(Finding.due_at))
             .limit(limit)
         )
@@ -232,18 +251,9 @@ def escalate_overdue(db: Session, *, now: datetime | None = None, limit: int = 2
         )
         targets = _escalation_targets(finding, group, channels, by_id)
         for channel in targets:
-            # The index is the real guard; this check avoids a savepoint on the
-            # ordinary beat, where every overdue finding has already been sent.
-            already = db.exec(
-                select(NotificationDelivery).where(
-                    col(NotificationDelivery.channel_id) == channel.id,
-                    col(NotificationDelivery.finding_id) == finding.id,
-                    col(NotificationDelivery.kind) == NotificationEventKind.FINDING_OVERDUE,
-                    col(NotificationDelivery.due_at) == finding.due_at,
-                )
-            ).first()
-            if already is not None:
-                continue
+            # No per-row dedup check here: the query above already excluded every
+            # finding that has an escalation for this deadline, and the partial
+            # unique index is the structural guard behind both.
             db.add(
                 NotificationDelivery(
                     channel_id=channel.id,
@@ -384,6 +394,9 @@ def _attempt(
                     if finding.owner_group_id is not None
                     else None
                 ),
+                # The deadline this row was queued for, not wherever the finding's
+                # clock has since moved to.
+                due_at=delivery.due_at,
                 at=at,
             )
             subject = escalation_subject(finding, source)

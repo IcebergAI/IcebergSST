@@ -105,6 +105,7 @@ def finding_overdue(
     source: Source,
     channel: NotificationChannel,
     owner_group: OwnerGroup | None,
+    due_at: datetime | None,
     at: datetime,
     console_url: str | None = None,
 ) -> dict[str, Any]:
@@ -115,9 +116,15 @@ def finding_overdue(
     ``event``. What differs is the ``escalation`` block: the deadline, how far
     past it this is, and who was supposed to be looking at it.
 
+    ``due_at`` is the deadline **the outbox row was queued for**, passed in rather
+    than read off the finding. The finding's own ``due_at`` moves — a resolved
+    secret that comes back gets a fresh clock — so a delivery that failed once and
+    retried after a reopen would otherwise announce a deadline that had not passed
+    yet, about an escalation queued for one that had. The row records which event
+    this is; the finding only records where it is now.
+
     No ``scan``: nothing scanned. A finding goes overdue by the clock passing.
     """
-    due_at = finding.due_at
     if due_at is not None and due_at.tzinfo is None:
         # SQLite hands timestamps back naive; the stored value is UTC either way
         # (`iceberg_api.schemas._assume_utc`).
