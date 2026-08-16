@@ -2,7 +2,7 @@ COMPOSE ?= docker compose -f deploy/compose/docker-compose.yml --env-file .env
 # Engine replica count for `make scale`.
 N ?= 2
 
-.PHONY: help sync hooks lint format type test check docs-check version-check \
+.PHONY: help sync hooks lint format type test check docs-check version-check rehearse \
         images images-verify \
         helm-verify helm-template up down destroy \
         migrate seed logs ps scale init-env secrets engine-token
@@ -49,6 +49,12 @@ docs-check: ## Verify repository-local Markdown links
 # request rather than on the tag.
 version-check: ## Assert every shipped component declares the same version
 	uv run python scripts/check_version.py
+
+# Needs a scratch Postgres and the libpq client tools. CI runs the same script
+# against its own service container, so what an operator can rehearse locally is
+# what every pull request already rehearses.
+rehearse: ## Rehearse the upgrade, rollback and recovery paths (ICEBERG_DATABASE_URL)
+	./scripts/rehearse_release.sh
 
 # ─── Images ───────────────────────────────────────────────────────────────────
 

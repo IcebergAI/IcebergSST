@@ -49,7 +49,7 @@ jobs:
         run: make test
 
   migrations:
-    name: migrate against postgres
+    name: migrate + rehearse upgrade/recovery (postgres)
     runs-on: ubuntu-latest
 
     # apps/api/tests/test_migrations.py runs on SQLite, where alembic takes the
@@ -83,6 +83,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          # Tags and history, because the rehearsal below upgrades from the
+          # previous *release* — and a shallow clone has no tags, so it would
+          # skip that leg for the rest of the project's life while reporting
+          # success.
+          fetch-depth: 0
+          # The rehearsal runs `git worktree add` from a tag and needs no
+          # credential to do it. Leaving a write-capable token in .git/config
+          # while checking out somebody else's historical tree is a wider blast
+          # radius than this job has any use for.
+          persist-credentials: false
 
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
         with:
@@ -106,6 +117,49 @@ jobs:
         run: |
           uv run alembic -c apps/api/src/iceberg_api/alembic.ini downgrade base
           uv run python -m iceberg_api migrate
+
+      # The rehearsal a release promises (#147, docs/releases.md): every revision
+      # applied one at a time rather than in one `head` jump, reversed one at a
+      # time, the previous release's schema upgraded onto this tree's, and a
+      # backup taken, destroyed and restored with a row whose survival is the
+      # assertion. It compares the *Postgres* schema to the models afterwards,
+      # which is how it found three drifts SQLite cannot express.
+      #
+      # Here rather than in its own job because it needs exactly this service and
+      # this environment, and a second Postgres to say the same thing twice is a
+      # minute of CI nobody gets back.
+      # The runner ships an older libpq than the service container above, and
+      # `pg_dump` refuses to dump a server newer than itself — so the backup leg
+      # would otherwise fail on a version mismatch rather than on anything about
+      # this project.
+      #
+      # Borrowed from the service container rather than installed: its client
+      # tools are the server's own version by construction, and adding an apt
+      # repository to a security project's CI to fetch a binary it already has
+      # locally is a supply-chain surface for no gain. The rehearsal script stays
+      # oblivious — it calls `psql` and `pg_dump` from PATH, which is what an
+      # operator does too.
+      - name: Point the Postgres client tools at the service container
+        run: |
+          set -euo pipefail
+          container="$(docker ps --filter ancestor=postgres:18-alpine --format '{{.ID}}' | head -n 1)"
+          if [ -z "$container" ]; then
+            echo "the postgres service container is not running" >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/pgbin"
+          for tool in psql pg_dump; do
+            # `-i` so a dump can be piped back in on stdin, which is the restore
+            # path the runbook documents.
+            printf '#!/usr/bin/env bash\nexec docker exec -i %s %s "$@"\n' \
+              "$container" "$tool" > "$RUNNER_TEMP/pgbin/$tool"
+            chmod +x "$RUNNER_TEMP/pgbin/$tool"
+          done
+          echo "$RUNNER_TEMP/pgbin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/pgbin/pg_dump" --version
+
+      - name: Rehearse the upgrade, rollback, and recovery paths
+        run: ./scripts/rehearse_release.sh
 
   images:
     name: build + verify role images

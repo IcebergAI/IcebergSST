@@ -77,6 +77,13 @@ new one always has a default that preserves current behaviour, or the release is
 **Supported path:** previous minor → current, or any patch within a minor. Skipping a minor is not
 rehearsed; upgrade through it.
 
+"Rehearsed" is literal. `make rehearse` — which CI runs on every pull request against real
+Postgres — applies every revision one at a time rather than in one `head` jump, reverses them one
+at a time, upgrades the previous release's schema onto the current tree, and takes a backup,
+destroys the database, and restores it with a row whose survival is the assertion. It then
+compares the restored schema against the models, which is what makes the claim on this page
+something a reader can check rather than something the project asserts about itself.
+
 **Rollback is bounded by migrations, not by images.** Rolling an image back is trivial and rolling
 a schema back is not, so every migration ships with a `downgrade()` and
 `apps/api/tests/test_migrations.py` proves it reverses. That makes rollback *mechanically*
