@@ -20,7 +20,13 @@ class UserRole(StrEnum):
 class SourceType(StrEnum):
     CONFLUENCE = "confluence"
     JIRA = "jira"
-    SMB = "smb"
+    #: A mounted SMB or NFS share (#145). One type for both protocols, because
+    #: the engine walks a read-only mount rather than speaking either protocol —
+    #: which is what makes them the same connector. The reserved ``smb`` value it
+    #: replaces was never storable: `validate_connection` refused it, so no row
+    #: can carry it and the rename needs no migration. The column is a plain
+    #: VARCHAR (``native_enum=False``, no CHECK), so adding a type never was one.
+    FILESHARE = "fileshare"
 
 
 class ScanTrigger(StrEnum):

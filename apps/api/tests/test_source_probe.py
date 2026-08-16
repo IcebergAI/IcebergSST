@@ -199,8 +199,11 @@ async def test_probing_a_source_without_a_base_url_is_a_programming_error() -> N
 
 
 @pytest.mark.anyio
-async def test_a_source_type_with_no_probe_defined_says_so() -> None:
-    with pytest.raises(ProbeError, match="no connectivity check"):
+async def test_a_source_reached_from_an_engine_has_no_probe_and_says_so() -> None:
+    """A file share is a mount the API cannot see and holds no credential for
+    (#145). "Connectivity OK" reported from the wrong machine is worse than no
+    answer, so the refusal names the reason rather than saying "not yet"."""
+    with pytest.raises(ProbeError, match="reached from an engine"):
         await probe_source(
-            _source(source_type=SourceType.SMB), BASIC_CREDENTIAL, transport=_transport()
+            _source(source_type=SourceType.FILESHARE), BASIC_CREDENTIAL, transport=_transport()
         )

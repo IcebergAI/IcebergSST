@@ -27,6 +27,7 @@ from iceberg_connectors.extraction import (
     extract_text,
 )
 from iceberg_connectors.fake import FAKE_CONNECTOR_TYPE, FakeConnector, FakePage
+from iceberg_connectors.fileshare import FILESHARE_CONNECTOR_TYPE, FileshareConnector
 from iceberg_connectors.jira import JIRA_CONNECTOR_TYPE, JiraConnector
 from iceberg_connectors.protocol import (
     CONNECTOR_SDK_VERSION,
@@ -62,6 +63,7 @@ __all__ = [
     "CONFLUENCE_CONNECTOR_TYPE",
     "CONNECTOR_SDK_VERSION",
     "FAKE_CONNECTOR_TYPE",
+    "FILESHARE_CONNECTOR_TYPE",
     "GLOB_FRIENDLY_KEYS",
     "JIRA_CONNECTOR_TYPE",
     "Checkpoint",
@@ -83,6 +85,7 @@ __all__ = [
     "FakeConnector",
     "FakePage",
     "FetchOutcome",
+    "FileshareConnector",
     "IncrementalConnector",
     "JiraConnector",
     "RateLimitError",

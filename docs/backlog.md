@@ -78,7 +78,11 @@ Confluence-scan-to-triaged-finding flow). M3–M4 complete the product.
   rule: an incremental scan **never** auto-resolves, and the API promotes one to a full scan whenever
   a watermark cannot be trusted — which is what makes the periodic full reconciliation a guarantee
   rather than a convention. See [`adr/0013-incremental-scanning.md`](./adr/0013-incremental-scanning.md).
-- **Epic: SMB/NFS file-share connector (#145)**.
+- **Epic: SMB/NFS file-share connector (#145)** — one `fileshare` connector over a **read-only
+  mount** rather than two protocol clients: SMB and NFS both have kernel-side implementations, and
+  re-implementing either would put a second authentication stack in the engine. Bounded, contained,
+  resumable traversal with explicit gaps; the credential lives in the mount, never in a lease. See
+  [`connectors.md`](./connectors.md) § File shares.
 
 ## M6 — Remediation and exposure closure
 - **Epic: Exposure clusters (#140)** *(shipped)* — correlate findings that contain the same secret

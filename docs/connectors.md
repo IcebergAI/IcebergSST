@@ -269,8 +269,80 @@ space-shaped, so a 403 there means the credential.)
 **Required permissions.** A read-only account that can *Browse Projects* on every project in scope.
 `GET /rest/api/3/myself` must answer for the connectivity check.
 
-## Post-MVP connectors
-- **SMB/NFS file shares** — walk shares, stream files, apply the same text-extraction step.
+## File shares — SMB and NFS (#145)
+
+**The share arrives as a mount, not as a protocol client.** SMB and NFS both have mature,
+kernel-side implementations that every operator already knows how to configure read-only.
+Re-implementing either in the engine would mean a second authentication stack, a second set of
+protocol bugs, and a second place a credential lives. So the engine gets a **read-only mount** and
+walks it, and one connector covers both protocols because at that level they are the same thing.
+
+The consequence is where the credential lives: in the mount, configured by whoever runs the
+engine, and never in a lease. `POST /sources/{id}/test` therefore refuses a file share and says
+why — the API cannot see the engine's mounts, and "connectivity OK" reported from the wrong
+machine is worse than no answer.
+
+**Mounting it.** Read-only, and nothing else on the mount:
+
+```yaml
+# docker-compose / Helm: engine only. The API must not have this mount.
+volumes:
+  - type: bind
+    source: /mnt/shares/finance      # cifs or nfs, mounted by the host
+    target: /mnt/shares/finance
+    read_only: true
+```
+
+```
+# /etc/fstab on the engine host — credentials= keeps them out of the mount table
+//fileserver/finance /mnt/shares/finance cifs credentials=/etc/iceberg/smb.cred,ro,noexec,nosuid,nodev 0 0
+fileserver:/exports/finance /mnt/shares/eng nfs4 ro,noexec,nosuid,nodev 0 0
+```
+
+`ro` is the control that matters; `noexec,nosuid,nodev` are the ones that matter if the share is
+hostile. The connector never writes, but a read-only mount is what makes that structural.
+
+**Configuration** (`connection`, validated on write):
+
+| Key | Meaning |
+|---|---|
+| `protocol` | `smb` or `nfs`. Recorded, not used — the walk is identical, and an operator debugging permissions should not have to read the engine's fstab. |
+| `mount_path` | Absolute path the share is mounted at **inside the engine**. |
+| `roots` | Subtrees relative to the mount. Each becomes one fetch task; empty means the whole mount. |
+| `include` / `exclude` | Globs over the mount-relative path. `exclude` wins. |
+| `follow_symlinks` | Off by default. |
+| `max_file_bytes` | Per-file ceiling, checked before the file is opened. |
+
+**Scope is what an operator asked for, never what exists.** Discovery does not enumerate the
+mount's top-level directories into roots: doing so would make the scope of a scan depend on what
+somebody created last week. One task per configured root, or one for the mount.
+
+**Safety controls**, each for a failure the others do not cover:
+
+- **It escapes.** Every path is resolved and checked against the resolved *root* before it is
+  opened — resolved, because that is the only form a symlink or a `..` cannot lie about. A link
+  into a sibling root is refused too: following it would have two fetch tasks scan the same files
+  and double-count the coverage manifest.
+- **It never ends.** Symlinks are not followed by default; when they are, a visited-inode set stops
+  a cycle. A tree deeper than 64 levels is a recorded gap rather than a stack overflow.
+- **It blocks.** Only regular files are read. A FIFO opened for reading blocks until somebody
+  writes to it — a hung task, which no timeout in the connector would catch.
+- **It is too big, or hostile.** The per-file ceiling is checked from the directory entry, before
+  the file is opened. Everything past that is the shared extraction pipeline below: decompression
+  bombs, parser timeouts, and crash isolation.
+
+**Identity is the path within the share**, not the absolute path — so remounting the same share at
+a different point does not orphan every finding on it (ADR 0006). It is also the `path` display
+key, which is what an analyst writes a `path_glob` suppression against.
+
+**Resuming.** The walk is sorted at every level, which is what makes a checkpoint mean "everything
+up to this path has been handed over". A reclaimed task resumes after that path and neither repeats
+nor skips (#143).
+
+**Gaps are explicit.** A permission-denied file is a *failure* (it should have been readable, so
+reconciliation must not treat its absent findings as remediated); an image or an excluded path is a
+*skip*. A configured root that does not exist is a scope gap, so a typo shows up on the manifest
+rather than as a scan that quietly covered less than it was asked to.
 
 ## Text extraction
 

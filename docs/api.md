@@ -31,8 +31,9 @@ the next request rather than at cookie expiry.
   exists but nothing has been scanned until an engine leases its discovery task.
 
 The `connection` blob is validated against a per-type model on write — a bad `base_url` fails when
-the source is saved, not hours later inside a scan task. Post-MVP types (`smb`) are refused
-with an explanation. Credentials are write-only: supplying one on `POST`/`PATCH` seals it through the
+the source is saved, not hours later inside a scan task. A type with no model yet is refused with an
+explanation. `POST /sources/{id}/test` refuses a `fileshare` source and says why: the share is a
+mount the *engine* holds, so a probe from the API would check the wrong machine (#145). Credentials are write-only: supplying one on `POST`/`PATCH` seals it through the
 secret store, and no response ever carries the plaintext *or* the sealed ref — `has_credential` says
 whether one exists.
 

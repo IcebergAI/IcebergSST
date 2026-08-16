@@ -29,7 +29,12 @@ import structlog
 from dramatiq.broker import MessageProxy
 from dramatiq.brokers.redis import RedisBroker
 from dramatiq.brokers.stub import StubBroker
-from iceberg_connectors import ConfluenceConnector, JiraConnector, registry
+from iceberg_connectors import (
+    ConfluenceConnector,
+    FileshareConnector,
+    JiraConnector,
+    registry,
+)
 from iceberg_core import metrics as _metrics  # noqa: F401  # registers iceberg_* series
 from iceberg_core.config import EngineSettings, get_engine_settings
 from iceberg_core.logging import configure_logging
@@ -134,6 +139,7 @@ def register_connectors() -> tuple[str, ...]:
     """
     registry.register(ConfluenceConnector(), replace=True)
     registry.register(JiraConnector(), replace=True)
+    registry.register(FileshareConnector(), replace=True)
     types = registry.registered_types()
     logger.info("connectors_registered", source_types=list(types))
     return types
