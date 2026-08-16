@@ -88,7 +88,7 @@ the manifest. Cancel or finish the active scan before editing its source.
 
 ## Findings
 - `GET   /findings` (filter: `?source_id=`, `?state=`, `?rule_id=`, `?severity=`, `?assignee_id=`,
-  `?suppressed=`; paginated). Filters compose — every one narrows the same query. **No filter is
+  `?owner_group_id=`, `?unowned=`, `?overdue=`, `?suppressed=`; paginated). Filters compose — every one narrows the same query. **No filter is
   implicit**: the analyst's default view is `?state=open&suppressed=false`, sent by the client, not
   applied silently by the server, so a count can always be reconciled against the table.
 - `GET   /findings/{id}` — the finding plus its full `FindingEvent` history, oldest first. The
@@ -150,6 +150,41 @@ reason a disabled assignee is — the pin would then keep routing from ever resc
 comes from the severity's response target at the moment the finding opened, restarts when a
 resolved finding reopens, and is never recomputed when a target is edited; *overdue* is that date
 being in the past on an open, unsuppressed finding.
+
+## Ownership (#146)
+- `GET  /owner-groups` (viewer+; `?include_disabled=`) — every group with what it currently owes:
+  `open_findings` and `overdue_findings`, counted server-side in one grouped query so a console
+  does not issue two findings queries per group. Disabled groups are hidden by default and found
+  with `?include_disabled=true`, because they still own findings.
+- `POST /owner-groups`, `PATCH /owner-groups/{id}`, `DELETE /owner-groups/{id}` (admin).
+  Deleting a group that owns findings is a `409` naming the alternative: the FK is `SET NULL`, so
+  the delete would succeed and quietly drop a whole team's findings into the unowned queue with no
+  record of where they came from. Disable it instead — that is what "we disbanded that team" means.
+- `GET  /routing-rules` (viewer+) — the rule set **in evaluation order**, disabled rules included.
+  Order is the meaning of a rule set, so this is the order routing actually uses rather than a
+  friendlier one a console would have to re-derive.
+- `POST /routing-rules`, `PATCH /routing-rules/{id}`, `DELETE /routing-rules/{id}` (admin). A
+  matcher sent as `null` is dropped; an omitted one is left alone. Deleting a rule is safe — a rule
+  is consulted, never referenced, and what it decided lives on the finding and in its event trail.
+- `GET  /response-targets` (viewer+), `PUT /response-targets/{severity}` (admin). Edited, never
+  created or deleted: there is one row per severity, seeded by migration, and a severity with no
+  target would mean findings of that severity silently stop getting due dates. A new value applies
+  to findings that open from then on; dates already set are not recomputed.
+
+Writes are admin, reads are viewer+. Changing a rule moves work between teams and rewrites what
+"overdue" means, which is administrative; "is this mine?" is not. Every write is audited
+(`owner_group.*`, `routing_rule.*`, `response_target.updated`) and an edit that changes nothing
+records nothing.
+
+Nothing on this surface touches an existing finding. A rule change decides what happens to findings
+*from now on* — ownership already established is never re-decided, so an edit here cannot silently
+reassign a queue somebody is working. Moving work that already exists is done by hand, through
+`PATCH /findings/{id}`, with a name attached.
+
+Source tags are matched case-insensitively. They are free-form labels typed twice, once on the
+source and once on the rule, and `PCI` failing to match `pci` is a rule that silently routes
+nothing — the hardest kind of misconfiguration to notice, because the symptom is an empty queue
+rather than an error. The stored strings keep the case an operator typed.
 
 ## Remediation (ADR 0012)
 - `GET  /remediation/guidance/{rule_id}` — versioned advice for one rule, split into revoke /

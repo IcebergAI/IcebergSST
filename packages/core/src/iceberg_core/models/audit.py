@@ -54,6 +54,17 @@ AUDIT_CORRELATION_CLUSTER_EXPORTED = "correlation.cluster_exported"
 AUDIT_REMEDIATION_RECORDED = "remediation.recorded"
 AUDIT_REMEDIATION_VERIFIED = "remediation.verified"
 AUDIT_REMEDIATION_RETRACTED = "remediation.retracted"
+#: Ownership configuration (#146). Who is accountable for a finding, and how long
+#: they have, are answers an operator can change — so changing them is an
+#: administrative action. Triage of an individual finding stays in
+#: ``finding_event``, which is richer; this is the *policy* above it.
+AUDIT_OWNER_GROUP_CREATED = "owner_group.created"
+AUDIT_OWNER_GROUP_UPDATED = "owner_group.updated"
+AUDIT_OWNER_GROUP_DELETED = "owner_group.deleted"
+AUDIT_ROUTING_RULE_CREATED = "routing_rule.created"
+AUDIT_ROUTING_RULE_UPDATED = "routing_rule.updated"
+AUDIT_ROUTING_RULE_DELETED = "routing_rule.deleted"
+AUDIT_RESPONSE_TARGET_UPDATED = "response_target.updated"
 
 #: Values for ``target_type``.
 AUDIT_TARGET_USER = "user"
@@ -69,6 +80,11 @@ AUDIT_TARGET_VALIDATION_POLICY = "validation_policy"
 #: row id either — the correlation id itself goes in the detail.
 AUDIT_TARGET_CORRELATION = "correlation"
 AUDIT_TARGET_REMEDIATION = "remediation"
+AUDIT_TARGET_OWNER_GROUP = "owner_group"
+AUDIT_TARGET_ROUTING_RULE = "routing_rule"
+#: A response target is one row per severity and is only ever edited, so its
+#: target id is the row's — the severity itself rides along in ``from``/``to``.
+AUDIT_TARGET_RESPONSE_TARGET = "response_target"
 
 
 class AuditEvent(IcebergModel, table=True):
