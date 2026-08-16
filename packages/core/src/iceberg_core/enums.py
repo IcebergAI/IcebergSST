@@ -332,3 +332,16 @@ class NotificationDeliveryStatus(StrEnum):
     PENDING = "pending"
     DELIVERED = "delivered"
     FAILED = "failed"
+
+
+class NotificationEventKind(StrEnum):
+    """What an announcement is about (#60, #146).
+
+    Two things a channel hears, with different meanings and different dedup keys:
+    a finding *opened* — once per scan that opened it — and a finding that went
+    *overdue* — once per deadline it missed. Stored as a checked VARCHAR like
+    every other enum here, so a third kind is a value, not a migration.
+    """
+
+    FINDING_OPENED = "finding_opened"
+    FINDING_OVERDUE = "finding_overdue"

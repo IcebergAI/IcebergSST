@@ -7,7 +7,8 @@ decides which replica actually does them:
 * **lease reclaim** — return work from engines that stopped heartbeating;
 * **the safety sweeps** — repair scans a crash left wedged;
 * **fleet health** — mark engines that have gone quiet offline;
-* **suppression lapse** — return findings whose suppression has expired.
+* **suppression lapse** — return findings whose suppression has expired;
+* **escalation** — announce findings that have passed their response target.
 
 They live in the API rather than in a separate cron container because both need the
 database and neither needs a connector: an extra deployable would be one more thing
@@ -95,10 +96,18 @@ def run_once(
         # that source, which for a weekly cadence is six days of silence (ADR 0008).
         with session_scope() as db:
             suppressions.release_lapsed(db, now=at)
-        # Announcements queued by reconciliation (#60). Sending here rather than at
-        # ingest means a webhook that hangs for its full timeout delays an alert
-        # instead of an engine's result submission, and a receiver that is down
-        # gets retried on the next beat instead of losing the alert.
+        # Escalations (#146). Queued here, before delivery, for the same reason
+        # suppression lapse is above it: a finding goes overdue by the clock
+        # passing, not by anything happening to it, so nothing else would ever
+        # notice. Queuing immediately before the delivery pass means an escalation
+        # goes out on the beat it becomes due rather than the next one.
+        with session_scope() as db:
+            notification_dispatch.escalate_overdue(db, now=at)
+        # Announcements queued by reconciliation (#60) and the escalations above.
+        # Sending here rather than at ingest means a webhook that hangs for its
+        # full timeout delays an alert instead of an engine's result submission,
+        # and a receiver that is down gets retried on the next beat instead of
+        # losing the alert.
         with session_scope() as db:
             notification_dispatch.deliver_pending(db, resolved, secret_store, now=at)
         # Correlation-id repair (ADR 0011). A no-op unless the key is configured

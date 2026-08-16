@@ -166,6 +166,14 @@ changes a date, never what is found.
 
 `Source.tags` (JSON, `[]`) exists for these rules to match on and for nothing else.
 
+### NotificationDelivery (kinds)
+The outbox carries two kinds (#60, #146). `finding_opened` is caused by a scan and deduplicated on
+`(channel_id, finding_id, scan_id)`; `finding_overdue` is caused by the clock and deduplicated on
+`(channel_id, finding_id, due_at)` through a **partial unique index** — `scan_id` is NULL on an
+escalation, and NULLs do not collide in a unique constraint, so without the index the maintenance
+loop would re-insert one every beat. `due_at` is copied onto the row rather than read back off the
+finding, because a reopened finding gets a fresh deadline and should escalate again for it.
+
 ### Suppression
 Analyst-managed allowlist (ADR 0008).
 - `id`, `scope`: enum `path_glob | fingerprint | rule`

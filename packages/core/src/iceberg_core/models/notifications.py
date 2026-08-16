@@ -4,16 +4,24 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Index, UniqueConstraint
+from sqlalchemy import Index, UniqueConstraint, text
 from sqlmodel import Field
 
-from iceberg_core.enums import NotificationChannelType, NotificationDeliveryStatus
+from iceberg_core.enums import (
+    NotificationChannelType,
+    NotificationDeliveryStatus,
+    NotificationEventKind,
+)
 from iceberg_core.models.base import (
     TimestampedModel,
     enum_type,
     json_type,
     utc_timestamp_type,
 )
+
+#: Predicate for the escalation index below. An escalation is the one delivery
+#: kind with no scan behind it, so its identity is the deadline it is about.
+_ESCALATION_WHERE = text(f"kind = '{NotificationEventKind.FINDING_OVERDUE.value}'")
 
 
 class NotificationChannel(TimestampedModel, table=True):
@@ -68,6 +76,20 @@ class NotificationDelivery(TimestampedModel, table=True):
             "scan_id",
             name="uq_notification_delivery_channel_finding_scan",
         ),
+        # The same guarantee for an escalation, which has no scan to key on (#146).
+        # A partial index rather than adding ``due_at`` to the constraint above,
+        # because ``scan_id`` is NULL on these rows and NULLs do not collide in a
+        # unique constraint — an escalation would re-insert on every maintenance
+        # beat and mail the owning team once a minute until somebody fixed it.
+        Index(
+            "uq_notification_delivery_escalation",
+            "channel_id",
+            "finding_id",
+            "due_at",
+            unique=True,
+            postgresql_where=_ESCALATION_WHERE,
+            sqlite_where=_ESCALATION_WHERE,
+        ),
         # The delivery loop's query: what is pending and due.
         Index("ix_notification_delivery_status_next_attempt_at", "status", "next_attempt_at"),
         # The unique constraint above leads on channel_id, so it cannot serve the
@@ -79,11 +101,30 @@ class NotificationDelivery(TimestampedModel, table=True):
 
     channel_id: uuid.UUID = Field(foreign_key="notification_channel.id", ondelete="CASCADE")
     finding_id: uuid.UUID = Field(foreign_key="finding.id", ondelete="CASCADE")
+
+    #: What this announcement is about (#146). Defaulted to ``finding_opened`` so
+    #: every row written before escalations existed reads as what it was.
+    kind: NotificationEventKind = Field(
+        default=NotificationEventKind.FINDING_OPENED,
+        sa_type=enum_type(NotificationEventKind, name="notification_event_kind"),
+        sa_column_kwargs={"server_default": NotificationEventKind.FINDING_OPENED.value},
+    )
+
     #: The scan that opened the finding. CASCADE rather than the RESTRICT the
     #: finding uses for its own scan references: this row is a delivery record,
     #: not part of the finding's history, so retention pruning old scans (#73)
     #: should take it rather than be blocked by it.
-    scan_id: uuid.UUID = Field(foreign_key="scan.id", ondelete="CASCADE")
+    #:
+    #: Null on an escalation, which no scan caused — a finding goes overdue by the
+    #: clock passing, not by anything happening to it.
+    scan_id: uuid.UUID | None = Field(default=None, foreign_key="scan.id", ondelete="CASCADE")
+
+    #: The deadline an escalation is about, and its dedup key. Copied onto the row
+    #: rather than read back off the finding because the finding's own ``due_at``
+    #: moves when a resolved secret comes back — and a team that missed the *new*
+    #: deadline should hear about it again, while one that already heard about the
+    #: old one should not hear twice. Null for every other kind.
+    due_at: datetime | None = Field(default=None, sa_type=utc_timestamp_type())
 
     status: NotificationDeliveryStatus = Field(
         default=NotificationDeliveryStatus.PENDING,
