@@ -11,13 +11,22 @@ Design specification and reference docs. Start with [`../ARCHITECTURE.md`](../AR
 - [`rules.md`](./rules.md) — detection engine, rule packs, suppressions
 - [`secret-validation.md`](./secret-validation.md) — opt-in credential liveness contracts and controls
 - [`security.md`](./security.md) — threat model and mitigations
+- [`notifications.md`](./notifications.md) — channels, the delivery outbox, escalation, payloads
+- [`retention.md`](./retention.md) — what is pruned, when, and what is kept forever
 - [`deployment.md`](./deployment.md) — docker-compose (dev) + Helm (prod)
 - [`releases.md`](./releases.md) — versioning, support window, compatibility, upgrade and rollback
 - [`runbooks/production-install.md`](./runbooks/production-install.md) — production-oriented
   installation and go-live checks
 - [`runbooks/backup-restore.md`](./runbooks/backup-restore.md) — isolated recovery rehearsal
+- [`runbooks/key-rotation.md`](./runbooks/key-rotation.md) — rotating the master key and the
+  fingerprint pepper without losing triage history
+- [`runbooks/controlled-pilot.md`](./runbooks/controlled-pilot.md) — running a first scan against
+  a real source, with the blast radius bounded
 - [`runbooks/release.md`](./runbooks/release.md) — cutting a release, and verifying a published one
 - [`backlog.md`](./backlog.md) — milestones, epics, and issues (mirrors GitHub)
+- [`spikes/python-3.14-compat.md`](./spikes/python-3.14-compat.md) — why the workspace pins 3.14,
+  and what had to be true first
+- [`../web/README.md`](../web/README.md) — vendoring the console's frontend assets
 
 ## Decision records (ADRs)
 - [0001 — Job queue: Redis + Dramatiq](./adr/0001-job-queue.md)
@@ -32,3 +41,4 @@ Design specification and reference docs. Start with [`../ARCHITECTURE.md`](../AR
 - [0010 — Credential liveness validation](./adr/0010-secret-liveness-validation.md)
 - [0011 — Credential correlation & exposure clusters](./adr/0011-credential-correlation.md)
 - [0012 — Rotation guidance & remediation evidence](./adr/0012-remediation-evidence.md)
+- [0013 — Incremental & resumable scanning](./adr/0013-incremental-scanning.md)

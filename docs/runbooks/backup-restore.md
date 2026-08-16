@@ -4,6 +4,12 @@ IcebergSST's database contains finding locations, triage, audit history, task st
 credential references. A database backup without the matching master key and fingerprint pepper is
 not a recoverable backup. Never put either value in a command argument, log, ticket, or repository.
 
+> **This procedure is rehearsed, not merely written.** `make rehearse` — which CI runs on every
+> pull request against a real Postgres — takes a backup, destroys the database, restores it, and
+> asserts both that a row written before the dump came back and that the restored schema still
+> matches the models. A backup nobody has restored is a plan; see
+> [`release.md`](./release.md) for where it sits in an upgrade.
+
 ## Before the drill
 
 - Record the exact application/chart/image versions and database migration revision.

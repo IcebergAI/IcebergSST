@@ -27,6 +27,12 @@ Reversible, and the downgrade restores the previous shape exactly.
   request against real Postgres: every revision applied and reversed one at a time, the previous
   release's schema upgraded onto the current tree, and a backup destroyed and restored.
 
+### Changed
+
+- `make docs-check` now also verifies that every documented `make` target and every `ICEBERG_*`
+  setting the docs name still exists, and reads only the files git tracks — so it no longer fails
+  on a contributor's unrelated local directory (#150).
+
 ## [0.1.0] — unreleased
 
 The first tagged release. Everything below is the state of the project at the point a version
