@@ -10,12 +10,22 @@ Sections appear in this order when they apply, because that is the order an oper
 
 ## [Unreleased]
 
+### Migrations
+
+`0016` reconciles three columns the models and the migrations disagreed about — two VARCHAR
+lengths and three unique constraints that had been created as unique indexes. No behaviour
+changes; the fix keeps `--autogenerate` from folding them into an unrelated migration later.
+Reversible, and the downgrade restores the previous shape exactly.
+
 ### Added
 
 - Release policy, a signed release pipeline, and a version-consistency invariant (#147). Every
   published artifact — both role images, the Helm chart, and the source archive — is signed with
   cosign's keyless flow and carries an SBOM and GitHub build provenance, so an operator can verify
   what they are running without this project holding a signing key.
+- An upgrade, rollback and recovery rehearsal (`make rehearse`) that CI runs on every pull
+  request against real Postgres: every revision applied and reversed one at a time, the previous
+  release's schema upgraded onto the current tree, and a backup destroyed and restored.
 
 ## [0.1.0] — unreleased
 
