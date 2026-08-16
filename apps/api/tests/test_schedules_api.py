@@ -1,7 +1,7 @@
 """Schedule CRUD (#33)."""
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -174,9 +174,14 @@ def test_changing_the_cron_recomputes_the_next_run_and_is_audited(
     ).json()
 
     assert updated["cron"] == "*/15 * * * *"
-    assert datetime.fromisoformat(updated["next_run_at"]) < datetime.fromisoformat(
-        created["next_run_at"]
-    )
+    # Asserted against the *new* cron rather than against the old schedule's time.
+    # "Sooner than 03:00" is true for `*/15` all day and false for the fifteen
+    # minutes before it, so a suite run at 02:47 failed on the clock rather than
+    # on the code. The next quarter-hour is what recomputation should produce, and
+    # saying so is both deterministic and a stronger claim.
+    next_run = datetime.fromisoformat(updated["next_run_at"])
+    assert (next_run.minute % 15, next_run.second, next_run.microsecond) == (0, 0, 0)
+    assert next_run <= datetime.now(UTC) + timedelta(minutes=15)
     actions = [
         event.action
         for event in audit.events_for(
