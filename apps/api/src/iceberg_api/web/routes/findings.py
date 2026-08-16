@@ -16,7 +16,7 @@ Confluence and are the reason the CSP on this page is strict.
 """
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any
 from urllib.parse import urlsplit
 
@@ -25,8 +25,10 @@ from iceberg_core.enums import FindingState, RemediationActionKind, Severity, Us
 from pydantic import ValidationError
 
 from iceberg_api.auth.dependencies import CsrfProtected, SessionDep, SettingsDep
+from iceberg_api.findings import ownership
 from iceberg_api.findings import routes as api
 from iceberg_api.findings.schemas import FindingUpdate
+from iceberg_api.ownership.routes import list_owner_groups
 from iceberg_api.pagination import DEFAULT_LIMIT
 from iceberg_api.remediation.routes import (
     read_guidance,
@@ -52,6 +54,10 @@ router = APIRouter(include_in_schema=False)
 #: ``?assignee=me`` — the overview links to it, and it is the one assignee filter
 #: an analyst can use without being able to list users (that is admin-only).
 ASSIGNEE_ME = "me"
+
+#: ``?owner=none`` — the unowned queue, as one option in the owner dropdown
+#: rather than a second control the two of which must not disagree.
+OWNER_NONE = "none"
 
 
 def _enum_or_none(enum: Any, value: str | None) -> Any:
@@ -98,11 +104,18 @@ async def findings_page(  # one parameter per filter, by design
     severity: Annotated[str | None, Query()] = None,
     rule_id: Annotated[str | None, Query()] = None,
     assignee: Annotated[str | None, Query()] = None,
+    owner: Annotated[str | None, Query()] = None,
+    overdue: Annotated[str | None, Query()] = None,
     suppressed: Annotated[str | None, Query()] = None,
     cursor: Annotated[str | None, Query()] = None,
 ) -> Response:
     """The queue. Every filter is in the URL; none is applied behind your back."""
     assignee_id = user.id if assignee == ASSIGNEE_ME else id_or_none(assignee)
+    # One control for two API parameters: a team, or the unowned queue. The API
+    # keeps them separate (`?owner_group_id=` and `?unowned=`) because an absent
+    # query parameter already means "do not filter" there; a `<select>` has no
+    # such ambiguity, and one dropdown beats two that must not both be set.
+    unowned = True if owner == OWNER_NONE else None
 
     page = await api.list_findings(
         user=user,
@@ -112,12 +125,16 @@ async def findings_page(  # one parameter per filter, by design
         rule_id=optional(rule_id),
         severity=_enum_or_none(Severity, severity),
         assignee_id=assignee_id,
+        owner_group_id=None if unowned else id_or_none(owner),
+        unowned=unowned,
+        overdue=_bool_or_none(overdue),
         suppressed=_bool_or_none(suppressed),
         limit=DEFAULT_LIMIT,
         cursor=cursor,
     )
     sources = await list_sources(user=user, db=db, limit=DEFAULT_LIMIT, cursor=None)
     rules = await list_rules(user=user, db=db, settings=settings)
+    owner_groups = await list_owner_groups(user=user, db=db, include_disabled=True)
 
     return render_page(
         request,
@@ -131,12 +148,24 @@ async def findings_page(  # one parameter per filter, by design
             "rules": rules.rules,
             "states": list(FindingState),
             "severities": list(Severity),
+            "owner_groups": owner_groups,
+            "owner_names": {group.id: group.name for group in owner_groups},
+            # Computed once here rather than compared in the template: "overdue"
+            # is one definition (`findings/ownership.py`), and a second one
+            # written in Jinja would be the copy that drifts.
+            "overdue_ids": {
+                finding.id
+                for finding in page.items
+                if ownership.overdue(finding, at=datetime.now(UTC))
+            },
             "selected": {
                 "source_id": source_id or "",
                 "state": state or "",
                 "severity": severity or "",
                 "rule_id": rule_id or "",
                 "assignee": assignee or "",
+                "owner": owner or "",
+                "overdue": overdue or "",
                 "suppressed": suppressed or "",
             },
             "query": request.url.query,
@@ -172,6 +201,7 @@ async def triage(  # one parameter per form field
     settings: SettingsDep,
     state: Annotated[str, Form()],
     assignee: Annotated[str, Form()] = "",
+    owner: Annotated[str, Form()] = "",
     comment: Annotated[str, Form()] = "",
     notes: Annotated[str | None, Form()] = None,
     csrf_token: Annotated[str, Form()] = "",
@@ -181,7 +211,10 @@ async def triage(  # one parameter per form field
     ``assignee`` distinguishes three things a browser cannot: an empty field
     means "leave the assignee alone", ``none`` means unassign, and anything else
     is a user id. That mirrors ``FindingUpdate``, where a field omitted and a
-    field set to ``null`` are deliberately different.
+    field set to ``null`` are deliberately different. ``owner`` is read the same
+    way — and any value supplied there pins the finding, so "leave unchanged" has
+    to be expressible or an analyst could not save a comment without also taking
+    the routing decision away from the rules.
     """
     error = None
     try:
@@ -197,6 +230,13 @@ async def triage(  # one parameter per form field
             payload["assignee_id"] = None
         elif assignee:
             payload["assignee_id"] = id_or_none(assignee)
+        # Same three-way distinction for the owning team, and the same reason: a
+        # `<select>` cannot post "field omitted", so an empty value stands for it
+        # (#146). Anything else pins the finding, `none` included.
+        if owner == OWNER_NONE:
+            payload["owner_group_id"] = None
+        elif owner:
+            payload["owner_group_id"] = id_or_none(owner)
 
         finding = await api.update_finding(
             finding_id=finding_id,
@@ -233,10 +273,17 @@ async def _detail_context(finding: Any, user: Any, db: Any) -> dict[str, Any]:
         names = {candidate.id: candidate.display_name for candidate in page.items}
     names.setdefault(user.id, user.display_name)
 
+    # Viewer+ at the API, so an analyst gets the real picker here even though the
+    # *user* list above is admin-only: teams are not a directory of people.
+    owner_groups = await list_owner_groups(user=user, db=db, include_disabled=True)
+
     return {
         "finding": finding,
         "assignable": assignable,
         "user_names": names,
+        "owner_groups": owner_groups,
+        "owner_names": {group.id: group.name for group in owner_groups},
+        "is_overdue": ownership.overdue(finding, at=datetime.now(UTC)),
         "states": list(FindingState),
         "island": {"state": finding.state.value},
         "error": None,

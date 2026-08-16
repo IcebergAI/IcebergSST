@@ -44,7 +44,7 @@ contract (`docs/api.md`), and HTML routes in it would describe a second one.
 | Path | Screen | Drives | Read by |
 |---|---|---|---|
 | `/` | Overview queue | the list endpoints below | viewer |
-| `/findings`, `/findings/{id}` | Queue, detail, triage, remediation panel | `GET/PATCH /findings`, `/remediation/guidance/{rule_id}`, `/findings/{id}/remediations…` (ADR 0012) | viewer / analyst to triage or record |
+| `/findings`, `/findings/{id}` | Queue, detail, triage, remediation panel, owner and due date (#146) | `GET/PATCH /findings`, `/remediation/guidance/{rule_id}`, `/findings/{id}/remediations…` (ADR 0012) | viewer / analyst to triage or record |
 | `/clusters`, `/clusters/{id}` | Exposure clusters: spread view, topology, export link | `GET /correlation/clusters…` (ADR 0011) | analyst |
 | `/scans`, `/scans/{id}` | List, live status, cancel | `/scans`, `/scans/{id}/tasks`, `/scans/{id}/cancel` | viewer / analyst to cancel |
 | `/sources`, `/sources/{id}` | List, create/edit, connectivity test | `/sources`, `/sources/{id}/test`, `/sources/{id}/scan` | viewer / admin to write |
@@ -53,11 +53,26 @@ contract (`docs/api.md`), and HTML routes in it would describe a second one.
 | `/rules` | Detection surface in force | `GET /rules` | viewer |
 | `/engines` | Fleet health, enrolment | `/engines`, `/engines/register` | admin |
 | `/channels` | Notification channels | `/notifications/channels` | admin |
+| `/ownership` | Teams, routing rules, response targets (#146) | `/owner-groups`, `/routing-rules`, `/response-targets` | admin |
 | `/users` | Roles and accounts | `/users` | admin |
 
 The rail's **Administration** group is rendered only for admins, because every
 route behind it is admin-only. That is a courtesy; `rbac.require_role` is the
 control, and a viewer who types `/engines` gets a 403 page.
+
+**A `<select>` cannot post "field omitted".** The triage panel's `assignee` and
+`owner` controls each stand for three states the API distinguishes — leave alone,
+clear, or set — so an empty value means *unchanged*, `none` means null, and
+anything else is an id. `owner` needs this more than `assignee` does: any value
+supplied there pins the finding against routing (#146), so without an
+"unchanged" option an analyst could not add a comment without also taking the
+decision away from the rules.
+
+The findings queue collapses `?owner_group_id=` and `?unowned=` into a single
+`?owner=` dropdown for the same reason in reverse: the API keeps them separate
+because an absent query parameter already means "do not filter" there, while a
+dropdown has no such ambiguity and two controls that must not both be set is a
+state a URL can carry and an operator can get wrong.
 
 ## HTMX conventions
 

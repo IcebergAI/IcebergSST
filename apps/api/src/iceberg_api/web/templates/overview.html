@@ -32,6 +32,16 @@
     <div class="stat-num">{{ mine_count }}</div>
     <div class="stat-foot">Waiting on your decision</div>
   </a>
+  <a class="stat {{ 'stat--crit' if overdue_count }}" href="/findings?overdue=true">
+    <div class="stat-label">Overdue</div>
+    <div class="stat-num">{{ overdue_count }}{{ '+' if overdue_capped }}</div>
+    <div class="stat-foot">Past the response target for their severity</div>
+  </a>
+  <a class="stat" href="/findings?state=open&amp;suppressed=false&amp;owner=none">
+    <div class="stat-label">Unowned</div>
+    <div class="stat-num">{{ unowned_count }}{{ '+' if unowned_capped }}</div>
+    <div class="stat-foot">Open, and no team is accountable yet</div>
+  </a>
   <a class="stat" href="/sources">
     <div class="stat-label">Sources</div>
     <div class="stat-num">{{ source_count }}{{ '+' if source_capped }}</div>

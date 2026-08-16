@@ -23,6 +23,7 @@ pin a due date rather than assert around one.
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Protocol
 
 import structlog
 from iceberg_core.enums import SEVERITY_RANK, FindingEventKind, FindingState, Severity
@@ -197,7 +198,22 @@ def start_clock(
     return finding.due_at
 
 
-def overdue(finding: Finding, *, at: datetime) -> bool:
+class Dated(Protocol):
+    """The three fields "is this late?" actually depends on.
+
+    A protocol rather than :class:`Finding`, because the console asks the same
+    question of a ``FindingRead`` — the API's response shape — and the answer must
+    be the same one. Widening the signature is how that stays true: the
+    alternative is the template re-deriving *overdue* in Jinja, and a second
+    definition is the one that drifts.
+    """
+
+    state: FindingState
+    suppressed_at: datetime | None
+    due_at: datetime | None
+
+
+def overdue(finding: Dated, *, at: datetime) -> bool:
     """Whether an *actionable* finding has passed its target.
 
     Actionable means open and not suppressed. A suppressed finding still carries

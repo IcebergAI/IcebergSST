@@ -12,6 +12,7 @@ from iceberg_api.web.routes import (
     admin,
     clusters,
     findings,
+    ownership,
     scans,
     schedules,
     shell,
@@ -32,5 +33,6 @@ router.include_router(sources.router)
 router.include_router(schedules.router)
 router.include_router(suppressions.router)
 router.include_router(admin.router)
+router.include_router(ownership.router)
 
 __all__ = ["router"]

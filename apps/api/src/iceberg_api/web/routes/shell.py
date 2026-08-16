@@ -142,6 +142,21 @@ async def overview(
     unassigned = [finding for finding in open_findings.items if finding.assignee_id is None]
     mine = [finding for finding in open_findings.items if finding.assignee_id == user.id]
 
+    # The two ownership queues (#146). Asked of the API rather than counted from
+    # `open_findings` above: both are questions the database answers precisely,
+    # and deriving them from one capped page would under-report exactly when the
+    # backlog is large enough to matter.
+    overdue = await list_findings(user=user, db=db, overdue=True, limit=OVERVIEW_LIMIT, cursor=None)
+    unowned = await list_findings(
+        user=user,
+        db=db,
+        state=FindingState.OPEN,
+        suppressed=False,
+        unowned=True,
+        limit=OVERVIEW_LIMIT,
+        cursor=None,
+    )
+
     active = await list_scans(
         user=user,
         db=db,
@@ -164,6 +179,8 @@ async def overview(
     open_count, open_capped = _tally(open_findings)
     critical_count, critical_capped = _tally(critical)
     source_count, source_capped = _tally(sources)
+    overdue_count, overdue_capped = _tally(overdue)
+    unowned_count, unowned_capped = _tally(unowned)
 
     return render_page(
         request,
@@ -178,6 +195,10 @@ async def overview(
             "mine_count": len(mine),
             "source_count": source_count,
             "source_capped": source_capped,
+            "overdue_count": overdue_count,
+            "overdue_capped": overdue_capped,
+            "unowned_count": unowned_count,
+            "unowned_capped": unowned_capped,
             "active_scans": active.items,
             "recent_scans": recent.items,
             "recent_findings": open_findings.items[:8],
