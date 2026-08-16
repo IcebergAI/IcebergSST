@@ -6,12 +6,13 @@ for that — a constraint that stops a second row, and an idempotency key that
 stops a second ticket when a request arrived and its reply did not — and each is
 tested for on its own, because either alone leaves a duplicate path open.
 
-The rest is what happens when delivery goes wrong. The API surface that drives
-all of this, and its own tests, are in `test_handoff_api.py`.
+The rest is what happens when delivery goes wrong. The wire contract these tests
+hold the payload to is documented in `docs/handoff.md`; the API surface that
+drives all of this, and its own tests, follow separately.
 """
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -494,6 +495,59 @@ def test_a_reply_that_says_nothing_is_still_a_successful_handoff(
 
     _deliver(session, dispatch_settings, secret_store, RecordingSender(reply={}))
 
+    session.refresh(handoff)
+    assert handoff.status is HandoffStatus.DELIVERED
+    assert handoff.external_id is None
+
+
+def test_an_oversized_reply_is_never_read_into_memory(
+    session: Session,
+    dispatch_settings: ApiSettings,
+    secret_store: Any,
+    make_source: Callable[..., Source],
+    make_finding: Callable[..., Finding],
+) -> None:
+    """The cap has to stop the *read*, not measure it afterwards.
+
+    Buffering the whole response and then checking its length puts the hundred
+    megabytes in the maintenance loop's memory first — the receiver is somebody
+    else's system, and the loop runs one replica at a time for every due
+    hand-over. The outcome is unchanged either way, which is exactly why this
+    asserts on how much was pulled off the socket rather than on the row.
+    """
+    import httpx2
+    from iceberg_api.handoff.transport import MAX_REPLY_BYTES, WebhookSender
+
+    chunk = b"x" * 8192
+    chunks_offered = 512  # 4 MiB, far past the cap
+    pulled = 0
+
+    def flood() -> Iterator[bytes]:
+        nonlocal pulled
+        for _ in range(chunks_offered):
+            pulled += 1
+            yield chunk
+
+    target = _target(session)
+    handoff = service.request(session, make_finding(make_source()), target, actor_id=None, now=NOW)
+    session.commit()
+
+    sender = WebhookSender(
+        dispatch_settings,
+        secret_store,
+        transport=httpx2.MockTransport(
+            lambda request: httpx2.Response(
+                201, content=flood(), headers={"Content-Type": "application/json"}
+            )
+        ),
+    )
+    service.deliver_pending(session, dispatch_settings, secret_store, sender=sender, now=NOW)
+
+    # One chunk past the cap is enough to know; the rest is never pulled.
+    assert pulled <= MAX_REPLY_BYTES // len(chunk) + 1
+
+    # And the hand-over still stands: the 201 said the work item was created, so
+    # an unreadable reply costs the external id, not the delivery.
     session.refresh(handoff)
     assert handoff.status is HandoffStatus.DELIVERED
     assert handoff.external_id is None
