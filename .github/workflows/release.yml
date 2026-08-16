@@ -1,0 +1,291 @@
+name: Release
+
+# Tags only. A release is a deliberate act with a name, not a side effect of
+# merging — and `docs/releases.md` says only tagged releases are supported, which
+# has to be true of what this workflow will sign.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to re-publish (recovery only)"
+        required: true
+        type: string
+
+# Least privilege, then widened per job. `id-token: write` is what makes the
+# keyless signing below possible: cosign exchanges the job's OIDC identity for a
+# short-lived certificate, so this project holds no signing key that could leak,
+# expire, or need rotating.
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # The tag is checked before anything is built or published. A release whose
+  # version files disagree, or whose CHANGELOG has no entry, is a release an
+  # operator cannot reason about — and once an artifact is signed and pushed it
+  # is public, so the only place to catch it is here.
+  verify:
+    name: verify the tag is releasable
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          # Nothing here pushes with git; the registry and release steps use
+          # their own tokens. Leaving the checkout credential in .git/config
+          # would put a write-capable token inside every artifact built from
+          # this tree.
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
+        with:
+          enable-cache: true
+
+      - name: Resolve the version from the tag
+        id: resolve
+        env:
+          REF_NAME: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${REF_NAME#v}"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      - name: The declared versions agree with each other and with the tag
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          uv run python scripts/check_version.py
+          declared="$(uv run python -c \
+            'import tomllib,pathlib;print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          if [ "$declared" != "$VERSION" ]; then
+            echo "tag v$VERSION does not match the declared version $declared" >&2
+            exit 1
+          fi
+
+      - name: The CHANGELOG documents this version
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! grep -qF "## [$VERSION]" CHANGELOG.md; then
+            echo "CHANGELOG.md has no '## [$VERSION]' entry; the release notes come from it" >&2
+            exit 1
+          fi
+
+  images:
+    name: build, sign, and attest the role images
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      # Keyless signing and provenance attestation both need the job's OIDC
+      # identity; neither needs a stored key.
+      id-token: write
+      attestations: write
+    strategy:
+      matrix:
+        role: [api, engine]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          # Nothing here pushes with git; the registry and release steps use
+          # their own tokens. Leaving the checkout credential in .git/config
+          # would put a write-capable token inside every artifact built from
+          # this tree.
+          persist-credentials: false
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Built here rather than promoted from the CI job: CI builds to verify
+      # deployment invariants and throws the image away, and promoting an
+      # untagged artifact across workflows would mean signing something whose
+      # provenance is a second workflow's word for it.
+      - name: Build and push
+        id: build
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.role }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          ROLE: ${{ matrix.role }}
+        run: |
+          set -euo pipefail
+          image="$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')"
+          docker build -f "deploy/docker/$ROLE.Dockerfile" \
+            -t "$image:$VERSION" -t "$image:latest" .
+          docker push "$image:$VERSION"
+          docker push "$image:latest"
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "$image:$VERSION" | cut -d@ -f2)"
+          printf 'image=%s\n' "$image" >> "$GITHUB_OUTPUT"
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      # Signed by digest, never by tag. A tag is a mutable pointer the registry
+      # can move; a digest is the artifact. Verifying a signature on a tag would
+      # prove something about a name rather than about the bytes that run.
+      - name: Sign the image
+        env:
+          REFERENCE: ${{ steps.build.outputs.image }}@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$REFERENCE"
+
+      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+        with:
+          image: ${{ steps.build.outputs.image }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          artifact-name: ${{ matrix.role }}-sbom.spdx.json
+          output-file: ${{ matrix.role }}-sbom.spdx.json
+
+      # The SBOM is attached to the image and signed with it, so "does this
+      # release contain the library in that advisory?" is answerable from the
+      # registry without rebuilding anything.
+      - name: Attach and sign the SBOM
+        env:
+          REFERENCE: ${{ steps.build.outputs.image }}@${{ steps.build.outputs.digest }}
+          ROLE: ${{ matrix.role }}
+        run: |
+          set -euo pipefail
+          cosign attest --yes --predicate "$ROLE-sbom.spdx.json" --type spdxjson "$REFERENCE"
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ steps.build.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ matrix.role }}-sbom
+          path: ${{ matrix.role }}-sbom.spdx.json
+
+  chart:
+    name: package and sign the Helm chart
+    needs: [verify, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          # Nothing here pushes with git; the registry and release steps use
+          # their own tokens. Leaving the checkout credential in .git/config
+          # would put a write-capable token inside every artifact built from
+          # this tree.
+          persist-credentials: false
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      # The chart's own version moves independently of the application's, so it
+      # is read from the chart rather than assumed to be the tag. `appVersion` is
+      # the one the verify job pinned to the tag.
+      - name: Package and push
+        id: package
+        # Every expansion goes through the environment rather than into the shell
+        # text: `github.actor` and `github.repository` are attacker-influenceable
+        # in the general case, and a `run:` block that interpolates them is a
+        # shell-injection sink even when this repository's values are benign.
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          chart_version="$(helm show chart deploy/helm/icebergsst | awk '/^version:/ {print $2}')"
+          helm package deploy/helm/icebergsst --destination dist
+          printf '%s' "$REGISTRY_TOKEN" | helm registry login "$REGISTRY" \
+            --username "$REGISTRY_USER" --password-stdin
+          repository="$(echo "oci://$REGISTRY/$REPOSITORY/charts" | tr '[:upper:]' '[:lower:]')"
+          helm push "dist/icebergsst-$chart_version.tgz" "$repository" 2>&1 | tee push.log
+          digest="$(awk '/^Digest:/ {print $2}' push.log)"
+          printf 'reference=%s\n' "${repository#oci://}/icebergsst@$digest" >> "$GITHUB_OUTPUT"
+          printf 'path=dist/icebergsst-%s.tgz\n' "$chart_version" >> "$GITHUB_OUTPUT"
+
+      - name: Sign the chart
+        env:
+          REFERENCE: ${{ steps.package.outputs.reference }}
+        run: cosign sign --yes "$REFERENCE"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: chart
+          path: ${{ steps.package.outputs.path }}
+
+  release:
+    name: publish the GitHub release
+    needs: [verify, images, chart]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          # Nothing here pushes with git; the registry and release steps use
+          # their own tokens. Leaving the checkout credential in .git/config
+          # would put a write-capable token inside every artifact built from
+          # this tree.
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      # A source archive that matches the tag, signed alongside the images. `git
+      # archive` rather than the auto-generated tarball: GitHub's is produced on
+      # demand and has changed byte-for-byte across platform upgrades, which makes
+      # a checksum published against it a promise this project cannot keep.
+      - name: Build and sign the source archive
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          archive="dist/icebergsst-$VERSION-source.tar.gz"
+          git archive --format=tar.gz --prefix="icebergsst-$VERSION/" -o "$archive" HEAD
+          cosign sign-blob --yes --bundle "$archive.cosign.bundle" "$archive"
+          (cd dist && sha256sum ./* > SHA256SUMS)
+
+      - name: Extract this version's release notes
+        id: notes
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The CHANGELOG entry *is* the release notes (docs/releases.md), so they
+          # are never written twice and can never disagree.
+          awk -v version="## [$VERSION]" '
+            index($0, version) == 1 { capturing = 1; next }
+            capturing && /^## \[/ { exit }
+            capturing { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "no release notes found for $VERSION" >&2
+            exit 1
+          fi
+
+      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3.0.2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          body_path: notes.md
+          files: dist/*
+          fail_on_unmatched_files: true
