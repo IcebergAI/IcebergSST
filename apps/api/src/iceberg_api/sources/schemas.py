@@ -12,6 +12,8 @@ Two rules shape these:
 
 import re
 import uuid
+from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Any, Self
 from urllib.parse import urlsplit, urlunsplit
 
@@ -28,12 +30,20 @@ from pydantic import (
 
 from iceberg_api.schemas import UtcDatetime
 
-#: Types an engine can actually scan. File shares are still a post-MVP connector,
-#: and a source nothing can scan is worse than a clear refusal.
-SUPPORTED_SOURCE_TYPES = frozenset({SourceType.CONFLUENCE, SourceType.JIRA})
+#: Types an engine can actually scan. A source nothing can scan is worse than a
+#: clear refusal, so this set and `CONNECTION_MODELS` below are kept in step.
+SUPPORTED_SOURCE_TYPES = frozenset({SourceType.CONFLUENCE, SourceType.JIRA, SourceType.FILESHARE})
 
 #: A Jira project key as Atlassian defines it. Mirrors the connector's own guard.
 _JIRA_PROJECT_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,254}$")
+
+
+class FileshareProtocol(StrEnum):
+    """What backs a mounted share. Documentation, not behaviour — see
+    :class:`FileshareConnection`."""
+
+    SMB = "smb"
+    NFS = "nfs"
 
 
 class ConfluenceConnection(BaseModel):
@@ -218,9 +228,78 @@ class JiraConnection(BaseModel):
         return cleaned
 
 
+class FileshareConnection(BaseModel):
+    """A mounted SMB or NFS share, and how much of it is in scope (#145).
+
+    The engine walks a **read-only mount**, not a protocol client: both SMB and
+    NFS have kernel-side implementations an operator already knows how to
+    configure, and re-implementing either would put a second authentication stack
+    and a second credential store in the engine. So there is no host, no share
+    name, and no credential here — the mount carries all three, and
+    ``docs/connectors.md`` documents what has to be mounted where.
+
+    Every key the fileshare connector reads must be a field here: the blob is
+    validated with ``extra="forbid"``, so a key this model omits is one no admin
+    can store and no engine will ever receive.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Which protocol backs the mount. Recorded rather than used: the walk is
+    #: identical either way, and an operator debugging a permissions problem
+    #: should not have to go and read the engine's fstab to find out which.
+    protocol: FileshareProtocol
+    #: Absolute path the share is mounted at *inside the engine*. Absolute
+    #: because a relative one would resolve against whatever directory the worker
+    #: happened to start in.
+    mount_path: str = Field(min_length=1, max_length=1024)
+    #: Subtrees within the mount, relative to it. Empty means the whole mount.
+    #: Each becomes one fetch task, which is what parallelises a scan — and how
+    #: an operator says "finance, not the entire file server".
+    roots: list[str] = Field(default_factory=list, max_length=256)
+    #: Glob filters over the mount-relative path. ``include`` empty means every
+    #: file; ``exclude`` always wins, because the safe reading of an ambiguous
+    #: rule set is the narrower one.
+    include: list[str] = Field(default_factory=list, max_length=64)
+    exclude: list[str] = Field(default_factory=list, max_length=64)
+    #: Off by default. A share full of symlinks into other shares is how a scan
+    #: quietly grows to cover systems nobody authorised — and the connector still
+    #: refuses any resolved path outside the root even when this is on.
+    follow_symlinks: bool = False
+    #: Per-file ceiling, before anything is read. Bounded above by what
+    #: extraction would refuse anyway, so raising it past that changes nothing.
+    max_file_bytes: int = Field(default=32 * 1024 * 1024, ge=1, le=32 * 1024 * 1024)
+
+    @field_validator("mount_path")
+    @classmethod
+    def _absolute_mount(cls, value: str) -> str:
+        trimmed = value.strip().rstrip("/") or "/"
+        if not trimmed.startswith("/"):
+            raise ValueError("mount_path must be absolute, like /mnt/shares/finance")
+        return trimmed
+
+    @field_validator("roots", "include", "exclude")
+    @classmethod
+    def _clean_paths(cls, value: list[str]) -> list[str]:
+        cleaned = [item.strip() for item in value if item.strip()]
+        for item in cleaned:
+            if item.startswith("/"):
+                # A root is relative to the mount. An absolute one reads as "the
+                # filesystem root", and the connector would refuse it later — a
+                # 422 at save time is the better place to find out.
+                raise ValueError("paths are relative to mount_path; drop the leading /")
+            if ".." in PurePosixPath(item).parts:
+                # The connector re-checks containment on the *resolved* path, so
+                # this is not the control. It is the error message: an operator
+                # who typed `../` should be told, not silently given nothing.
+                raise ValueError("paths must not contain ..")
+        return cleaned
+
+
 CONNECTION_MODELS: dict[SourceType, type[BaseModel]] = {
     SourceType.CONFLUENCE: ConfluenceConnection,
     SourceType.JIRA: JiraConnection,
+    SourceType.FILESHARE: FileshareConnection,
 }
 
 

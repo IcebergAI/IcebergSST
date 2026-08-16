@@ -91,10 +91,20 @@ async def probe_source(
     *,
     transport: httpx2.AsyncBaseTransport | None = None,
 ) -> ConnectivityResult:
-    """Make one authenticated request and describe what happened."""
+    """Make one authenticated request and describe what happened.
+
+    Not every source type can have one. A file share is reachable from the
+    *engine*, through a mount the API cannot see and does not hold a credential
+    for (#145) — a probe from here would either check nothing or check the wrong
+    machine, and "connectivity OK" from the wrong machine is worse than no answer.
+    Those types say so rather than pretending.
+    """
     probe = _PROBES.get(source.type)
     if probe is None:
-        raise ProbeError(f"no connectivity check is defined for {source.type.value} sources yet")
+        raise ProbeError(
+            f"no connectivity check is defined for {source.type.value} sources; "
+            f"they are reached from an engine rather than from the API"
+        )
     model, default_prefix, collection = probe
 
     try:

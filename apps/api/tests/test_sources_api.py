@@ -230,17 +230,30 @@ def test_a_trailing_slash_in_the_base_url_is_normalised(
     assert body["connection"]["base_url"] == "https://example.atlassian.net"  # type: ignore[index]
 
 
-@pytest.mark.parametrize("unsupported", ["smb"])
-def test_post_mvp_connectors_are_refused_with_an_explanation(
+def test_every_source_type_the_api_offers_has_a_connection_schema() -> None:
+    """The refusal path below is for a type that has not shipped yet. Today every
+    member has a model, and this is what fails on the day one does not — before an
+    admin can create a source nothing is able to scan."""
+    from iceberg_api.sources.schemas import CONNECTION_MODELS, SUPPORTED_SOURCE_TYPES
+
+    assert set(CONNECTION_MODELS) == set(SourceType) == SUPPORTED_SOURCE_TYPES
+
+
+def test_a_connector_that_has_not_shipped_is_refused_with_an_explanation(
+    monkeypatch: pytest.MonkeyPatch,
     client: TestClient,
     make_user: Callable[..., User],
     login_as: Callable[[User], dict[str, str]],
-    unsupported: str,
 ) -> None:
-    """A source nothing can scan is worse than a clear refusal."""
+    """A source nothing can scan is worse than a clear refusal. Every shipped type
+    has a schema, so the unshipped one is simulated — the alternative is deleting
+    the guard that will catch the next connector."""
+    from iceberg_api.sources import schemas
+
+    monkeypatch.delitem(schemas.CONNECTION_MODELS, SourceType.JIRA)
     headers = login_as(make_user(UserRole.ADMIN))
 
-    response = client.post(SOURCES, json=_payload(type=unsupported), headers=headers)
+    response = client.post(SOURCES, json=_payload(type="jira"), headers=headers)
 
     assert response.status_code == 422
     assert "not available yet" in response.text

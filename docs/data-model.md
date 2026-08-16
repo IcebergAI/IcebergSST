@@ -40,7 +40,9 @@ OIDC-backed user.
 
 ### Source
 A scan target.
-- `id`, `name`, `type`: enum `confluence | jira | smb` (MVP: confluence)
+- `id`, `name`, `type`: enum `confluence | jira | fileshare`. One `fileshare` type covers both
+  SMB and NFS, because the engine walks a read-only mount rather than speaking either protocol
+  (#145, docs/connectors.md).
 - `connection`: JSON (base URL, space/path scope filters, etc.)
 - `credential_ref`: opaque handle into the secret store (never the raw secret)
 - `enabled`, `created_by`, `created_at`, `updated_at`

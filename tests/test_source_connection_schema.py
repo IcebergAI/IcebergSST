@@ -19,12 +19,14 @@ import inspect
 from types import ModuleType
 
 import iceberg_connectors.confluence.connector as confluence_connector
+import iceberg_connectors.fileshare.connector as fileshare_connector
 import iceberg_connectors.jira.connector as jira_connector
 import pytest
 from iceberg_api.sources import probe
 from iceberg_api.sources.schemas import (
     CONNECTION_MODELS,
     ConfluenceConnection,
+    FileshareConnection,
     JiraConnection,
 )
 from iceberg_connectors.confluence.client import ConfluenceClient
@@ -67,6 +69,7 @@ def _keys_read_from_connection(module: ModuleType) -> set[str]:
 CONNECTOR_SCHEMAS = [
     pytest.param(confluence_connector, ConfluenceConnection, id="confluence"),
     pytest.param(jira_connector, JiraConnection, id="jira"),
+    pytest.param(fileshare_connector, FileshareConnection, id="fileshare"),
 ]
 
 
@@ -83,8 +86,12 @@ def test_every_key_the_connector_reads_is_a_schema_field(
 ) -> None:
     read = _keys_read_from_connection(module)
     # The scan found the real reads: if a refactor renames the parameter, this
-    # fails loudly rather than the invariant silently checking nothing.
-    assert {"base_url", "email"} <= read
+    # fails loudly rather than the invariant silently checking nothing. The
+    # sentinel keys differ per connector, because a file share has no base URL.
+    assert read & set(model.model_fields), (
+        f"no connection reads found in {module.__name__}; the scan is looking at "
+        f"the wrong parameter name and this guard is checking nothing"
+    )
 
     fields = set(model.model_fields)
     unknown = {key for key in read if key not in fields and key not in TOLERATED_ALIASES}
@@ -93,8 +100,12 @@ def test_every_key_the_connector_reads_is_a_schema_field(
         f"{model.__name__} forbids — no admin can store them (extra='forbid'), "
         f"so no engine will ever receive them; add the field(s) to the schema"
     )
-    # Every alias must resolve to a field that actually exists.
-    assert set(TOLERATED_ALIASES.values()) <= fields
+    # Every alias *this* connector reads must resolve to a real field on its own
+    # model. Asserted per connector rather than globally: a file share has no
+    # `email`, and demanding one of every model would make the alias table a
+    # thing every future connector has to satisfy rather than a note about one.
+    aliases = {TOLERATED_ALIASES[key] for key in read & set(TOLERATED_ALIASES)}
+    assert aliases <= fields
 
 
 def test_the_probe_reads_only_storable_keys() -> None:
