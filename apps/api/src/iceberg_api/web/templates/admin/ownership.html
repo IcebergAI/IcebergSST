@@ -1,0 +1,273 @@
+{% extends "base.html" %}
+{% block title %}Ownership · {{ app_name }}{% endblock %}
+{% block crumb %}Ownership{% endblock %}
+
+{% block content %}
+<div class="head-row">
+  <div>
+    <div class="eyebrow">Administration</div>
+    <h1 class="page-title">Ownership</h1>
+    <div class="title-rule"></div>
+  </div>
+</div>
+
+<p class="lede section-gap">
+  Who is accountable for a finding, and how long they have. Routing gives an unowned finding an
+  owner at the next scan; once it has one it is never re-routed, and once a person sets the owner
+  by hand no rule touches it again. Changing anything here decides what happens to findings from
+  now on — it never reassigns a queue somebody is already working.
+</p>
+
+{% if error %}
+<div class="notice notice--crit section-gap" role="alert">
+  <div><strong>Not saved.</strong> {{ error }}</div>
+</div>
+{% endif %}
+
+<h2 class="section-title section-gap">Teams</h2>
+
+<div x-data="disclosure" data-open="{{ 'true' if not groups else 'false' }}">
+  <button type="button" class="btn btn--ghost" @click="toggle()" :aria-expanded="open ? 'true' : 'false'">
+    <svg class="btn-ic" aria-hidden="true"><use href="#ic-plus"/></svg>
+    <span x-text="open ? 'Cancel' : 'Add a team'">Add a team</span>
+  </button>
+
+  <div class="card card-pad-lg" x-show="open" x-cloak style="margin-top:14px">
+    <form class="stack" hx-post="/ownership/groups">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="field-row">
+        <label>
+          Name
+          <input class="field" name="name" required maxlength="255" placeholder="payments">
+        </label>
+        <label>
+          Description <span class="muted">(optional)</span>
+          <input class="field" name="description" maxlength="1000" placeholder="Runs the payments API">
+        </label>
+      </div>
+      <div class="actions">
+        <button type="submit" class="btn btn--primary">Create team</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<section class="card section-gap">
+  {% if groups %}
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr><th>Team</th><th>Open</th><th>Overdue</th><th>State</th><th class="col-actions">Actions</th></tr>
+      </thead>
+      <tbody>
+        {% for group in groups %}
+        <tr>
+          <td>
+            <strong>{{ group.name }}</strong>
+            {% if group.description %}<div class="muted" style="font-size:12px">{{ group.description }}</div>{% endif %}
+          </td>
+          <td>
+            {% if group.open_findings %}
+            <a href="/findings?owner_group_id={{ group.id }}&state=open&suppressed=false">{{ group.open_findings }}</a>
+            {% else %}—{% endif %}
+          </td>
+          <td>
+            {% if group.overdue_findings %}
+            <a class="tag tag--c is-crit" href="/findings?owner_group_id={{ group.id }}&overdue=true"><span class="dot"></span>{{ group.overdue_findings }}</a>
+            {% else %}—{% endif %}
+          </td>
+          <td>
+            <span class="tag tag--c {{ 'is-neutral' if group.disabled else 'is-ok' }}"><span class="dot"></span>{{ 'disbanded' if group.disabled else 'active' }}</span>
+          </td>
+          <td class="col-actions">
+            <span class="row-inline" style="justify-content:flex-end">
+              <form hx-post="/ownership/groups/{{ group.id }}/state">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="disabled" value="{{ 'false' if group.disabled else 'true' }}">
+                <button class="btn btn--quiet btn--sm" type="submit">{{ 'Reinstate' if group.disabled else 'Disband' }}</button>
+              </form>
+              {% if not group.open_findings %}
+              <span x-data="confirmAction">
+                <button type="button" class="btn btn--danger btn--sm" x-show="!armed" @click="arm()">Delete</button>
+                <span class="row-inline" x-show="armed" x-cloak>
+                  <button class="btn btn--danger btn--sm" hx-delete="/ownership/groups/{{ group.id }}">Confirm</button>
+                  <button type="button" class="btn btn--quiet btn--sm" @click="disarm()">Cancel</button>
+                </span>
+              </span>
+              {% endif %}
+            </span>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <div class="empty-title">No teams</div>
+    <p>Every finding is unowned. Add a team, then a rule that routes findings to it.</p>
+  </div>
+  {% endif %}
+</section>
+
+<h2 class="section-title section-gap">Routing rules</h2>
+
+<p class="lede">
+  Listed in the order routing evaluates them — lowest priority number first, then oldest. The
+  <strong>first</strong> matching rule wins, and a rule with no matchers matches everything, so a
+  catch-all belongs last. A rule whose team is disbanded is skipped entirely, and the next rule
+  gets the finding.
+</p>
+
+<div x-data="disclosure" data-open="false">
+  <button type="button" class="btn btn--ghost" @click="toggle()" :aria-expanded="open ? 'true' : 'false'"
+          {{ 'disabled' if not groups }}>
+    <svg class="btn-ic" aria-hidden="true"><use href="#ic-plus"/></svg>
+    <span x-text="open ? 'Cancel' : 'Add a rule'">Add a rule</span>
+  </button>
+
+  <div class="card card-pad-lg" x-show="open" x-cloak style="margin-top:14px">
+    <form class="stack" hx-post="/ownership/rules">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="field-row">
+        <label>
+          Name
+          <input class="field" name="name" required maxlength="255" placeholder="critical-to-payments">
+        </label>
+        <label>
+          Route to
+          <select class="field" name="owner_group_id" required>
+            {% for group in groups if not group.disabled %}
+            <option value="{{ group.id }}">{{ group.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          Priority
+          <input class="field" name="priority" type="number" min="0" max="10000" value="100">
+          <span class="field-hint">Lower runs first.</span>
+        </label>
+      </div>
+
+      <div class="field-row">
+        <label>
+          Source <span class="muted">(any)</span>
+          <select class="field" name="source_id">
+            <option value="">Any source</option>
+            {% for source in sources %}
+            <option value="{{ source.id }}">{{ source.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          Detector <span class="muted">(any)</span>
+          <input class="field field-mono" name="rule_id" maxlength="128" placeholder="aws-access-key-id">
+        </label>
+        <label>
+          Minimum severity <span class="muted">(any)</span>
+          <select class="field" name="min_severity">
+            <option value="">Any severity</option>
+            {% for severity in severities %}
+            <option value="{{ severity.value }}">{{ severity.value }} and above</option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+
+      <label>
+        Source tags <span class="muted">(any)</span>
+        <input class="field" name="source_tags" placeholder="pci, eu">
+        <span class="field-hint">
+          Comma separated. Every tag listed must be on the source, so more tags means fewer
+          findings. Case does not matter.
+        </span>
+      </label>
+
+      <div class="actions">
+        <button type="submit" class="btn btn--primary">Create rule</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<section class="card section-gap">
+  {% if rules %}
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr><th>#</th><th>Rule</th><th>Matches</th><th>Routes to</th><th>State</th><th class="col-actions">Actions</th></tr>
+      </thead>
+      <tbody>
+        {% for rule in rules %}
+        <tr>
+          <td class="mono">{{ rule.priority }}</td>
+          <td><strong>{{ rule.name }}</strong></td>
+          <td class="mono" style="font-size:12px">
+            {%- set parts = [] -%}
+            {%- if rule.source_id %}{% set _ = parts.append(source_names.get(rule.source_id, 'a source')) %}{% endif -%}
+            {%- if rule.rule_id %}{% set _ = parts.append(rule.rule_id) %}{% endif -%}
+            {%- if rule.min_severity %}{% set _ = parts.append(rule.min_severity.value ~ '+') %}{% endif -%}
+            {%- if rule.source_tags %}{% set _ = parts.append(rule.source_tags | join(' + ')) %}{% endif -%}
+            {{ parts | join(' · ') if parts else 'everything' }}
+          </td>
+          <td>{{ group_names.get(rule.owner_group_id, '—') }}</td>
+          <td>
+            <span class="tag tag--c {{ 'is-ok' if rule.enabled else 'is-neutral' }}"><span class="dot"></span>{{ 'enabled' if rule.enabled else 'disabled' }}</span>
+          </td>
+          <td class="col-actions">
+            <span class="row-inline" style="justify-content:flex-end">
+              <form hx-post="/ownership/rules/{{ rule.id }}/state">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="enabled" value="{{ 'false' if rule.enabled else 'true' }}">
+                <button class="btn btn--quiet btn--sm" type="submit">{{ 'Disable' if rule.enabled else 'Enable' }}</button>
+              </form>
+              <span x-data="confirmAction">
+                <button type="button" class="btn btn--danger btn--sm" x-show="!armed" @click="arm()">Delete</button>
+                <span class="row-inline" x-show="armed" x-cloak>
+                  <button class="btn btn--danger btn--sm" hx-delete="/ownership/rules/{{ rule.id }}">Confirm</button>
+                  <button type="button" class="btn btn--quiet btn--sm" @click="disarm()">Cancel</button>
+                </span>
+              </span>
+            </span>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <div class="empty-title">No rules</div>
+    <p>Nothing is routed automatically. Findings arrive unowned until a rule claims them.</p>
+  </div>
+  {% endif %}
+</section>
+
+<h2 class="section-title section-gap">Response targets</h2>
+
+<p class="lede">
+  How long a finding of each severity may stay open before it is overdue. The clock starts when a
+  finding opens and restarts if a resolved secret comes back. Changing a target applies to findings
+  that open from then on — dates already set are left alone, so tightening a target never
+  retroactively declares closed work to have been late.
+</p>
+
+<section class="card card-pad-lg section-gap">
+  <form class="stack" hx-post="/ownership/targets">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field-row">
+      {% for target in targets %}
+      <label>
+        {{ target.severity.value }}
+        <input class="field" name="{{ target.severity.value }}" type="number" min="1" max="87600"
+               value="{{ target.hours }}">
+        <span class="field-hint">hours</span>
+      </label>
+      {% endfor %}
+    </div>
+    <div class="actions">
+      <button type="submit" class="btn btn--primary">Save targets</button>
+    </div>
+  </form>
+</section>
+{% endblock %}

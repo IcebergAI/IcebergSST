@@ -62,6 +62,22 @@
       </label>
 
       <label>
+        Owner
+        <select class="field" name="owner">
+          <option value="">Leave unchanged</option>
+          <option value="none">No owner</option>
+          {% for group in owner_groups if not group.disabled %}
+          <option value="{{ group.id }}">{{ group.name }}</option>
+          {% endfor %}
+        </select>
+        <span class="field-hint">
+          Choosing anything here — including “no owner”, and including the team a rule already
+          picked — pins this finding. Routing will never move it again, because a confirmation that
+          left it re-routable would mean nothing.
+        </span>
+      </label>
+
+      <label>
         Comment
         <textarea class="field" name="comment" rows="3" maxlength="2000" x-model="comment"
                   placeholder="Rotated in Vault, closing"></textarea>

@@ -113,6 +113,25 @@
         <dt>Last seen</dt><dd><a class="mono" style="font-size:12px" href="/scans/{{ finding.last_seen_scan_id }}">{{ finding.updated_at | dt }}</a></dd>
         <dt>Assignee</dt>
         <dd>{{ user_names.get(finding.assignee_id, finding.assignee_id | short) if finding.assignee_id else 'unassigned' }}</dd>
+        <dt>Owner</dt>
+        <dd>
+          {% if finding.owner_group_id %}
+            {{ owner_names.get(finding.owner_group_id, finding.owner_group_id | short) }}
+            {% if finding.owner_pinned %}<span class="tag tag--c is-neutral">pinned</span>{% endif %}
+          {% else %}
+            {{ 'no owner (set by hand)' if finding.owner_pinned else 'unowned' }}
+          {% endif %}
+        </dd>
+        <dt>Due</dt>
+        <dd>
+          {% if finding.due_at %}
+            {% if is_overdue %}
+            <span class="tag tag--c is-crit"><span class="dot"></span>overdue since {{ finding.due_at | dt }}</span>
+            {% else %}<span class="mono" style="font-size:12px">{{ finding.due_at | dt }}</span>{% endif %}
+          {% else %}
+            no response target
+          {% endif %}
+        </dd>
       </dl>
       {% if finding.notes %}
       <div class="hr"></div>

@@ -66,6 +66,24 @@
     </select>
   </label>
   <label>
+    Owner
+    <select class="field field--sm" name="owner">
+      <option value="">Any team</option>
+      <option value="none" {{ 'selected' if selected.owner == 'none' }}>Unowned</option>
+      {% for group in owner_groups %}
+      <option value="{{ group.id }}" {{ 'selected' if selected.owner == group.id | string }}>{{ group.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>
+    Due
+    <select class="field field--sm" name="overdue">
+      <option value="">Any</option>
+      <option value="true" {{ 'selected' if selected.overdue == 'true' }}>Overdue</option>
+      <option value="false" {{ 'selected' if selected.overdue == 'false' }}>On time</option>
+    </select>
+  </label>
+  <label>
     Suppressed
     <select class="field field--sm" name="suppressed">
       <option value="">Either</option>
@@ -84,7 +102,7 @@
       <thead>
         <tr>
           <th>Severity</th><th>State</th><th>Liveness</th><th>Rule</th><th>Source</th><th>Where</th>
-          <th>Assignee</th><th>First seen</th>
+          <th>Owner</th><th>Due</th><th>Assignee</th><th>First seen</th>
         </tr>
       </thead>
       <tbody>
@@ -100,6 +118,21 @@
           <td class="truncate">{{ source_names.get(finding.source_id, finding.source_id | short) }}</td>
           <td class="truncate mono" style="font-size:12px;max-width:360px">
             {{ finding.resource_locator.get('path') or finding.resource_locator.get('url') or finding.resource_locator.get('title') or '—' }}
+          </td>
+          <td class="truncate">
+            {% if finding.owner_group_id %}
+              {{ owner_names.get(finding.owner_group_id, finding.owner_group_id | short) }}
+              {% if finding.owner_pinned %}<span class="tag tag--c is-neutral" title="Set by a person; routing will not change it">pinned</span>{% endif %}
+            {% else %}
+              <span class="muted">unowned</span>
+            {% endif %}
+          </td>
+          <td class="mono nowrap" style="font-size:12px">
+            {% if finding.due_at %}
+              {% if finding.id in overdue_ids %}
+              <span class="tag tag--c is-crit"><span class="dot"></span>{{ finding.due_at | dt }}</span>
+              {% else %}{{ finding.due_at | dt }}{% endif %}
+            {% else %}—{% endif %}
           </td>
           <td class="mono" style="font-size:12px">{{ finding.assignee_id | short if finding.assignee_id else '—' }}</td>
           <td class="mono nowrap" style="font-size:12px">{{ finding.created_at | dt }}</td>
