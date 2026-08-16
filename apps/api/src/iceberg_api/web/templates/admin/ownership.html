@@ -68,12 +68,12 @@
           </td>
           <td>
             {% if group.open_findings %}
-            <a href="/findings?owner_group_id={{ group.id }}&state=open&suppressed=false">{{ group.open_findings }}</a>
+            <a href="/findings?owner={{ group.id }}&state=open&suppressed=false">{{ group.open_findings }}</a>
             {% else %}—{% endif %}
           </td>
           <td>
             {% if group.overdue_findings %}
-            <a class="tag tag--c is-crit" href="/findings?owner_group_id={{ group.id }}&overdue=true"><span class="dot"></span>{{ group.overdue_findings }}</a>
+            <a class="tag tag--c is-crit" href="/findings?owner={{ group.id }}&overdue=true"><span class="dot"></span>{{ group.overdue_findings }}</a>
             {% else %}—{% endif %}
           </td>
           <td>

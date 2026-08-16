@@ -520,3 +520,53 @@ def test_the_connector_passes_the_shared_conformance_kit(share: Path) -> None:
     metadata = payload["metadata"]
     assert isinstance(metadata, dict)
     assert metadata["connector_type"] == FILESHARE_CONNECTOR_TYPE
+
+
+def test_an_oversized_directory_is_capped_before_it_is_materialised(
+    share: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cap has to bound the *read*, not the result. Sorting the whole listing
+    and slicing afterwards spends the memory first, so a directory large enough to
+    matter kills the worker instead of producing the bounded scope gap.
+
+    Asserted by counting how many entries the walk actually pulls off the
+    iterator: with the cap at two, it must stop at three — two plus the one that
+    tells it there were more.
+    """
+    from iceberg_connectors.fileshare import connector as module
+
+    crowded = share / "crowded"
+    crowded.mkdir()
+    for index in range(20):
+        (crowded / f"file{index:02d}.txt").write_text("nothing")
+
+    monkeypatch.setattr(module, "MAX_ENTRIES_PER_DIRECTORY", 2)
+    pulled = 0
+    real_scandir = os.scandir
+
+    class Counting:
+        """`os.scandir`'s context-manager + iterator contract, counting pulls."""
+
+        def __init__(self, path: str) -> None:
+            self._scanner = real_scandir(path)
+
+        def __enter__(self) -> Counting:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            self._scanner.close()
+
+        def __iter__(self) -> Counting:
+            return self
+
+        def __next__(self) -> os.DirEntry[str]:
+            nonlocal pulled
+            entry = next(self._scanner)
+            pulled += 1
+            return entry
+
+    monkeypatch.setattr(os, "scandir", Counting)
+    _units, outcome = _fetch(FileshareConnector(), _connection(share), root="crowded")
+
+    assert pulled <= 3, f"read {pulled} entries with the cap at 2"
+    assert outcome.coverage.as_payload()["scope"]["gaps"] == 1

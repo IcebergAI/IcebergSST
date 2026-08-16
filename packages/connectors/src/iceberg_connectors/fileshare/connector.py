@@ -31,6 +31,7 @@ import stat
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from fnmatch import fnmatch
+from itertools import islice
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -271,7 +272,13 @@ class FileshareConnector:
                 )
                 continue
             try:
-                entries = sorted(os.scandir(directory), key=lambda item: item.name)
+                # Read at most the cap (plus one, to notice there were more) and
+                # only then sort. `sorted(os.scandir(...))` materialised the whole
+                # listing first, so the cap fired *after* the memory had already
+                # been spent — a directory large enough to matter would kill the
+                # worker rather than produce the bounded gap below.
+                with os.scandir(directory) as scanner:
+                    entries = list(islice(scanner, MAX_ENTRIES_PER_DIRECTORY + 1))
             except PermissionError:
                 outcome.failed_for(
                     CoverageReason.PERMISSION_DENIED,
@@ -291,10 +298,16 @@ class FileshareConnector:
                 continue
 
             if len(entries) > MAX_ENTRIES_PER_DIRECTORY:
+                # Which entries were dropped is whatever order the filesystem
+                # returned, so the covered set for an oversized directory is not
+                # reproducible. That is exactly why it is a *scope gap*: the
+                # manifest says this directory was not enumerated honestly rather
+                # than reporting a count that stopped early.
                 outcome.scope_gap_for(
                     CoverageReason.CONNECTOR_ERROR, {"path": _key(mount, directory)}
                 )
                 entries = entries[:MAX_ENTRIES_PER_DIRECTORY]
+            entries.sort(key=lambda item: item.name)
 
             # Reversed, because the stack pops last-in-first: pushing in reverse
             # makes the walk visit them in sorted order.
