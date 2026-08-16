@@ -130,14 +130,33 @@ jobs:
       # minute of CI nobody gets back.
       # The runner ships an older libpq than the service container above, and
       # `pg_dump` refuses to dump a server newer than itself — so the backup leg
-      # would fail on a version mismatch rather than on anything about this
-      # project. The PGDG repository is already configured on the image.
-      - name: Install a Postgres client matching the service container
+      # would otherwise fail on a version mismatch rather than on anything about
+      # this project.
+      #
+      # Borrowed from the service container rather than installed: its client
+      # tools are the server's own version by construction, and adding an apt
+      # repository to a security project's CI to fetch a binary it already has
+      # locally is a supply-chain surface for no gain. The rehearsal script stays
+      # oblivious — it calls `psql` and `pg_dump` from PATH, which is what an
+      # operator does too.
+      - name: Point the Postgres client tools at the service container
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends postgresql-client-18
-          pg_dump --version
+          container="$(docker ps --filter ancestor=postgres:18-alpine --format '{{.ID}}' | head -n 1)"
+          if [ -z "$container" ]; then
+            echo "the postgres service container is not running" >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/pgbin"
+          for tool in psql pg_dump; do
+            # `-i` so a dump can be piped back in on stdin, which is the restore
+            # path the runbook documents.
+            printf '#!/usr/bin/env bash\nexec docker exec -i %s %s "$@"\n' \
+              "$container" "$tool" > "$RUNNER_TEMP/pgbin/$tool"
+            chmod +x "$RUNNER_TEMP/pgbin/$tool"
+          done
+          echo "$RUNNER_TEMP/pgbin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/pgbin/pg_dump" --version
 
       - name: Rehearse the upgrade, rollback, and recovery paths
         run: ./scripts/rehearse_release.sh
