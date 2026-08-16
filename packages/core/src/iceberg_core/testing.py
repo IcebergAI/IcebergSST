@@ -17,6 +17,7 @@ from sqlalchemy import Engine, StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 from iceberg_core.db import enforce_sqlite_foreign_keys
+from iceberg_core.models import DEFAULT_RESPONSE_TARGET_HOURS, ResponseTarget
 from iceberg_core.secrets import EnvKeyBackend
 
 
@@ -36,10 +37,29 @@ def db_engine_fixture() -> Iterator[Engine]:
     # shows up against Postgres.
     enforce_sqlite_foreign_keys(engine)
     SQLModel.metadata.create_all(engine)
+    _seed_response_targets(engine)
     try:
         yield engine
     finally:
         engine.dispose()
+
+
+def _seed_response_targets(engine: Engine) -> None:
+    """The rows migration 0014 seeds, because ``create_all`` does not run it.
+
+    The schema here comes from the metadata rather than from Alembic, so every
+    table arrives empty — including the one whose *contents* are part of the
+    shipped configuration. Without this, findings in tests get no due date while
+    findings in any migrated deployment get one, and the difference would hide
+    exactly the bugs due dates can have (#146). Same reasoning as the correlation
+    key below being configured by default.
+    """
+    with Session(engine) as session:
+        session.add_all(
+            ResponseTarget(severity=severity, hours=hours)
+            for severity, hours in DEFAULT_RESPONSE_TARGET_HOURS.items()
+        )
+        session.commit()
 
 
 @pytest.fixture(name="session")

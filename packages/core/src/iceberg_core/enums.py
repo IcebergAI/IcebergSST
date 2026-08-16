@@ -230,6 +230,13 @@ class FindingEventKind(StrEnum):
     REMEDIATION = "remediation"
     REMEDIATION_VERIFIED = "remediation_verified"
     REMEDIATION_RETRACTED = "remediation_retracted"
+    #: The accountable *group* (#146), which routing may set and an analyst may
+    #: override; ``ASSIGN`` above remains the individual currently holding it.
+    #: There is no matching event for the response target: ``Finding.due_at`` is a
+    #: column derived from the severity and the moment the finding opened, so an
+    #: event per finding would double this table to record something already
+    #: visible and fully explained by the two.
+    OWNER = "owner"
 
 
 class ValidationStatus(StrEnum):

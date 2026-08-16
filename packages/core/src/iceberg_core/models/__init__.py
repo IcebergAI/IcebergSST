@@ -65,6 +65,13 @@ from iceberg_core.models.base import (
 from iceberg_core.models.findings import Finding, FindingEvent, Suppression
 from iceberg_core.models.identity import User
 from iceberg_core.models.notifications import NotificationChannel, NotificationDelivery
+from iceberg_core.models.ownership import (
+    DEFAULT_RESPONSE_TARGET_HOURS,
+    OwnerGroup,
+    ResponseTarget,
+    RoutingRule,
+    routing_matchers,
+)
 from iceberg_core.models.remediation import RemediationAction
 from iceberg_core.models.scans import Engine, Scan, ScanTask
 from iceberg_core.models.sources import Schedule, Source, SourceCursor
@@ -109,6 +116,7 @@ __all__ = [
     "AUDIT_VALIDATION_POLICY_CREATED",
     "AUDIT_VALIDATION_POLICY_DELETED",
     "AUDIT_VALIDATION_POLICY_UPDATED",
+    "DEFAULT_RESPONSE_TARGET_HOURS",
     "NAMING_CONVENTION",
     "AuditEvent",
     "Engine",
@@ -117,7 +125,10 @@ __all__ = [
     "IcebergModel",
     "NotificationChannel",
     "NotificationDelivery",
+    "OwnerGroup",
     "RemediationAction",
+    "ResponseTarget",
+    "RoutingRule",
     "Scan",
     "ScanTask",
     "Schedule",
@@ -130,6 +141,7 @@ __all__ = [
     "enum_type",
     "json_type",
     "metadata",
+    "routing_matchers",
     "utc_now",
     "utc_timestamp_type",
 ]

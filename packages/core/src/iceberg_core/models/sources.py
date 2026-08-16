@@ -31,6 +31,12 @@ class Source(TimestampedModel, table=True):
     #: API resolves it to a credential only when handing an engine a task lease.
     credential_ref: str | None = Field(default=None, max_length=4096)
 
+    #: Operator labels — "pci", "eu", "team-payments". Free-form on purpose: they
+    #: exist to be matched by routing rules (#146), and a controlled vocabulary
+    #: would mean a migration every time a team reorganised. Never used by
+    #: detection, so a typo here costs a routing miss, not a missed secret.
+    tags: list[str] = Field(default_factory=list, sa_type=json_type())
+
     enabled: bool = Field(default=True)
     created_by_id: uuid.UUID | None = Field(
         default=None,

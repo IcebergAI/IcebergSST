@@ -64,6 +64,15 @@ class FindingRead(BaseModel):
     state: FindingState
     resolution: FindingResolution | None
     assignee_id: uuid.UUID | None
+    #: The accountable group, and whether a person chose it (#146). ``null`` with
+    #: ``owner_pinned`` false is the unowned queue; ``null`` with it true is
+    #: somebody having deliberately taken the owner off.
+    owner_group_id: uuid.UUID | None
+    owner_pinned: bool
+    #: When the response target for this severity expires. Null when no target is
+    #: configured for it. *Overdue* is this being in the past on an open,
+    #: unsuppressed finding — the API does not store a second flag that can drift.
+    due_at: UtcDatetime | None
     notes: str | None
 
     #: Non-null means a suppression covered it; it is recorded but out of the
@@ -137,6 +146,10 @@ class FindingUpdate(BaseModel):
 
     state: FindingState | None = None
     assignee_id: uuid.UUID | None = None
+    #: The accountable group (#146). Setting it — to a group *or* to null — is a
+    #: decision, so it pins the finding: routing never moves it again. Same
+    #: optional-versus-null distinction as ``assignee_id``, read the same way.
+    owner_group_id: uuid.UUID | None = None
     notes: str | None = None
     #: Rationale, recorded on the events this change writes. "Rotated in Vault,
     #: closing" is worth more to the next analyst than the transition alone.
