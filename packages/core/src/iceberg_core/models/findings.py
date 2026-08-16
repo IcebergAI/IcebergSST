@@ -60,6 +60,11 @@ class Finding(TimestampedModel, table=True):
         # Reconciliation's lookup, and the reason a fingerprint means one finding.
         UniqueConstraint("source_id", "fingerprint", name="uq_finding_source_id_fingerprint"),
         Index("ix_finding_source_id_state", "source_id", "state"),
+        # The two ownership queues (#146): "what does this team owe?" and "what is
+        # late?". Both are read on every dashboard load, and both would otherwise
+        # scan the one table that grows with every scan.
+        Index("ix_finding_owner_group_id_state", "owner_group_id", "state"),
+        Index("ix_finding_state_due_at", "state", "due_at"),
         # The keyset order every list endpoint pages on. On the one table that
         # grows with every scan, its absence made the default queue view sort the
         # whole table per page request.
@@ -122,6 +127,34 @@ class Finding(TimestampedModel, table=True):
         foreign_key="app_user.id",
         ondelete="SET NULL",
     )
+
+    #: The accountable *team* (#146), which outlives whoever is currently holding
+    #: it in ``assignee_id``. Null is a real state and a first-class queue: nothing
+    #: routed here, so nobody is answerable for it yet. SET NULL on delete for the
+    #: same reason the assignee is — losing a group must not take findings with it.
+    owner_group_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="owner_group.id",
+        ondelete="SET NULL",
+    )
+
+    #: True once a person chose the owner. Routing then leaves the group alone
+    #: forever: an operator who moved a finding to the team that actually runs the
+    #: system should not have it moved back by the next scan. This is the whole
+    #: "manual overrides are preserved" requirement, as one column.
+    owner_pinned: bool = Field(default=False, sa_column_kwargs={"server_default": "false"})
+
+    #: When this finding's response target expires, from the severity's
+    #: :class:`~iceberg_core.models.ownership.ResponseTarget` at the moment the
+    #: clock started. Stored rather than derived at read time because the target
+    #: is editable: changing "high" from 72 to 24 hours must not retroactively
+    #: declare last month's findings to have been late.
+    #:
+    #: *Overdue* is deliberately not a column — it is ``due_at < now`` on an
+    #: actionable finding, and a stored flag would be a second source of truth
+    #: that drifts every time nothing runs.
+    due_at: datetime | None = Field(default=None, sa_type=utc_timestamp_type())
+
     notes: str | None = Field(default=None)
 
     #: Set when a suppression covered this finding at ingest (ADR 0008). Suppressed

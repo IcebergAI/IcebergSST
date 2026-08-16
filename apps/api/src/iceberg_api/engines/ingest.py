@@ -33,6 +33,7 @@ from sqlmodel import Session, col, select
 
 from iceberg_api import suppressions
 from iceberg_api.engines.schemas import FindingPayload
+from iceberg_api.findings import ownership
 
 logger = structlog.get_logger()
 
@@ -70,6 +71,10 @@ def ingest_findings(
     """
     at = now or datetime.now(UTC)
     rules = suppressions.applicable_suppressions(db, scan.source_id, now=at)
+    # Read once for the whole batch, so every finding in one submission is routed
+    # by the same rule set rather than by whatever a concurrent edit left behind
+    # halfway through (#146).
+    policy = ownership.load(db, scan.source_id)
     outcome = IngestOutcome()
 
     for payload in payloads:
@@ -133,7 +138,13 @@ def ingest_findings(
 
         if existing is None:
             _create(
-                db, scan, payload, suppression=suppression, at=at, correlation_key=correlation_key
+                db,
+                scan,
+                payload,
+                suppression=suppression,
+                at=at,
+                correlation_key=correlation_key,
+                policy=policy,
             )
         elif _refresh(
             db,
@@ -143,6 +154,7 @@ def ingest_findings(
             suppression=suppression,
             at=at,
             correlation_key=correlation_key,
+            policy=policy,
         ):
             outcome.reopened += 1
         if rekeyed:
@@ -192,6 +204,7 @@ def _create(
     suppression: suppressions.SuppressionRule | None,
     at: datetime,
     correlation_key: bytes | None,
+    policy: ownership.Policy,
 ) -> Finding:
     finding = Finding(
         source_id=scan.source_id,
@@ -216,6 +229,11 @@ def _create(
     db.add(finding)
     db.flush()
     _record_validation(db, finding, payload, from_status=None, scan_id=scan.id, at=at)
+    # Ownership before suppression: a finding that arrives already silenced still
+    # gets an owner and a clock, so the day its suppression lapses it is somebody's
+    # work immediately rather than sitting unowned until the scan after that (#146).
+    ownership.route(db, finding, policy, scan_id=scan.id)
+    ownership.start_clock(db, finding, policy, at=at)
     if suppression is not None:
         suppressions.suppress(db, finding, suppression, at=at)
     return finding
@@ -230,6 +248,7 @@ def _refresh(
     suppression: suppressions.SuppressionRule | None,
     at: datetime,
     correlation_key: bytes | None,
+    policy: ownership.Policy,
 ) -> bool:
     """Update a known finding for this sighting. Returns True if it re-opened."""
     finding.last_seen_scan_id = scan.id
@@ -292,6 +311,15 @@ def _refresh(
             )
         )
         reopened = True
+
+    # An unowned finding is routed on every sighting, so a rule added today drains
+    # yesterday's unowned queue at the next scan. An owned one is left alone —
+    # ownership is established once, never continuously re-decided (#146).
+    ownership.route(db, finding, policy, scan_id=scan.id)
+    # A reopen restarts the clock: the secret came back, and the team gets the full
+    # response target from the sighting that refuted the resolution rather than a
+    # deadline that expired while the finding was correctly resolved.
+    ownership.start_clock(db, finding, policy, at=at, restart=reopened)
 
     # A suppression that appeared since the last scan applies now; one that expired
     # stops applying, and the finding returns to the active view.

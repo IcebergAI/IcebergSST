@@ -113,6 +113,13 @@ def apply(
     if "assignee_id" in supplied and changes.assignee_id != finding.assignee_id:
         events.append(_assign(finding, changes.assignee_id, actor_id, changes.comment))
 
+    # Owner is read the same way, but pins on *any* supplied value — including one
+    # equal to the current owner. "Yes, this really is ours" is a decision worth
+    # honouring: without it, confirming a routed owner would leave the finding
+    # still eligible to be re-routed, and the confirmation would mean nothing.
+    if "owner_group_id" in supplied:
+        events.extend(_own(finding, changes.owner_group_id, actor_id, changes.comment))
+
     if "notes" in supplied and changes.notes != finding.notes:
         events.append(_annotate(finding, changes.notes, actor_id))
 
@@ -175,6 +182,41 @@ def _assign(
         to_value=str(assignee_id) if assignee_id else None,
         comment=comment,
     )
+
+
+def _own(
+    finding: Finding,
+    owner_group_id: uuid.UUID | None,
+    actor_id: uuid.UUID,
+    comment: str | None,
+) -> list[FindingEvent]:
+    """Set the accountable group by hand, and pin it there (#146).
+
+    Pinning is the point: automatic routing establishes an owner for a finding
+    nobody has looked at, and the moment somebody has, the machine stops having an
+    opinion. That holds even when the person agrees with the routing — confirming
+    an owner is how a team says "yes, ours", and a confirmation that left the
+    finding re-routable would be worth nothing.
+
+    Returns no event when there is nothing to record: the same owner, already
+    pinned. Re-sending an unchanged decision is a retried request, not a second
+    one, and this trail is read by people (see the module docstring).
+    """
+    if finding.owner_group_id == owner_group_id and finding.owner_pinned:
+        return []
+    previous = finding.owner_group_id
+    finding.owner_group_id = owner_group_id
+    finding.owner_pinned = True
+    return [
+        FindingEvent(
+            finding_id=finding.id,
+            actor_id=actor_id,
+            kind=FindingEventKind.OWNER,
+            from_value=str(previous) if previous else None,
+            to_value=str(owner_group_id) if owner_group_id else None,
+            comment=comment,
+        )
+    ]
 
 
 def _annotate(finding: Finding, notes: str | None, actor_id: uuid.UUID) -> FindingEvent:

@@ -18,7 +18,7 @@ from typing import Annotated
 import structlog
 from fastapi import APIRouter, HTTPException, Query, status
 from iceberg_core.enums import FindingState, Severity, UserRole
-from iceberg_core.models import Finding, FindingEvent, User
+from iceberg_core.models import Finding, FindingEvent, OwnerGroup, User
 from sqlalchemy import func
 from sqlmodel import col, select
 
@@ -179,6 +179,16 @@ async def update_finding(
             # work to a disabled account is a quiet way to lose a finding.
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT, "assignee is not an active user"
+            )
+
+    if changes.owner_group_id is not None:
+        group = db.get(OwnerGroup, changes.owner_group_id)
+        if group is None or group.disabled:
+            # Same 422 for the same reason: handing a finding to a disbanded team
+            # loses it as surely as handing it to a disabled account, and the pin
+            # this write sets would keep routing from ever rescuing it (#146).
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "owner group is not an active group"
             )
 
     # The required-evidence policy (#142): built from settings here, enforced

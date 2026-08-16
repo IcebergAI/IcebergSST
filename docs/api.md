@@ -94,8 +94,9 @@ the manifest. Cancel or finish the active scan before editing its source.
 - `GET   /findings/{id}` — the finding plus its full `FindingEvent` history, oldest first. The
   history ships with the detail because "why is this finding in this state" is the question the
   detail view exists to answer.
-- `PATCH /findings/{id}` (analyst+) — `state`, `assignee_id`, `notes`, plus an optional `comment`
-  recorded on the events the change writes. Returns the detail shape, history included.
+- `PATCH /findings/{id}` (analyst+) — `state`, `assignee_id`, `owner_group_id`, `notes`, plus an
+  optional `comment` recorded on the events the change writes. Returns the detail shape, history
+  included.
 
 Responses never carry `secret_hash` — not reversible, but a comparison oracle nobody should be
 handed casually. The one deliberate, scoped exception to "never anything derived from the secret"
@@ -132,11 +133,23 @@ rejected request must not leave the assignee changed. Re-sending the state a fin
 is a no-op, not a conflict: a retried request is not an error.
 
 Every real change writes a `FindingEvent` — `state_change`, `reopened` (any return to `open`,
-whoever or whatever caused it), `assign`, `comment`. Notes are recorded as events as well as on the
-row, so editing them does not erase what the last analyst wrote. `assignee_id: null` unassigns;
-omitting the field leaves the assignee alone. Assigning to an unknown or disabled user is a `422`.
-Resolving by hand sets `resolution: manual`; reopening clears it, so a reopened finding never keeps
-reconciliation's `auto`.
+whoever or whatever caused it), `assign`, `owner`, `comment`. Notes are recorded as events as well
+as on the row, so editing them does not erase what the last analyst wrote. `assignee_id: null`
+unassigns; omitting the field leaves the assignee alone. Assigning to an unknown or disabled user
+is a `422`. Resolving by hand sets `resolution: manual`; reopening clears it, so a reopened finding
+never keeps reconciliation's `auto`.
+
+**Ownership** (#146) is the accountable *group*, alongside the individual in `assignee_id`.
+Findings acquire one automatically at ingest from the routing rules — first match wins — and
+`owner_group_id`, `owner_pinned` and `due_at` ride on every finding response. Supplying
+`owner_group_id` in a `PATCH` **pins** it: routing never moves that finding again, and that holds
+for `null` ("not ours") and for confirming the group a rule already chose, because a confirmation
+that left the finding re-routable would mean nothing. Re-sending a decision already recorded
+writes no second event. Handing a finding to an unknown or disabled group is a `422`, for the same
+reason a disabled assignee is — the pin would then keep routing from ever rescuing it. `due_at`
+comes from the severity's response target at the moment the finding opened, restarts when a
+resolved finding reopens, and is never recomputed when a target is edited; *overdue* is that date
+being in the past on an open, unsuppressed finding.
 
 ## Remediation (ADR 0012)
 - `GET  /remediation/guidance/{rule_id}` — versioned advice for one rule, split into revoke /

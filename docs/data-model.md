@@ -101,6 +101,12 @@ authoritative).
 - `state`: enum `open | false_positive | accepted_risk | resolved`
 - `resolution`: enum `null | manual | auto` (auto = disappeared on re-scan)
 - `assignee_id` (FK User, nullable), `notes`
+- `owner_group_id` (FK OwnerGroup, SET NULL, nullable), `owner_pinned`, `due_at` (#146). The
+  *group* is who is accountable and outlives whoever currently holds it in `assignee_id`; null is
+  a real state and a first-class queue. `owner_pinned` goes true the moment a person sets the
+  owner — including setting it to null — and routing never touches the finding again.
+  **Overdue is not a column**: it is `due_at < now` on an open, unsuppressed finding, and a
+  stored flag would be a second truth that drifts whenever nothing runs.
 - `suppressed_at`, `suppressed_by_id` (FK Suppression, nullable) — a suppressed finding is
   **recorded, not discarded** (ADR 0008). A finding is *active* when it is `open` and
   `suppressed_at` is null; an expiring suppression returns it to the active view.
@@ -131,8 +137,34 @@ starting with role changes (#69). "Who made this person an admin" must always ha
 ### FindingEvent
 Append-only audit trail for one finding.
 - `id`, `finding_id` (FK), `actor_id` (FK User, nullable for system)
-- `kind`: enum `state_change | assign | comment | suppressed | reopened`
+- `kind`: enum `state_change | assign | comment | suppressed | reopened | validation |
+  remediation | remediation_verified | remediation_retracted | owner`. Stored as a checked
+  VARCHAR, not a native enum, so a feature that records something new needs no migration.
 - `from_value`, `to_value`, `comment`, `created_at`
+
+### OwnerGroup, RoutingRule, ResponseTarget
+Ownership (#146). Tuning, so all three live in the database and are operator-editable rather than
+compiled in (CLAUDE.md invariant 3) — none of them is detection logic, and changing a target
+changes a date, never what is found.
+
+- **OwnerGroup** — `id`, `name` (unique), `description`, `notification_channel_id` (FK, SET NULL,
+  nullable), `disabled`. Deliberately *not* a set of users: membership is the identity provider's
+  business (ADR 0005), and a group whose meaning depended on a list maintained here would be
+  stale the first time somebody changed teams. Disabled rather than deleted, so its findings keep
+  their history.
+- **RoutingRule** — `id`, `name` (unique), `priority`, `owner_group_id` (FK, CASCADE), the
+  matchers `source_id` / `rule_id` / `min_severity` / `source_tags`, and `enabled`. Every matcher
+  is optional and they are ANDed, so a rule with none set is a catch-all — which is how a default
+  owner is expressed. **First match wins**, in the total order `(priority, created_at, id)`;
+  `priority` is not unique because a unique column turns "put this above that" into a dance
+  around a constraint, and the tie-break already makes the order total. A rule whose group is
+  disabled is excluded when the rules are *loaded*, not skipped at match time, so it cannot sit
+  first and silently mean "nobody gets it".
+- **ResponseTarget** — `id`, `severity` (unique), `hours`. One row per severity, **seeded by
+  migration 0014** rather than defaulted in code, so the targets in force are visible in the
+  table an operator edits.
+
+`Source.tags` (JSON, `[]`) exists for these rules to match on and for nothing else.
 
 ### Suppression
 Analyst-managed allowlist (ADR 0008).
@@ -191,3 +223,5 @@ compares the result against the metadata, so a model changed without a migration
 - `Finding.fingerprint` unique within `source_id`; primary reconciliation lookup.
 - `ScanTask.status + lease_expires_at` indexed for lease reclamation of dead engines.
 - `Finding.state + source_id` indexed for the findings list/filter view.
+- `Finding.owner_group_id + state` and `Finding.state + due_at` indexed for the two ownership
+  queues — "what does this team owe?" and "what is late?" — both read on every dashboard load.
