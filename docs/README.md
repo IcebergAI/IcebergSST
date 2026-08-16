@@ -12,9 +12,11 @@ Design specification and reference docs. Start with [`../ARCHITECTURE.md`](../AR
 - [`secret-validation.md`](./secret-validation.md) — opt-in credential liveness contracts and controls
 - [`security.md`](./security.md) — threat model and mitigations
 - [`deployment.md`](./deployment.md) — docker-compose (dev) + Helm (prod)
+- [`releases.md`](./releases.md) — versioning, support window, compatibility, upgrade and rollback
 - [`runbooks/production-install.md`](./runbooks/production-install.md) — production-oriented
   installation and go-live checks
 - [`runbooks/backup-restore.md`](./runbooks/backup-restore.md) — isolated recovery rehearsal
+- [`runbooks/release.md`](./runbooks/release.md) — cutting a release, and verifying a published one
 - [`backlog.md`](./backlog.md) — milestones, epics, and issues (mirrors GitHub)
 
 ## Decision records (ADRs)

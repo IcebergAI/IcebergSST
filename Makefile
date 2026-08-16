@@ -2,7 +2,8 @@ COMPOSE ?= docker compose -f deploy/compose/docker-compose.yml --env-file .env
 # Engine replica count for `make scale`.
 N ?= 2
 
-.PHONY: help sync hooks lint format type test check docs-check images images-verify \
+.PHONY: help sync hooks lint format type test check docs-check version-check \
+        images images-verify \
         helm-verify helm-template up down destroy \
         migrate seed logs ps scale init-env secrets engine-token
 
@@ -41,6 +42,13 @@ check: lint type test ## Everything CI runs
 
 docs-check: ## Verify repository-local Markdown links
 	uv run python scripts/check_docs.py
+
+# A release is one number applied to both images, the chart's appVersion, and
+# every package (docs/releases.md). `make check` asserts the same thing through
+# tests/test_release_invariants.py, so a half-bumped version fails on the pull
+# request rather than on the tag.
+version-check: ## Assert every shipped component declares the same version
+	uv run python scripts/check_version.py
 
 # ─── Images ───────────────────────────────────────────────────────────────────
 
