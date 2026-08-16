@@ -238,8 +238,23 @@ def _load_rule(db: SessionDep, rule_id: uuid.UUID) -> RoutingRule:
 
 
 def _check_targets(db: SessionDep, group_id: uuid.UUID | None, source_id: uuid.UUID | None) -> None:
-    if group_id is not None and db.get(OwnerGroup, group_id) is None:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "owner group not found")
+    """A rule may only point at a group that still takes work, and a real source.
+
+    Disabling a group is an operator saying "this team is gone", and routing
+    already skips its rules (`findings/ownership.py`). Accepting a *new* rule for
+    one anyway would let an admin build a rule set that silently routes nothing —
+    the rule appears in the list, sits in the evaluation order, and never matches.
+    A 422 says so at the moment it is written.
+    """
+    if group_id is not None:
+        group = db.get(OwnerGroup, group_id)
+        if group is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "owner group not found")
+        if group.disabled:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "that group is disbanded; routing would never choose it",
+            )
     if source_id is not None and db.get(Source, source_id) is None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "source not found")
 
@@ -330,9 +345,16 @@ async def update_routing_rule(
     if "min_severity" in supplied and changes.min_severity != rule.min_severity:
         rule.min_severity = changes.min_severity
         changed.append("min_severity")
-    if changes.source_tags is not None and changes.source_tags != rule.source_tags:
-        rule.source_tags = changes.source_tags
-        changed.append("source_tags")
+    if "source_tags" in supplied:
+        # Read off `model_fields_set` like every other matcher: `null` drops the
+        # restriction (widening the rule), an omitted field leaves it alone. It
+        # was the one matcher that ignored an explicit null, which left an
+        # operator unable to widen a rule through the documented contract — and
+        # the symptom is a rule that keeps routing nothing.
+        widened = changes.source_tags or []
+        if widened != rule.source_tags:
+            rule.source_tags = widened
+            changed.append("source_tags")
     if changes.enabled is not None and changes.enabled != rule.enabled:
         rule.enabled = changes.enabled
         changed.append("enabled")

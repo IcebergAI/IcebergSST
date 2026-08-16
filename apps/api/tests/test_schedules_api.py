@@ -165,8 +165,13 @@ def test_changing_the_cron_recomputes_the_next_run_and_is_audited(
 ) -> None:
     headers = login_as(make_user(UserRole.ADMIN))
     source = _source(session)
+    # Minute **7**, so the original next run can never be a quarter-hour. Without
+    # that, an unchanged value satisfies the assertions below for the fifteen
+    # minutes before the hour it names — which is how the first version of this
+    # test failed on the clock, and how its replacement could have passed while
+    # the recompute was broken.
     created = client.post(
-        SCHEDULES, json={"source_id": str(source.id), "cron": "0 3 * * *"}, headers=headers
+        SCHEDULES, json={"source_id": str(source.id), "cron": "7 3 * * *"}, headers=headers
     ).json()
 
     updated = client.patch(
@@ -174,12 +179,11 @@ def test_changing_the_cron_recomputes_the_next_run_and_is_audited(
     ).json()
 
     assert updated["cron"] == "*/15 * * * *"
-    # Asserted against the *new* cron rather than against the old schedule's time.
-    # "Sooner than 03:00" is true for `*/15` all day and false for the fifteen
-    # minutes before it, so a suite run at 02:47 failed on the clock rather than
-    # on the code. The next quarter-hour is what recomputation should produce, and
-    # saying so is both deterministic and a stronger claim.
+    # Asserted against the *new* cron: the recomputed run is the next quarter-hour,
+    # so it lands on a `:00/:15/:30/:45` boundary and is at most fifteen minutes
+    # away. Neither is true of the value it replaced, at any hour of any day.
     next_run = datetime.fromisoformat(updated["next_run_at"])
+    assert next_run != datetime.fromisoformat(created["next_run_at"])
     assert (next_run.minute % 15, next_run.second, next_run.microsecond) == (0, 0, 0)
     assert next_run <= datetime.now(UTC) + timedelta(minutes=15)
     actions = [

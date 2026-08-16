@@ -331,6 +331,79 @@ def test_a_rule_cannot_point_at_a_group_or_source_that_does_not_exist(
     assert no_source.status_code == 422
 
 
+def test_a_rule_cannot_be_pointed_at_a_disbanded_team(
+    client: TestClient, api: str, admin_headers: dict[str, str]
+) -> None:
+    """Routing already skips a disabled group's rules, so accepting the rule would
+    let an admin build a rule set that silently routes nothing — the rule appears
+    in the list, holds a place in the evaluation order, and never matches."""
+    group = _group(client, api, admin_headers, "payments")
+    client.patch(
+        f"{api}/owner-groups/{group['id']}", json={"disabled": True}, headers=admin_headers
+    )
+
+    response = client.post(
+        f"{api}/routing-rules",
+        json={"name": "doomed", "owner_group_id": group["id"]},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 422
+    assert "disbanded" in response.text
+
+
+def test_an_existing_rule_cannot_be_moved_to_a_disbanded_team(
+    client: TestClient, api: str, admin_headers: dict[str, str]
+) -> None:
+    """The same door, through PATCH."""
+    live = _group(client, api, admin_headers, "payments")
+    gone = _group(client, api, admin_headers, "platform")
+    client.patch(f"{api}/owner-groups/{gone['id']}", json={"disabled": True}, headers=admin_headers)
+    rule = _rule(client, api, admin_headers, "catch-all", live["id"])
+
+    response = client.patch(
+        f"{api}/routing-rules/{rule['id']}",
+        json={"owner_group_id": gone["id"]},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 422
+
+
+def test_sending_null_tags_widens_the_rule(
+    client: TestClient, api: str, session: Session, admin_headers: dict[str, str]
+) -> None:
+    """`null` drops the restriction; an omitted field leaves it alone. It is the
+    only way to widen a rule through the API, and the symptom of not having it is
+    a rule that keeps routing nothing for a reason nobody can remove."""
+    group = _group(client, api, admin_headers, "payments")
+    rule = _rule(client, api, admin_headers, "tagged", group["id"], source_tags=["pci"])
+
+    widened = client.patch(
+        f"{api}/routing-rules/{rule['id']}", json={"source_tags": None}, headers=admin_headers
+    ).json()
+
+    assert widened["source_tags"] == []
+    stored = session.get(RoutingRule, uuid.UUID(rule["id"]))
+    assert stored is not None
+    assert stored.source_tags == []
+
+
+def test_omitting_tags_leaves_them_alone(
+    client: TestClient, api: str, admin_headers: dict[str, str]
+) -> None:
+    """The other half of the distinction — otherwise every unrelated edit would
+    silently widen the rule."""
+    group = _group(client, api, admin_headers, "payments")
+    rule = _rule(client, api, admin_headers, "tagged", group["id"], source_tags=["pci"])
+
+    unchanged = client.patch(
+        f"{api}/routing-rules/{rule['id']}", json={"priority": 5}, headers=admin_headers
+    ).json()
+
+    assert unchanged["source_tags"] == ["pci"]
+
+
 def test_a_matcher_sent_as_null_is_dropped_and_an_omitted_one_stays(
     client: TestClient, api: str, session: Session, admin_headers: dict[str, str]
 ) -> None:

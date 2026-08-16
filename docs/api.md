@@ -165,7 +165,10 @@ being in the past on an open, unsuppressed finding.
   Order is the meaning of a rule set, so this is the order routing actually uses rather than a
   friendlier one a console would have to re-derive.
 - `POST /routing-rules`, `PATCH /routing-rules/{id}`, `DELETE /routing-rules/{id}` (admin). A
-  matcher sent as `null` is dropped; an omitted one is left alone. Deleting a rule is safe — a rule
+  matcher sent as `null` is dropped — including `source_tags`, where `null` clears the list and is
+  the only way to widen an existing rule; an omitted one is left alone. A rule may not point at a
+  **disbanded** group: routing skips such rules, so accepting one would let an admin build a rule
+  that holds a place in the evaluation order and silently matches nothing. Deleting a rule is safe — a rule
   is consulted, never referenced, and what it decided lives on the finding and in its event trail.
 - `GET  /response-targets` (viewer+), `PUT /response-targets/{severity}` (admin). Edited, never
   created or deleted: there is one row per severity, seeded by migration, and a severity with no

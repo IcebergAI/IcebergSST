@@ -220,7 +220,6 @@ def test_ownership_policy_changes_are_audited(
     group = client.post(f"{api}/owner-groups", json={"name": "payments"}, headers=headers)
     assert group.status_code == 201, group.text
     group_id = group.json()["id"]
-    client.patch(f"{api}/owner-groups/{group_id}", json={"disabled": True}, headers=headers)
     rule = client.post(
         f"{api}/routing-rules",
         json={"name": "catch-all", "owner_group_id": group_id},
@@ -229,6 +228,10 @@ def test_ownership_policy_changes_are_audited(
     assert rule.status_code == 201, rule.text
     client.patch(f"{api}/routing-rules/{rule.json()['id']}", json={"priority": 5}, headers=headers)
     client.delete(f"{api}/routing-rules/{rule.json()['id']}", headers=headers)
+    # Disbanding last: a rule may not be pointed at a disabled group (#166), so
+    # doing it first would make the rule creation above a 422 and this test would
+    # be asserting the audit trail of operations that never happened.
+    client.patch(f"{api}/owner-groups/{group_id}", json={"disabled": True}, headers=headers)
     client.put(f"{api}/response-targets/high", json={"hours": 12}, headers=headers)
 
     assert _actions(session, AUDIT_TARGET_OWNER_GROUP) == [

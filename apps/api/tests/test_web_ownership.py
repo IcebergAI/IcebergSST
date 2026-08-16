@@ -6,6 +6,8 @@ in the database, and the queue the whole feature exists to produce is reachable
 from the console rather than only from a URL somebody had to know to type.
 """
 
+import html
+import re
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -306,6 +308,34 @@ def test_the_queue_can_be_narrowed_to_one_team(
     assert "mine-rule" in body
     assert "theirs-rule" not in body
     assert f'href="/findings/{mine.id}"' in body
+
+
+def test_a_teams_queue_link_from_the_ownership_screen_really_filters(
+    client: TestClient,
+    session: Session,
+    admin_headers: dict[str, str],
+    make_source: Callable[..., Source],
+    make_finding: Callable[..., Finding],
+) -> None:
+    """Follows the href the screen actually renders, rather than a URL the test
+    composed itself. The counters linked to `?owner_group_id=`, which the web
+    route ignores — so an administrator clicking a team's backlog was shown every
+    team's findings, and a test that built its own URL could not see it."""
+    _make_group(client, admin_headers, "payments")
+    group = session.exec(select(OwnerGroup)).one()
+    source = make_source()
+    make_finding(source, owner_group_id=group.id, rule_id="ours-rule")
+    make_finding(source, rule_id="theirs-rule")
+
+    screen = client.get("/ownership").text
+    match = re.search(r'href="(/findings\?owner[^"]*state=open[^"]*)"', screen)
+    assert match is not None, "the ownership screen renders no team queue link"
+    link = html.unescape(match.group(1))
+
+    body = client.get(link).text
+
+    assert "ours-rule" in body
+    assert "theirs-rule" not in body
 
 
 def test_the_unowned_queue_is_one_option_in_the_owner_dropdown(
