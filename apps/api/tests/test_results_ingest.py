@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from iceberg_api.scans import service
 from iceberg_core.correlation import correlation_id
 from iceberg_core.enums import (
+    FindingEventKind,
     FindingResolution,
     FindingState,
     ScanStatus,
@@ -30,6 +31,7 @@ from iceberg_core.models import (
     User,
 )
 from iceberg_core.secrets import EnvKeyBackend
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 FINGERPRINT = "a" * 64
@@ -918,15 +920,11 @@ def test_a_triaged_finding_keeps_its_state_across_scans(scan_fixture: Fixture) -
     assert finding.last_seen_scan_id == second.id
 
 
-@pytest.mark.parametrize("resolution", [FindingResolution.AUTO, FindingResolution.MANUAL])
-def test_a_secret_that_comes_back_reopens(
-    scan_fixture: Fixture, resolution: FindingResolution
-) -> None:
-    """A sighting refutes "resolved" however it was resolved (ADR 0006). An auto
-    resolution was an inference from absence; a manual one was an analyst believing
-    the secret had been removed — the reappearance disproves both. Only the
-    judgement states (false_positive, accepted_risk) survive a sighting."""
-    fixture = scan_fixture
+def _sighted_again(
+    fixture: Fixture,
+    resolution: FindingResolution,
+) -> tuple[Finding, Scan, Any]:
+    """Report a finding, resolve it, then have a second scan see it again."""
     task = fixture.fetch_task()
     fixture.report(task, findings=[_finding_payload()])
     finding = fixture.session.exec(select(Finding)).one()
@@ -953,11 +951,62 @@ def test_a_secret_that_comes_back_reopens(
     fixture.session.refresh(fetch)
 
     response = fixture.report(fetch, findings=[_finding_payload()])
+    fixture.session.refresh(finding)
+    return finding, second, response
+
+
+@pytest.mark.parametrize("resolution", [FindingResolution.AUTO, FindingResolution.MANUAL])
+def test_a_secret_that_comes_back_reopens(
+    scan_fixture: Fixture, resolution: FindingResolution
+) -> None:
+    """A sighting refutes "resolved" however it was resolved (ADR 0006). An auto
+    resolution was an inference from absence; a manual one was an analyst believing
+    the secret had been removed — the reappearance disproves both. Only the
+    judgement states (false_positive, accepted_risk) survive a sighting."""
+    finding, _second, response = _sighted_again(scan_fixture, resolution)
 
     assert response.json()["findings_reopened"] == 1
-    fixture.session.refresh(finding)
     assert finding.state is FindingState.OPEN
     assert finding.resolution is None
+
+
+def test_a_reopen_records_which_scan_saw_the_secret_again(scan_fixture: Fixture) -> None:
+    """The reopen row must carry its scan, or it falls outside the partial unique
+    index that makes system events idempotent (#143, `models/findings.py`). The
+    index is predicated on `scan_id IS NOT NULL`, so an unpopulated column would
+    leave the constraint inert while looking exactly like this test passing."""
+    finding, second, _response = _sighted_again(scan_fixture, FindingResolution.AUTO)
+
+    event = scan_fixture.session.exec(
+        select(FindingEvent)
+        .where(FindingEvent.finding_id == finding.id)
+        .where(FindingEvent.kind == FindingEventKind.REOPENED)
+    ).one()
+    assert event.scan_id == second.id
+    assert event.actor_id is None
+
+
+def test_a_second_reopen_by_the_same_scan_is_refused_by_the_database(
+    scan_fixture: Fixture,
+) -> None:
+    """A batched fetch re-reporting a finding must not append a second reopen. The
+    state check in ingest already prevents it in one transaction; this is the
+    structural backstop, exercised rather than assumed."""
+    finding, second, _response = _sighted_again(scan_fixture, FindingResolution.AUTO)
+
+    scan_fixture.session.add(
+        FindingEvent(
+            finding_id=finding.id,
+            actor_id=None,
+            scan_id=second.id,
+            kind=FindingEventKind.REOPENED,
+            from_value=FindingState.RESOLVED.value,
+            to_value=FindingState.OPEN.value,
+        )
+    )
+    with pytest.raises(IntegrityError):
+        scan_fixture.session.commit()
+    scan_fixture.session.rollback()
 
 
 def test_a_suppressed_finding_is_recorded_not_discarded(scan_fixture: Fixture) -> None:
