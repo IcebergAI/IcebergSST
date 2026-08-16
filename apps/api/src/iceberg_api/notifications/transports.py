@@ -149,6 +149,16 @@ class WebhookTransport:
         except httpx2.HTTPError as exc:
             raise DeliveryError(f"webhook request failed: {exc.__class__.__name__}") from exc
 
+        if 300 <= response.status_code < 400:
+            # Redirects are not followed, so a 3xx means the announcement never
+            # reached the receiver. "Anything below 400 is success" quietly marked
+            # those delivered — the same defect found in the handoff sender
+            # (#141), and the same two lines fix it here.
+            raise DeliveryError(
+                f"webhook was redirected (HTTP {response.status_code}); "
+                f"point the channel at the final URL",
+                permanent=True,
+            )
         if response.status_code >= 400:
             # 4xx is usually configuration and 5xx usually transient, but a 429 is
             # explicitly "try later" and a 404 can be a receiver mid-deploy. Only

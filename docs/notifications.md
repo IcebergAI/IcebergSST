@@ -149,6 +149,11 @@ ADR 0004 — and never anything reversible), and analyst triage state such as no
 The payload is built from an explicit field list, so adding a column to `Finding` cannot silently
 start exporting it.
 
+A **3xx is a failed delivery**, not a followed one. Redirects are deliberately not followed —
+following one would be a way to move where findings are sent without touching the channel — so a
+redirect means the announcement never arrived. It fails permanently: point the channel at the URL
+the receiver actually serves.
+
 ### Headers
 
 | Header | Value |

@@ -759,7 +759,12 @@ def test_the_webhook_does_not_follow_a_redirect(
     dispatch_settings: ApiSettings, secret_store: SecretStore
 ) -> None:
     """A 302 would be a way to move where findings are sent without touching the
-    channel, so the redirect is a failed delivery rather than a followed one."""
+    channel, so the redirect is a failed delivery rather than a followed one.
+
+    Both halves are asserted now. This test had always claimed the second one in
+    its docstring while checking only the first — and the transport treated any
+    status below 400 as success, so a redirected announcement was recorded as
+    delivered. Found by the same defect in the handoff sender (#141)."""
     visited: list[str] = []
 
     def handler(request: httpx2.Request) -> httpx2.Response:
@@ -770,7 +775,8 @@ def test_the_webhook_does_not_follow_a_redirect(
         dispatch_settings, secret_store, transport=httpx2.MockTransport(handler)
     )
 
-    transport.send(_webhook_channel(), {"event": "x"}, subject="ignored")
+    with pytest.raises(DeliveryError, match="redirected"):
+        transport.send(_webhook_channel(), {"event": "x"}, subject="ignored")
 
     assert visited == ["https://receiver.example.com/hook"]
 
