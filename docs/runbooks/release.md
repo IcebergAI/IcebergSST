@@ -52,6 +52,11 @@ exists to solve, and anything already published is still signed against the old 
 forward — cut the next patch version — unless *nothing* was published, in which case
 `workflow_dispatch` re-runs the whole thing for the same tag.
 
+That dispatch input is validated as an **existing** `vX.Y.Z` tag before anything is checked out
+from it, and every publishing job then uses the resolved ref rather than the string. A recovery
+path that accepted a branch name would let a manual run publish untagged code over a release an
+operator had already verified — the one thing `on: push: tags:` gives for free.
+
 ## Verifying a release
 
 None of this requires trusting IcebergSST with a signing key. The images are signed with cosign's

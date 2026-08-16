@@ -132,6 +132,32 @@ def test_the_release_workflow_verifies_before_it_publishes() -> None:
     assert "needs: [verify, images]" in workflow
 
 
+def test_only_an_existing_release_tag_can_be_published() -> None:
+    """`on: push: tags:` gives this for free; `workflow_dispatch` does not.
+
+    Without the check, a recovery run with `tag: main` would check out a branch,
+    pass the version and CHANGELOG checks — `main` declares the current version —
+    and publish untagged code over an image an operator had already verified.
+    """
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    assert "grep -Eq '^v[0-9]+\\.[0-9]+\\.[0-9]+$'" in workflow
+    assert 'git rev-parse --verify --quiet "refs/tags/$REF_NAME"' in workflow
+
+
+def test_no_publishing_job_checks_out_the_dispatch_input() -> None:
+    """The structural half of the check above. The input is a string a human
+    typed; `needs.verify.outputs.ref` is a ref that has been proved to be a
+    release tag — so validating it in one job is only worth anything if no later
+    job can reach past that job for the original."""
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    # Exactly one mention: the verify job's own env, where it is validated.
+    assert workflow.count("inputs.tag") == 1, "the raw dispatch input is used more than once"
+    assert "ref: ${{ needs.verify.outputs.ref }}" in workflow
+    assert "tag_name: ${{ needs.verify.outputs.tag }}" in workflow
+
+
 def test_every_release_action_is_pinned_to_a_commit() -> None:
     """A tag is a mutable pointer its owner can move — the same reason images are
     signed by digest. The trailing comment is the human-readable half; only the
