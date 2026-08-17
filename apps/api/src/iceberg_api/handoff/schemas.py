@@ -121,6 +121,27 @@ class HandoffTargetRead(BaseModel):
     updated_at: UtcDatetime
 
 
+class HandoffTargetChoice(BaseModel):
+    """A target as an **analyst** sees it: enough to choose one, and no more.
+
+    An analyst has to be able to pick a destination — they are the role that
+    hands findings over — but "which systems has this deployment approved" and
+    "what URL does that one post to, and does it hold a signing key" are
+    different questions. The first is needed to do the job; the second is the
+    administrative detail that made the target list admin-only to begin with.
+
+    So the config, the sealed-secret flag, and the timestamps are all absent
+    here rather than blanked: a field that is not in the model cannot be
+    forgotten into a response.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    type: HandoffTargetType
+
+
 class HandoffRequest(BaseModel):
     """``POST /findings/{id}/handoffs``: which target to hand it to."""
 

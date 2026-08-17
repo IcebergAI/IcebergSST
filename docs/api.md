@@ -269,8 +269,9 @@ resource locations out of the deployment, so who may configure one is the contro
 destination it points at — never with the secret.
 
 The `config` blob is validated per channel type: a webhook needs an absolute
-`http(s)` URL and may carry non-secret `headers`; an email channel needs
-recipients. The header names browsers and proxies use for authentication
+`http(s)` URL — parsed, so one with no host or a bad port is refused when the
+channel is saved rather than at 3am — and may carry non-secret `headers`; an
+email channel needs recipients. The header names browsers and proxies use for authentication
 (`Authorization`, `Proxy-Authorization`, `Cookie`) are **refused**, because
 config is stored as plain JSON and a token in one would be a plaintext secret at
 rest — pointing the operator at `secret`, which is sealed through the secret
@@ -288,7 +289,9 @@ Dispatch itself is M4. These routes are the configuration surface the console
 drives; the delivery loop reads these rows.
 
 ## Hand-over to an external workflow (#141)
-- `GET /handoff/targets` · `POST …` · `GET/PATCH/DELETE /handoff/targets/{id}` (**admin**)
+- `GET /handoff/targets` (analyst+, **role-shaped**) — an admin sees the whole row; an analyst sees
+  `id`, `name`, `type` for the **enabled** targets, which is what choosing a destination needs.
+- `POST /handoff/targets` · `GET/PATCH/DELETE /handoff/targets/{id}` (**admin**)
 - `GET  /findings/{id}/handoffs` (analyst+) — where this finding has been sent, with the delivery
   state: status, attempts, the receiver's work-item id and link, and the error that ended it.
 - `POST /findings/{id}/handoffs` (analyst+) — hand it to a target. `201` when this call created the
@@ -300,6 +303,12 @@ drives; the delivery loop reads these rows.
 same reason a notification channel is; choosing that this finding belongs in that queue is triage.
 Both requesting and replaying are audited — unlike an announcement, a hand-over is a named person
 putting a finding into somebody else's queue.
+
+Which is why the target *list* is analyst+ while every other target route is not: choosing a
+destination requires knowing the approved ones exist. An analyst sees the name and id and nothing
+else — the URL, the secret state, and the disabled targets stay admin-only. Withholding the list
+entirely would not have been an access control, only the same access reached by passing a UUID
+around out of band.
 
 Requesting is **idempotent by construction**, and in two independent ways: a unique constraint on
 `(target_id, finding_id)` means a second row cannot be inserted, and an idempotency key that is
@@ -314,6 +323,9 @@ silent no-op: an operator who pressed the button is owed an answer.
 
 The `config` blob is validated per target type by **one** definition that both `POST` and `PATCH`
 go through, so a working target cannot be edited into a destination the sender cannot deliver to.
+The URL is **parsed**, not prefix-matched: a scheme nothing here speaks, a missing host
+(`https:///hooks`), or an invalid port is refused at save time, by the admin who typed it, rather
+than becoming a hand-over that fails every attempt after an analyst was told it was created.
 A target secret is write-only exactly like a channel's, and `type` is not editable. The payload,
 its signature scheme, and what a receiver is expected to do are in
 [`handoff.md`](./handoff.md).
