@@ -45,13 +45,20 @@ Two roles, and the split is the control:
   queue is an analyst's judgement, and the destinations they can choose from are the ones an admin
   already approved. Admins decide where; analysts decide which.
 
+The target *list* is the one place those meet. An analyst has to know which destinations exist to
+pick one, so the list is analyst+ and **role-shaped**: an admin sees the whole row, an analyst sees
+`id`, `name`, and `type` for the enabled targets and nothing more. A disabled target is not offered,
+because requesting it would only earn a `409` — for an admin the disabled state is the information,
+for an analyst it is a choice that cannot be made.
+
 Requesting and replaying are both audited, which announcing a finding deliberately is not: an
 announcement is the system telling somebody, while a hand-over is a named person putting a finding
 into somebody else's queue.
 
 ### Routes
 
-- `GET /handoff/targets` · `POST …` · `GET/PATCH/DELETE /handoff/targets/{id}` (admin)
+- `GET /handoff/targets` (analyst+, role-shaped — see above)
+- `POST /handoff/targets` · `GET/PATCH/DELETE /handoff/targets/{id}` (admin)
 - `GET  /findings/{id}/handoffs` (analyst+) — where this finding has been sent, and what happened.
 - `POST /findings/{id}/handoffs` (analyst+) — hand it to a target. `201` when the call created the
   hand-over, **`200` when one already existed** — asking twice is not an error, and the status code
@@ -61,7 +68,9 @@ into somebody else's queue.
   on the other side.
 
 A target's `config` is validated by one definition that both `POST` and `PATCH` go through, so a
-working target cannot be edited into a destination the sender will not deliver to. A target secret
+working target cannot be edited into a destination the sender will not deliver to. The URL is
+parsed rather than prefix-matched — a missing host or an invalid port is refused when the target is
+saved, by the admin who typed it. A target secret
 is write-only exactly like a channel's: supplying one seals it through the secret store (ADR 0007),
 no response carries the plaintext *or* the sealed ref, and `has_secret` says whether one exists.
 Editing `config` keeps the sealed ref — fixing a typo in a URL is not a request to drop the signing

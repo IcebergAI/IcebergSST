@@ -102,16 +102,28 @@ def test_an_analyst_cannot_approve_a_destination(
     assert response.status_code == 403
 
 
-@pytest.mark.parametrize(
-    "url",
-    [
-        "file:///etc/passwd",
-        "ftp://soar.example.test/hooks",
-        "   ",
-        "https://soar.example.test/hooks\nX-Injected: 1",
-        "not a url at all",
-    ],
-)
+#: Everything a destination field refuses. Both the create and the update test
+#: run the whole list — deliberately the same list rather than a subset, since a
+#: subset is a subset somebody has to remember to maintain (#180).
+REFUSED_URLS = [
+    "file:///etc/passwd",
+    "ftp://soar.example.test/hooks",
+    "   ",
+    "https://soar.example.test/hooks\nX-Injected: 1",
+    "not a url at all",
+    # No host to send to. These are the ones a scheme-prefix check let through:
+    # they save cleanly and then fail every delivery attempt (#184).
+    "https://",
+    "https:///handoff",
+    "http:///",
+    # A port that is not a port. `urlsplit` defers the error until something
+    # reads it, which at delivery time is far too late.
+    "https://soar.example.test:not-a-port/hooks",
+    "https://soar.example.test:99999999/hooks",
+]
+
+
+@pytest.mark.parametrize("url", REFUSED_URLS)
 def test_a_destination_that_is_not_an_http_url_is_refused_on_create(
     url: str,
     client: TestClient,
@@ -128,16 +140,7 @@ def test_a_destination_that_is_not_an_http_url_is_refused_on_create(
     assert response.status_code == 422, response.text
 
 
-@pytest.mark.parametrize(
-    "url",
-    [
-        "file:///etc/passwd",
-        "ftp://soar.example.test/hooks",
-        "   ",
-        "https://soar.example.test/hooks\nX-Injected: 1",
-        "not a url at all",
-    ],
-)
+@pytest.mark.parametrize("url", REFUSED_URLS)
 def test_a_target_url_cannot_be_edited_into_an_unsupported_scheme(
     url: str,
     client: TestClient,
@@ -164,6 +167,43 @@ def test_a_target_url_cannot_be_edited_into_an_unsupported_scheme(
     assert response.status_code == 422, response.text
     stored = session.exec(select(HandoffTarget)).one()
     assert stored.config["url"] == "https://soar.example.test/hooks/iceberg"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # A scheme is case-insensitive per RFC 3986. Refusing this would be
+        # refusing a destination that works.
+        "HTTPS://soar.example.test/hooks",
+        # Internal receivers are the common case, so there is no address
+        # blocklist and no requirement that a host resolve publicly.
+        "http://soar.internal/hooks",
+        "https://soar.example.test:8443/hooks",
+        "http://10.0.0.5:8080/hooks",
+        "https://user@soar.example.test/hooks",
+        # Surrounding whitespace is trimmed rather than refused: it is a paste
+        # artefact, not a different destination.
+        "  https://soar.example.test/hooks  ",
+    ],
+)
+def test_a_destination_that_is_a_real_url_is_accepted(
+    url: str,
+    client: TestClient,
+    api: str,
+    session: Session,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """The other side of #184: tightening the check must not start refusing
+    destinations that deliver perfectly well."""
+    headers = login_as(make_user(UserRole.ADMIN))
+
+    response = client.post(
+        f"{api}/handoff/targets", json=TARGET | {"config": {"url": url}}, headers=headers
+    )
+
+    assert response.status_code == 201, response.text
+    assert session.exec(select(HandoffTarget)).one().config["url"] == url.strip()
 
 
 def test_editing_a_targets_url_keeps_its_signing_key(
@@ -245,6 +285,125 @@ def test_deleting_a_target_takes_its_handoffs_with_it(
     session.expire_all()
     assert session.exec(select(FindingHandoff)).all() == []
     assert "handoff_target.deleted" in _actions(session, AUDIT_TARGET_HANDOFF_TARGET)
+
+
+# ─── An analyst has to be able to choose one ──────────────────────────────────
+
+
+def test_an_analyst_can_discover_an_approved_target(
+    client: TestClient,
+    api: str,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+    make_source: Callable[..., Source],
+    make_finding: Callable[..., Finding],
+) -> None:
+    """#183. The analyst is the role that hands findings over, so leaving them no
+    supported way to learn a target's id made the request endpoint unusable
+    except by passing a UUID around out of band — which is not an access control,
+    it is the same access by a worse route.
+
+    Asserted end to end: the id from the list is the id the request accepts.
+    """
+    _create_target(client, api, login_as(make_user(UserRole.ADMIN)))
+    headers = login_as(make_user(UserRole.ANALYST))
+    finding = make_finding(make_source())
+
+    listed = client.get(f"{api}/handoff/targets", headers=headers)
+
+    assert listed.status_code == 200, listed.text
+    (choice,) = listed.json()
+    assert choice["name"] == "soar-prod"
+    requested = client.post(
+        f"{api}/findings/{finding.id}/handoffs",
+        json={"target_id": choice["id"]},
+        headers=headers,
+    )
+    assert requested.status_code == 201, requested.text
+
+
+def test_an_analysts_target_list_carries_no_administrative_detail(
+    client: TestClient,
+    api: str,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """Choosing a destination needs its name. Where it posts and whether it holds
+    a signing key are the administrative facts that made this list admin-only in
+    the first place, and they stay that way."""
+    _create_target(client, api, login_as(make_user(UserRole.ADMIN)))
+    headers = login_as(make_user(UserRole.ANALYST))
+
+    (choice,) = client.get(f"{api}/handoff/targets", headers=headers).json()
+
+    assert set(choice) == {"id", "name", "type"}
+    assert "soar.example.test" not in str(choice)
+
+
+def test_an_admins_target_list_still_carries_everything(
+    client: TestClient,
+    api: str,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """The role-shaping must not have quietly narrowed the admin's own view."""
+    headers = login_as(make_user(UserRole.ADMIN))
+    _create_target(client, api, headers)
+
+    (listed,) = client.get(f"{api}/handoff/targets", headers=headers).json()
+
+    assert listed["config"]["url"] == "https://soar.example.test/hooks/iceberg"
+    assert listed["has_secret"] is True
+
+
+def test_an_analyst_is_not_offered_a_disabled_target(
+    client: TestClient,
+    api: str,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """A disabled target refuses the hand-over with a 409, so offering it would be
+    offering a choice that cannot be made. An admin still sees it, because for
+    them the disabled state is the information."""
+    admin = make_user(UserRole.ADMIN)
+    _create_target(client, api, login_as(admin), name="soar-retired", enabled=False)
+    _create_target(client, api, login_as(admin))
+
+    analyst_headers = login_as(make_user(UserRole.ANALYST))
+    analyst_view = client.get(f"{api}/handoff/targets", headers=analyst_headers)
+    admin_view = client.get(f"{api}/handoff/targets", headers=login_as(admin))
+
+    assert [target["name"] for target in analyst_view.json()] == ["soar-prod"]
+    assert [target["name"] for target in admin_view.json()] == ["soar-prod", "soar-retired"]
+
+
+def test_a_viewer_cannot_list_targets(
+    client: TestClient,
+    api: str,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """Which external systems this deployment sends findings to is not part of
+    reading a finding."""
+    headers = login_as(make_user(UserRole.VIEWER))
+
+    assert client.get(f"{api}/handoff/targets", headers=headers).status_code == 403
+
+
+def test_an_analyst_cannot_read_one_target_in_full(
+    client: TestClient,
+    api: str,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """The list is what an analyst needs; the detail view is where the
+    destination and the secret state live."""
+    target = _create_target(client, api, login_as(make_user(UserRole.ADMIN)))
+    headers = login_as(make_user(UserRole.ANALYST))
+
+    response = client.get(f"{api}/handoff/targets/{target['id']}", headers=headers)
+
+    assert response.status_code == 403
 
 
 # ─── Requesting a hand-over is an analyst's decision ──────────────────────────

@@ -11,6 +11,11 @@ Two audiences, two roles, and the split is the point:
   choose from are the ones an admin already approved. That is the whole shape of
   the control: admins decide *where*, analysts decide *which*.
 
+Which is why the target *list* is analyst+ while everything else about a target
+is not: choosing a destination requires knowing the approved ones exist, and an
+analyst sees exactly that — id, name, type — while the URL, the secret state,
+and the disabled ones stay admin-only (#183).
+
 Delivery is not here. Requesting writes an outbox row and returns; the
 maintenance round sends it (docs/handoff.md § How delivery works), so a receiver
 that hangs for its full timeout delays a ticket instead of an analyst's request.
@@ -21,7 +26,7 @@ from typing import Any
 
 import structlog
 from fastapi import APIRouter, HTTPException, Response, status
-from iceberg_core.enums import HandoffStatus, HandoffTargetType
+from iceberg_core.enums import HandoffStatus, HandoffTargetType, UserRole
 from iceberg_core.models import (
     AUDIT_HANDOFF_REPLAYED,
     AUDIT_HANDOFF_TARGET_CREATED,
@@ -40,11 +45,12 @@ from sqlmodel import col, select
 
 from iceberg_api import audit
 from iceberg_api.auth.dependencies import CsrfProtected, SecretStoreDep, SessionDep
-from iceberg_api.auth.rbac import AdminUser, AnalystUser
+from iceberg_api.auth.rbac import ROLE_RANK, AdminUser, AnalystUser
 from iceberg_api.handoff import service
 from iceberg_api.handoff.schemas import (
     FindingHandoffRead,
     HandoffRequest,
+    HandoffTargetChoice,
     HandoffTargetCreate,
     HandoffTargetRead,
     HandoffTargetUpdate,
@@ -143,23 +149,46 @@ def _destination(target: HandoffTarget) -> str:
     return str(target.config.get("url", ""))[:255]
 
 
-# ─── Targets (admin) ──────────────────────────────────────────────────────────
+# ─── Targets (admin, except choosing one) ─────────────────────────────────────
 
 
 @router.get("/handoff/targets")
-async def list_targets(admin: AdminUser, db: SessionDep) -> list[HandoffTargetRead]:
+async def list_targets(
+    user: AnalystUser, db: SessionDep
+) -> list[HandoffTargetRead] | list[HandoffTargetChoice]:
     """Every target, by name. Never any secret material.
+
+    **Role-shaped**, the same way a finding's remediation actions are (ADR 0012).
+    An admin sees the whole row — where it posts, whether it holds a signing key,
+    when it changed — because auditing where findings go is their job. An analyst
+    sees the id, name, and type, which is what choosing a destination needs and
+    nothing beyond it (#183).
+
+    Analyst+ rather than admin-only because the analyst is the role that hands
+    findings over: leaving them no supported way to learn a target's id made the
+    request endpoint unusable except by passing a UUID around out of band, which
+    is not an access control — it is the same access with a worse path to it.
+
+    Only **enabled** targets are offered to an analyst. A disabled one would
+    refuse the hand-over with a 409, so listing it is offering a choice that
+    cannot be made; an admin still sees every target, disabled ones included,
+    because for them the disabled state *is* the information.
 
     Not paginated, for the reason channels are not: a deployment has a handful,
     and an admin auditing where findings go should see all of them at once rather
     than discover a second page exists.
     """
-    targets = db.exec(select(HandoffTarget).order_by(col(HandoffTarget.name)))
-    return [_read_target(target) for target in targets]
+    statement = select(HandoffTarget).order_by(col(HandoffTarget.name))
+    if ROLE_RANK[user.role] >= ROLE_RANK[UserRole.ADMIN]:
+        return [_read_target(target) for target in db.exec(statement)]
+    offered = db.exec(statement.where(col(HandoffTarget.enabled).is_(True)))
+    return [HandoffTargetChoice.model_validate(target) for target in offered]
 
 
 @router.get("/handoff/targets/{target_id}")
 async def read_target(target_id: uuid.UUID, admin: AdminUser, db: SessionDep) -> HandoffTargetRead:
+    """One target in full. Admin-only: the list above is what an analyst needs,
+    and this is the view that carries the destination and the secret state."""
     return _read_target(_load_target(db, target_id))
 
 

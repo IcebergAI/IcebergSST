@@ -7,6 +7,7 @@ Separate from the SQLModel tables on purpose: the OpenAPI schema is the contract
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated
+from urllib.parse import urlsplit
 
 from iceberg_core.enums import UserRole
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
@@ -28,14 +29,38 @@ UtcDatetime = Annotated[datetime, AfterValidator(_assume_utc)]
 
 
 def _absolute_http_url(value: str) -> str:
-    """An operator-supplied destination we are willing to POST findings to."""
+    """An operator-supplied destination we are willing to POST findings to.
+
+    **Parsed, not prefix-matched.** A scheme check alone accepts ``https://`` and
+    ``https:///path`` — strings with no host, which save cleanly and then fail
+    every delivery attempt after an analyst has been told their finding was
+    handed over (#184). The point of validating at save time is that the admin
+    who made the typo is the one who hears about it.
+    """
     trimmed = value.strip()
-    if not trimmed.startswith(("http://", "https://")):
-        raise ValueError("url must start with http:// or https://")
     if " " in trimmed or any(char < " " or char == "\x7f" for char in trimmed):
         # A newline here would let a caller inject a second request line into
-        # anything downstream that builds a request from this string.
+        # anything downstream that builds a request from this string. Checked
+        # before parsing, because `urlsplit` will happily carry them along.
         raise ValueError("url must not contain spaces or control characters")
+
+    try:
+        parts = urlsplit(trimmed)
+    except ValueError as exc:  # an unparseable IPv6 literal, mostly
+        raise ValueError(f"url is not a valid URL: {exc}") from exc
+
+    # Case-insensitively: a scheme is case-insensitive per RFC 3986, and
+    # rejecting `HTTPS://…` would be refusing a destination that works.
+    if parts.scheme.lower() not in ("http", "https"):
+        raise ValueError("url must start with http:// or https://")
+    if not parts.hostname:
+        raise ValueError("url must include a host")
+    try:
+        # Reading the port is what validates it. The value is not wanted: the
+        # sender passes the URL through whole.
+        _ = parts.port
+    except ValueError as exc:
+        raise ValueError(f"url has an invalid port: {exc}") from exc
     return trimmed
 
 
@@ -50,7 +75,8 @@ def _absolute_http_url(value: str) -> str:
 #:
 #: Deliberately no address blocklist: a receiver is usually internal, and the
 #: control is that only an admin can set one (docs/security.md § Notification
-#: egress). What is refused is what is not a destination at all.
+#: egress). What is refused is what is not a destination at all — a scheme
+#: nothing here speaks, or a URL with no host to send to.
 WebhookUrl = Annotated[
     str, Field(min_length=1, max_length=2048), AfterValidator(_absolute_http_url)
 ]
