@@ -28,6 +28,8 @@ import structlog
 from iceberg_core.config import ApiSettings
 from iceberg_core.enums import HandoffStatus
 from iceberg_core.models import (
+    AUDIT_HANDOFF_REQUESTED,
+    AUDIT_TARGET_HANDOFF,
     Finding,
     FindingHandoff,
     HandoffTarget,
@@ -35,8 +37,10 @@ from iceberg_core.models import (
     Source,
 )
 from iceberg_core.secrets import SecretStore
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
+from iceberg_api import audit
 from iceberg_api.handoff.payload import handoff_requested
 from iceberg_api.notifications.dispatch import channel_wants
 from iceberg_api.notifications.transports import DeliveryError
@@ -95,11 +99,7 @@ def request(
         # button is owed an answer about why nothing happened.
         raise HandoffRefused("that target does not accept findings of this severity or source")
 
-    existing = db.exec(
-        select(FindingHandoff)
-        .where(col(FindingHandoff.target_id) == target.id)
-        .where(col(FindingHandoff.finding_id) == finding.id)
-    ).first()
+    existing = _existing(db, target, finding)
     if existing is not None:
         return existing
 
@@ -123,6 +123,79 @@ def request(
         actor_id=str(actor_id) if actor_id else None,
     )
     return handoff
+
+
+def _existing(db: Session, target: HandoffTarget, finding: Finding) -> FindingHandoff | None:
+    """The hand-over of this finding to this target, if there already is one."""
+    return db.exec(
+        select(FindingHandoff)
+        .where(col(FindingHandoff.target_id) == target.id)
+        .where(col(FindingHandoff.finding_id) == finding.id)
+    ).first()
+
+
+def request_committed(
+    db: Session,
+    finding: Finding,
+    target: HandoffTarget,
+    *,
+    actor_id: uuid.UUID | None,
+    now: datetime | None = None,
+) -> tuple[FindingHandoff, bool]:
+    """:func:`request`, committed, and safe against the request it races with.
+
+    Returns the hand-over and whether *this* call is the one that created it, so
+    a route can answer 201 or 200 truthfully.
+
+    :func:`request` looks for an existing row before inserting, which handles the
+    ordinary second click. It cannot handle two requests in flight at once: both
+    transactions can observe no row, both can insert, and the unique constraint
+    then refuses the loser — correctly, but as an ``IntegrityError`` that would
+    surface as a 500 (#181). The constraint doing its job is not an error the
+    caller should ever see, and the honest answer to the loser is the one the
+    second click already gets: the hand-over that exists.
+
+    Only that specific conflict is swallowed. If the row is still missing after
+    the rollback, something else failed and it is re-raised — a handler that
+    turned every ``IntegrityError`` into a success would be a much worse bug than
+    the one it was written to fix.
+    """
+    finding_id, target_name = finding.id, target.name
+    handoff = request(db, finding, target, actor_id=actor_id, now=now)
+    if handoff not in db.new:
+        # `request` handed back a row that was already there.
+        return handoff, False
+
+    audit.record(
+        db,
+        actor_id=actor_id,
+        action=AUDIT_HANDOFF_REQUESTED,
+        target_type=AUDIT_TARGET_HANDOFF,
+        target_id=handoff.id,
+        to_value=target_name,
+        # Where it went and which finding, never the finding's content: this trail
+        # answers "who sent that secret's details to that system".
+        detail={"finding_id": str(finding_id), "target_id": str(target.id)},
+    )
+    try:
+        # The row and its audit event commit together: "the operator asked for
+        # this" is either recorded with its reason or not recorded at all.
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        duplicate = _existing(db, target, finding)
+        if duplicate is None:
+            raise
+        logger.info(
+            "handoff_request_raced",
+            finding_id=str(finding_id),
+            target=target_name,
+            handoff_id=str(duplicate.id),
+        )
+        return duplicate, False
+
+    db.refresh(handoff)
+    return handoff, True
 
 
 def replay(handoff: FindingHandoff, *, now: datetime | None = None) -> None:

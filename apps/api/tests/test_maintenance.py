@@ -12,6 +12,7 @@ from iceberg_core.config import ApiSettings
 from iceberg_core.db import set_db_engine
 from iceberg_core.enums import (
     EngineStatus,
+    HandoffStatus,
     ScanStatus,
     ScanTaskStatus,
     ScanTrigger,
@@ -21,6 +22,8 @@ from iceberg_core.enums import (
 from iceberg_core.models import (
     Engine,
     Finding,
+    FindingHandoff,
+    HandoffTarget,
     Scan,
     ScanTask,
     Schedule,
@@ -264,6 +267,56 @@ def test_a_round_publishes_the_broker_backlog(
     run_round(dispatcher)
 
     assert REGISTRY.get_sample_value("iceberg_queue_depth", {"queue": SCAN_TASK_QUEUE}) == 7
+
+
+def test_a_round_delivers_queued_handoffs(
+    session: Session,
+    dispatcher: RecordingDispatcher,
+    run_round: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+    make_finding: Callable[..., Finding],
+) -> None:
+    """Requesting a hand-over writes an outbox row and sends nothing (#141), so
+    something in the round has to drain it.
+
+    Without this pass the mechanism is inert: every hand-over an analyst asks for
+    stays `pending` for ever, the API reports it as queued, and no work item is
+    ever created in the system the finding was handed to.
+    """
+    from iceberg_api.handoff import service as handoff_service
+
+    finding = make_finding()
+    target = HandoffTarget(
+        name="soar-prod",
+        config={"url": "https://soar.example.test/hooks/iceberg"},
+        event_filter={},
+    )
+    session.add(target)
+    session.commit()
+    handoff = handoff_service.request(session, finding, target, actor_id=None)
+    session.commit()
+
+    class RecordingSender:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        def send(self, target: HandoffTarget, payload: dict[str, object]) -> dict[str, str]:
+            self.sent.append(str(payload["idempotency_key"]))
+            return {"external_id": "SEC-1234"}
+
+    sender = RecordingSender()
+    # The round builds the real webhook sender; swap it so the assertion is about
+    # the pass running rather than about a socket.
+    monkeypatch.setattr(handoff_service, "_default_sender", lambda settings, store: sender)
+
+    run_round(dispatcher)
+
+    assert sender.sent == [handoff.idempotency_key]
+    session.expire_all()
+    delivered = session.get(FindingHandoff, handoff.id)
+    assert delivered is not None
+    assert delivered.status is HandoffStatus.DELIVERED
+    assert delivered.external_id == "SEC-1234"
 
 
 def test_a_round_releases_findings_whose_suppression_expired(

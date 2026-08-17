@@ -21,7 +21,7 @@ from typing import Any
 from iceberg_core.enums import NotificationChannelType, Severity
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from iceberg_api.schemas import UtcDatetime
+from iceberg_api.schemas import UtcDatetime, WebhookUrl
 
 #: Where the sealed secret's opaque ref lives inside ``config``. Stripped from
 #: every response — a ref plus a leaked master key is a credential.
@@ -47,25 +47,15 @@ class WebhookConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     #: Absolute http(s) URL. May be internal — a chat relay usually is — so there
-    #: is no address blocklist; the control is that only an admin can set it.
-    url: str = Field(min_length=1, max_length=2048)
+    #: is no address blocklist; the control is that only an admin can set it. The
+    #: shared type carries the check, so no schema can declare a destination and
+    #: forget to validate it (#180).
+    url: WebhookUrl
     #: Non-secret headers, e.g. a routing key a gateway expects.
     headers: dict[str, str] = Field(default_factory=dict)
     #: Read back out of the sealed ref at dispatch time and sent as the payload
     #: signature. Never part of ``headers`` — see the module docstring.
     secret_ref: str | None = None
-
-    @field_validator("url")
-    @classmethod
-    def _absolute_http_url(cls, value: str) -> str:
-        trimmed = value.strip()
-        if not trimmed.startswith(("http://", "https://")):
-            raise ValueError("url must start with http:// or https://")
-        if " " in trimmed or any(char < " " or char == "\x7f" for char in trimmed):
-            # A newline here would let a caller inject a second request line into
-            # anything downstream that builds a request from this string.
-            raise ValueError("url must not contain spaces or control characters")
-        return trimmed
 
     @field_validator("headers")
     @classmethod

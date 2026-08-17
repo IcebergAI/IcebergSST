@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from iceberg_core.enums import UserRole
-from pydantic import AfterValidator, BaseModel, ConfigDict
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 
 def _assume_utc(value: datetime) -> datetime:
@@ -25,6 +25,35 @@ def _assume_utc(value: datetime) -> datetime:
 
 #: Use for every timestamp in a response model.
 UtcDatetime = Annotated[datetime, AfterValidator(_assume_utc)]
+
+
+def _absolute_http_url(value: str) -> str:
+    """An operator-supplied destination we are willing to POST findings to."""
+    trimmed = value.strip()
+    if not trimmed.startswith(("http://", "https://")):
+        raise ValueError("url must start with http:// or https://")
+    if " " in trimmed or any(char < " " or char == "\x7f" for char in trimmed):
+        # A newline here would let a caller inject a second request line into
+        # anything downstream that builds a request from this string.
+        raise ValueError("url must not contain spaces or control characters")
+    return trimmed
+
+
+#: Use for **every** field holding an egress destination a caller can supply.
+#:
+#: One definition rather than a validator per schema, because the second copy is
+#: what goes missing: a handoff target's update schema declared a bare ``url``
+#: while only its create schema checked the scheme, so an admin could `PATCH` a
+#: working target into ``file:///…`` and find out at delivery time (#180). A
+#: field that cannot be declared without its validator cannot be declared without
+#: its validator on one of two paths.
+#:
+#: Deliberately no address blocklist: a receiver is usually internal, and the
+#: control is that only an admin can set one (docs/security.md § Notification
+#: egress). What is refused is what is not a destination at all.
+WebhookUrl = Annotated[
+    str, Field(min_length=1, max_length=2048), AfterValidator(_absolute_http_url)
+]
 
 
 class UserRead(BaseModel):

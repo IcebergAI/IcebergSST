@@ -126,10 +126,18 @@ declared action has no call site and when the reviewed list drifts from the decl
 | `suppression.created`, `suppression.deleted` | `findings/suppression_routes.py` |
 | `engine.registered`, `engine.token_rotated` | `engines/routes.py`, `cli.py` |
 | `channel.created`, `channel.updated`, `channel.deleted`, `channel.secret_set` | `notifications/routes.py` |
+| `handoff_target.created`, `handoff_target.updated`, `handoff_target.deleted`, `handoff_target.secret_set` | `handoff/routes.py` |
+| `handoff.requested`, `handoff.replayed` | `handoff/service.py`, `handoff/routes.py` |
 | `retention.purged` | `retention.py` |
 
 Each row records the actor (null for system actions), the target, and before/after values where
 they exist — never a credential value, which `test_audit_coverage.py` also asserts.
+
+**Requesting a hand-over is audited; announcing a finding is not.** An announcement is the system
+telling somebody what it found, and its record is the `notification_delivery` row. A hand-over is a
+named analyst deciding to put this finding into another system's queue, where it becomes a work
+item with a life of its own — so "who sent that finding to that system" is an administrative
+question, and it has an answer (#141).
 
 ### Deliberately not in `audit_event`
 

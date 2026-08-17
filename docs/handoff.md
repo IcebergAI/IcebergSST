@@ -33,6 +33,43 @@ Two independent mechanisms, because either alone leaves a duplicate path open:
 The key is derived from the pair it is unique on (`iceberg-handoff-<target-id>-<finding-id>`), so
 it is reproducible from the row rather than something that has to be preserved.
 
+## Who may do what
+
+Two roles, and the split is the control:
+
+- **Configuring a target is admin-only.** A target carries finding context off the deployment *and*
+  creates work items in another system, so it is at least as consequential as a notification
+  channel ([`notifications.md`](./notifications.md), docs/security.md § Notification egress). Every
+  mutation is audited with the destination it points at — never with the secret.
+- **Requesting a hand-over is analyst+**, like triage. Deciding that *this* finding belongs in that
+  queue is an analyst's judgement, and the destinations they can choose from are the ones an admin
+  already approved. Admins decide where; analysts decide which.
+
+Requesting and replaying are both audited, which announcing a finding deliberately is not: an
+announcement is the system telling somebody, while a hand-over is a named person putting a finding
+into somebody else's queue.
+
+### Routes
+
+- `GET /handoff/targets` · `POST …` · `GET/PATCH/DELETE /handoff/targets/{id}` (admin)
+- `GET  /findings/{id}/handoffs` (analyst+) — where this finding has been sent, and what happened.
+- `POST /findings/{id}/handoffs` (analyst+) — hand it to a target. `201` when the call created the
+  hand-over, **`200` when one already existed** — asking twice is not an error, and the status code
+  is what distinguishes the two.
+- `POST /findings/{id}/handoffs/{hid}/replay` (analyst+) — queue a `failed` hand-over for another
+  attempt. Only a failed one: a pending one is already queued, and a delivered one has a work item
+  on the other side.
+
+A target's `config` is validated by one definition that both `POST` and `PATCH` go through, so a
+working target cannot be edited into a destination the sender will not deliver to. A target secret
+is write-only exactly like a channel's: supplying one seals it through the secret store (ADR 0007),
+no response carries the plaintext *or* the sealed ref, and `has_secret` says whether one exists.
+Editing `config` keeps the sealed ref — fixing a typo in a URL is not a request to drop the signing
+key.
+
+Disabling a target stops delivery and keeps the history. Deleting one removes its hand-over rows
+with it, which is why disabling is the operation for winding a destination down.
+
 ## How delivery works
 
 A **transactional outbox**, the same shape as [notification dispatch](./notifications.md):
