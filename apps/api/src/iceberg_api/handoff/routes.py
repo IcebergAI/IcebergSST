@@ -468,6 +468,41 @@ async def replay_handoff(
 # ─── What comes back (receiver, then analyst) ─────────────────────────────────
 
 
+async def _capped_body(request: Request) -> bytes:
+    """The request body, refusing to buffer more than the cap.
+
+    Streamed and measured as it arrives rather than read whole and checked
+    afterwards — checking afterwards is not a cap, it is a report on how much was
+    already spent. (Exactly the defect fixed on the outbound reply in #179; this
+    is the same read in the other direction, from a caller who has not
+    authenticated yet.)
+
+    ``Content-Length`` is checked first when it is offered, so an honest oversized
+    request is refused before a byte of it is read. It is not trusted as the only
+    check: a chunked request carries no length, and a dishonest one is why the
+    streamed count exists.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            length = int(declared)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "malformed callback body") from exc
+        if length > callback.MAX_CALLBACK_BYTES:
+            raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "callback body too large")
+
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > callback.MAX_CALLBACK_BYTES:
+            # One chunk over is enough to know, and the rest is never pulled off
+            # the socket.
+            raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "callback body too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @router.post("/handoff/callback", status_code=status.HTTP_202_ACCEPTED)
 async def handoff_callback(
     request: Request,
@@ -491,10 +526,15 @@ async def handoff_callback(
     signature", "stale timestamp" and "target has no secret" actually failed is
     not something an unauthenticated caller gets to learn by trying, and the
     idempotency key is guessable enough to be worth not confirming.
+
+    The order of the first two steps is the security-relevant part: **charged,
+    then read against a cap, then authenticated.** Anything else lets an
+    unauthenticated caller spend a worker's memory before this route has decided
+    whether to talk to them at all.
     """
-    raw = await request.body()
-    # Charged to the address, like every other unauthenticated endpoint (#63):
-    # this one is reachable before anything has been verified.
+    # Charged to the address, like every other unauthenticated endpoint (#63),
+    # and charged *first*: this is reachable before anything has been verified,
+    # so it has to cost the caller something before it costs us anything.
     ratelimit.enforce(
         request,
         limits,
@@ -504,6 +544,7 @@ async def handoff_callback(
         limit=settings.auth_rate_limit,
         window_seconds=settings.auth_rate_limit_window_seconds,
     )
+    raw = await _capped_body(request)
 
     try:
         body = HandoffCallback.model_validate_json(raw)

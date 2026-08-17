@@ -50,6 +50,14 @@ logger = structlog.get_logger()
 #: nobody is synchronising.
 CALLBACK_TOLERANCE = timedelta(minutes=5)
 
+#: How much of a callback body is read. A receiver reporting one work item's
+#: state does not need more, and this endpoint is reachable by anybody: reading
+#: an unbounded body from an unauthenticated caller is the cheapest way there is
+#: to spend a worker's memory. Same size and the same reasoning as
+#: ``MAX_REPLY_BYTES`` on the way out — the two directions are equally somebody
+#: else's data.
+MAX_CALLBACK_BYTES = 64 * 1024
+
 
 class CallbackRefused(ValueError):
     """The callback is not one we will act on. Carries nothing a caller can probe."""

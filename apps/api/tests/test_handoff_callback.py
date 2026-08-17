@@ -15,11 +15,12 @@ import hashlib
 import hmac
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from fastapi import HTTPException, status
 from fastapi.testclient import TestClient
 from iceberg_core.config import ApiSettings
 from iceberg_core.enums import FindingState, HandoffExternalState, HandoffStatus, UserRole
@@ -204,6 +205,95 @@ def test_a_callback_for_an_unknown_key_is_refused_like_a_bad_signature(
 
     assert response.status_code == 401
     assert response.json()["detail"] == "callback rejected"
+
+
+def test_an_oversized_callback_body_is_refused_before_it_is_buffered(
+    client: TestClient,
+    api: str,
+    handed_over: tuple[Finding, FindingHandoff],
+) -> None:
+    """This endpoint is reachable by anybody, so reading an unbounded body from
+    an unauthenticated caller is the cheapest way there is to spend a worker's
+    memory.
+
+    Checked as it arrives rather than after the fact — checking afterwards is not
+    a cap, it is a report on what was already spent. The same defect that was
+    fixed on the outbound reply in #179, in the other direction.
+    """
+    from iceberg_api.handoff.callback import MAX_CALLBACK_BYTES
+
+    _finding, handoff = handed_over
+    raw, headers = _signed(
+        {
+            "idempotency_key": handoff.idempotency_key,
+            "state": "open",
+            "external_id": "x" * (MAX_CALLBACK_BYTES + 1),
+        }
+    )
+
+    response = client.post(f"{api}/handoff/callback", content=raw, headers=headers)
+
+    assert response.status_code == 413, response.text
+
+
+def test_an_oversized_callback_is_refused_even_without_a_content_length(
+    client: TestClient,
+    api: str,
+    handed_over: tuple[Finding, FindingHandoff],
+) -> None:
+    """A chunked request carries no length, and a dishonest one is why the
+    streamed count exists rather than trusting the header."""
+    from iceberg_api.handoff.callback import MAX_CALLBACK_BYTES
+
+    _finding, handoff = handed_over
+    _raw, headers = _signed({"idempotency_key": handoff.idempotency_key, "state": "open"})
+
+    def chunked() -> Iterator[bytes]:
+        for _ in range((MAX_CALLBACK_BYTES // 8192) + 2):
+            yield b"x" * 8192
+
+    response = client.post(f"{api}/handoff/callback", content=chunked(), headers=headers)
+
+    assert response.status_code == 413, response.text
+
+
+def test_a_callback_is_rate_limited_before_its_body_is_read(
+    client: TestClient,
+    api: str,
+    monkeypatch: pytest.MonkeyPatch,
+    handed_over: tuple[Finding, FindingHandoff],
+) -> None:
+    """Charged first, so an unauthenticated caller costs itself something before
+    it costs us anything.
+
+    The ordering *is* the control, so it is asserted directly rather than through
+    the limiter's behaviour: a full bucket is staged, and an oversized body —
+    which this route otherwise refuses with a 413 — must come back 429. Only the
+    charge happening before the read can produce that.
+
+    Driving it through the real limiter would prove nothing here: its store is
+    unavailable under test and it fails open, so every request would be allowed
+    and the test would pass whatever the order.
+    """
+    from iceberg_api import ratelimit
+    from iceberg_api.handoff.callback import MAX_CALLBACK_BYTES
+
+    def bucket_empty(*args: Any, **kwargs: Any) -> None:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "rate limited")
+
+    monkeypatch.setattr(ratelimit, "enforce", bucket_empty)
+
+    _finding, handoff = handed_over
+    oversized, headers = _signed(
+        {
+            "idempotency_key": handoff.idempotency_key,
+            "state": "open",
+            "external_id": "x" * (MAX_CALLBACK_BYTES + 1),
+        }
+    )
+    response = client.post(f"{api}/handoff/callback", content=oversized, headers=headers)
+
+    assert response.status_code == 429, response.text
 
 
 def test_a_callback_never_needs_a_session_or_a_csrf_token(
