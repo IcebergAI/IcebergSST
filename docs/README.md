@@ -12,6 +12,7 @@ Design specification and reference docs. Start with [`../ARCHITECTURE.md`](../AR
 - [`secret-validation.md`](./secret-validation.md) — opt-in credential liveness contracts and controls
 - [`security.md`](./security.md) — threat model and mitigations
 - [`notifications.md`](./notifications.md) — channels, the delivery outbox, escalation, payloads
+- [`handoff.md`](./handoff.md) — handing a finding to an external workflow, once
 - [`retention.md`](./retention.md) — what is pruned, when, and what is kept forever
 - [`deployment.md`](./deployment.md) — docker-compose (dev) + Helm (prod)
 - [`releases.md`](./releases.md) — versioning, support window, compatibility, upgrade and rollback

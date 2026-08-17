@@ -25,6 +25,7 @@ either way.
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any, Protocol
 
 import structlog
 from iceberg_core.config import ApiSettings
@@ -114,7 +115,18 @@ def newly_opened_findings(db: Session, scan: Scan) -> list[Finding]:
     return list(findings.values())
 
 
-def channel_wants(channel: NotificationChannel, finding: Finding) -> bool:
+class Filtered(Protocol):
+    """Anything carrying an event filter.
+
+    A protocol rather than :class:`NotificationChannel`, because a handoff target
+    carries the same filter for the same purpose (#141) — one filter vocabulary
+    across both egress paths, rather than two that drift.
+    """
+
+    event_filter: dict[str, Any]
+
+
+def channel_wants(channel: Filtered, finding: Finding) -> bool:
     """Whether this channel's event filter selects this finding."""
     event_filter = EventFilter.model_validate(channel.event_filter)
     if event_filter.min_severity is not None and (

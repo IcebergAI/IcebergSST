@@ -35,7 +35,15 @@ class Source(TimestampedModel, table=True):
     #: exist to be matched by routing rules (#146), and a controlled vocabulary
     #: would mean a migration every time a team reorganised. Never used by
     #: detection, so a typo here costs a routing miss, not a missed secret.
-    tags: list[str] = Field(default_factory=list, sa_type=json_type())
+    tags: list[str] = Field(
+        default_factory=list,
+        sa_type=json_type(),
+        # Declared here as well as in migration 0014, so autogenerate does not
+        # propose dropping it: the column is NOT NULL and the migration had to
+        # backfill existing rows, which means the default is part of the schema
+        # rather than a one-off. Same pattern as `full_scan_interval_days`.
+        sa_column_kwargs={"server_default": "'[]'"},
+    )
 
     enabled: bool = Field(default=True)
     created_by_id: uuid.UUID | None = Field(

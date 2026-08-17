@@ -340,6 +340,34 @@ class NotificationDeliveryStatus(StrEnum):
     FAILED = "failed"
 
 
+class HandoffTargetType(StrEnum):
+    """The kind of external workflow a finding can be handed to (#141).
+
+    One member on purpose. A signed webhook is the *reference adapter* the epic
+    asks for, and it is what every ITSM and SOAR platform can receive — through
+    its own automation, which is where the vendor-specific field names belong.
+    Building a Jira or ServiceNow client here would mean this project owning
+    their auth, their pagination, and their field schemas, and being wrong about
+    all three the next time they change.
+    """
+
+    WEBHOOK = "webhook"
+
+
+class HandoffStatus(StrEnum):
+    """Where one finding's handoff to one target has got to.
+
+    ``failed`` is terminal and means *give up*, not *lost*: the row stays with the
+    error that ended it, and an operator can replay it. Same contract as
+    :class:`NotificationDeliveryStatus`, and for the same reason — "what did we
+    never manage to hand over?" has to be a query rather than a log search.
+    """
+
+    PENDING = "pending"
+    DELIVERED = "delivered"
+    FAILED = "failed"
+
+
 class NotificationEventKind(StrEnum):
     """What an announcement is about (#60, #146).
 

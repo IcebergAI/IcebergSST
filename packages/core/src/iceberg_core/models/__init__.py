@@ -73,6 +73,7 @@ from iceberg_core.models.base import (
     utc_timestamp_type,
 )
 from iceberg_core.models.findings import Finding, FindingEvent, Suppression
+from iceberg_core.models.handoff import FindingHandoff, HandoffTarget
 from iceberg_core.models.identity import User
 from iceberg_core.models.notifications import NotificationChannel, NotificationDelivery
 from iceberg_core.models.ownership import (
@@ -142,6 +143,8 @@ __all__ = [
     "Engine",
     "Finding",
     "FindingEvent",
+    "FindingHandoff",
+    "HandoffTarget",
     "IcebergModel",
     "NotificationChannel",
     "NotificationDelivery",
