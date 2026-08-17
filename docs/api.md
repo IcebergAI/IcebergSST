@@ -287,6 +287,37 @@ replacement.
 Dispatch itself is M4. These routes are the configuration surface the console
 drives; the delivery loop reads these rows.
 
+## Hand-over to an external workflow (#141)
+- `GET /handoff/targets` · `POST …` · `GET/PATCH/DELETE /handoff/targets/{id}` (**admin**)
+- `GET  /findings/{id}/handoffs` (analyst+) — where this finding has been sent, with the delivery
+  state: status, attempts, the receiver's work-item id and link, and the error that ended it.
+- `POST /findings/{id}/handoffs` (analyst+) — hand it to a target. `201` when this call created the
+  hand-over, `200` when one already existed.
+- `POST /findings/{id}/handoffs/{hid}/replay` (analyst+) — queue a `failed` hand-over for another
+  attempt. A mismatched pair is a `404`.
+
+**Admins decide where, analysts decide which.** Approving a destination is administrative for the
+same reason a notification channel is; choosing that this finding belongs in that queue is triage.
+Both requesting and replaying are audited — unlike an announcement, a hand-over is a named person
+putting a finding into somebody else's queue.
+
+Requesting is **idempotent by construction**, and in two independent ways: a unique constraint on
+`(target_id, finding_id)` means a second row cannot be inserted, and an idempotency key that is
+never regenerated means a retry after a lost response cannot become a second ticket. Two requests
+racing return the same hand-over rather than a conflict — the constraint refusing the loser is
+correct, but it is not something the caller should ever see.
+
+Requesting sends nothing. It writes an outbox row and returns, and the maintenance round delivers
+it — so a receiver that hangs for its full timeout delays a ticket instead of an analyst's click.
+A target that is disabled, or whose filter does not select the finding, is a `409` rather than a
+silent no-op: an operator who pressed the button is owed an answer.
+
+The `config` blob is validated per target type by **one** definition that both `POST` and `PATCH`
+go through, so a working target cannot be edited into a destination the sender cannot deliver to.
+A target secret is write-only exactly like a channel's, and `type` is not editable. The payload,
+its signature scheme, and what a receiver is expected to do are in
+[`handoff.md`](./handoff.md).
+
 ## Engine-facing (per-engine token auth)
 These are the **only** routes that accept results. Lease semantics are defined in ADR 0009.
 Authentication is `Authorization: Bearer <engine token>`; session cookies are ignored here, and an

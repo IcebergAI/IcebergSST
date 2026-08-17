@@ -8,7 +8,8 @@ decides which replica actually does them:
 * **the safety sweeps** — repair scans a crash left wedged;
 * **fleet health** — mark engines that have gone quiet offline;
 * **suppression lapse** — return findings whose suppression has expired;
-* **escalation** — announce findings that have passed their response target.
+* **escalation** — announce findings that have passed their response target;
+* **delivery** — send queued announcements and hand-overs.
 
 They live in the API rather than in a separate cron container because both need the
 database and neither needs a connector: an extra deployable would be one more thing
@@ -34,6 +35,7 @@ from iceberg_api import retention, suppressions
 from iceberg_api.correlation import reindex
 from iceberg_api.dispatch import Dispatcher, build_dispatcher
 from iceberg_api.engines import fleet
+from iceberg_api.handoff import service as handoff_service
 from iceberg_api.notifications import dispatch as notification_dispatch
 from iceberg_api.scans import service
 from iceberg_api.scheduler import postgres_advisory_lock, tick
@@ -110,6 +112,14 @@ def run_once(
         # losing the alert.
         with session_scope() as db:
             notification_dispatch.deliver_pending(db, resolved, secret_store, now=at)
+        # Hand-overs requested by an analyst (#141). Its own pass rather than part
+        # of the one above: the two outboxes share a retry ladder and a transport
+        # but not a queue, and a receiver that is down must not stop announcements
+        # going out — or the reverse. Sent here for the reason announcements are:
+        # the analyst's request already committed, so a receiver that hangs for
+        # its full timeout delays a ticket instead of their click.
+        with session_scope() as db:
+            handoff_service.deliver_pending(db, resolved, secret_store, now=at)
         # Correlation-id repair (ADR 0011). A no-op unless the key is configured
         # and some row is missing its id — which happens whenever rows predate
         # the key or ingest ran while the secret store was unreadable. Runs in

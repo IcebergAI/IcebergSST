@@ -65,6 +65,17 @@ AUDIT_ROUTING_RULE_CREATED = "routing_rule.created"
 AUDIT_ROUTING_RULE_UPDATED = "routing_rule.updated"
 AUDIT_ROUTING_RULE_DELETED = "routing_rule.deleted"
 AUDIT_RESPONSE_TARGET_UPDATED = "response_target.updated"
+#: External hand-over (#141). Configuring a target is administrative for the same
+#: reason a notification channel is — it is an egress path off the deployment —
+#: and *requesting* one is recorded too, which a notification deliberately is not:
+#: an announcement is the system telling somebody, while a hand-over is a named
+#: person deciding to put this finding in another system's queue.
+AUDIT_HANDOFF_TARGET_CREATED = "handoff_target.created"
+AUDIT_HANDOFF_TARGET_UPDATED = "handoff_target.updated"
+AUDIT_HANDOFF_TARGET_DELETED = "handoff_target.deleted"
+AUDIT_HANDOFF_TARGET_SECRET_SET = "handoff_target.secret_set"  # noqa: S105  # an audit action name
+AUDIT_HANDOFF_REQUESTED = "handoff.requested"
+AUDIT_HANDOFF_REPLAYED = "handoff.replayed"
 
 #: Values for ``target_type``.
 AUDIT_TARGET_USER = "user"
@@ -85,6 +96,11 @@ AUDIT_TARGET_ROUTING_RULE = "routing_rule"
 #: A response target is one row per severity and is only ever edited, so its
 #: target id is the row's — the severity itself rides along in ``from``/``to``.
 AUDIT_TARGET_RESPONSE_TARGET = "response_target"
+#: Two types, not one: "who approved this destination" and "who sent that finding
+#: to it" are different questions, and collapsing them would make the first
+#: unfindable under the volume of the second.
+AUDIT_TARGET_HANDOFF_TARGET = "handoff_target"
+AUDIT_TARGET_HANDOFF = "handoff"
 
 
 class AuditEvent(IcebergModel, table=True):

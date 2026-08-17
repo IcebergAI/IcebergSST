@@ -78,6 +78,15 @@ REQUIRED_ACTIONS = {
     "routing_rule.updated",
     "routing_rule.deleted",
     "response_target.updated",
+    "handoff_target.created",
+    "handoff_target.updated",
+    "handoff_target.deleted",
+    "handoff_target.secret_set",
+    # Requesting and replaying a hand-over are audited, which announcing a finding
+    # deliberately is not: an announcement is the system telling somebody, while a
+    # hand-over is a named person putting this finding into another system's queue.
+    "handoff.requested",
+    "handoff.replayed",
 }
 
 
