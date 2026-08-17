@@ -23,7 +23,7 @@ from typing import Any
 from sqlalchemy import Index, UniqueConstraint
 from sqlmodel import Field
 
-from iceberg_core.enums import HandoffStatus, HandoffTargetType
+from iceberg_core.enums import HandoffExternalState, HandoffStatus, HandoffTargetType
 from iceberg_core.models.base import (
     TimestampedModel,
     enum_type,
@@ -121,3 +121,47 @@ class FindingHandoff(TimestampedModel, table=True):
     #: can get there in one click.
     external_id: str | None = Field(default=None, max_length=255)
     external_url: str | None = Field(default=None, max_length=2048)
+
+    # ── What came back (#141) ────────────────────────────────────────────────
+    # Inbound state is recorded here and **never written onto the finding**. A
+    # finding's state is a decision made by a named analyst through
+    # `iceberg_api.findings.triage`, which demands an actor and enforces the
+    # legal moves and the evidence policy. A receiver is not a person, so state
+    # arriving from one is evidence about the work item, not a triage decision.
+    # Disagreement between the two is then something the API can *show* rather
+    # than something that already happened.
+
+    #: The receiver's last word on the work item. Null until one calls back.
+    external_state: HandoffExternalState | None = Field(
+        default=None,
+        sa_type=enum_type(HandoffExternalState, name="handoff_external_state"),
+    )
+    #: When the receiver says the work item reached that state — their clock, not
+    #: ours, and only as good as what they sent.
+    external_state_at: datetime | None = Field(default=None, sa_type=utc_timestamp_type())
+    #: When we last heard anything at all. Ours, and the sync-health signal: a
+    #: hand-over delivered weeks ago whose receiver has never called back is a
+    #: different problem from one that reported yesterday.
+    last_callback_at: datetime | None = Field(default=None, sa_type=utc_timestamp_type())
+
+    #: A dismissed conflict, pinned to the state it was dismissed for.
+    #:
+    #: The conflict itself is **derived** — it is a disagreement between
+    #: ``external_state`` and the finding's current state, so computing it means
+    #: it cannot go stale, and it clears by itself the moment the two agree
+    #: (whether the receiver moved or an analyst triaged the finding). Only the
+    #: human judgement "I have looked, and this divergence is fine" is worth
+    #: storing. Pinned to the state, so a receiver moving on re-raises it rather
+    #: than staying silenced by a decision made about a different situation.
+    conflict_dismissed_state: HandoffExternalState | None = Field(
+        default=None,
+        sa_type=enum_type(HandoffExternalState, name="handoff_external_state"),
+    )
+    conflict_dismissed_at: datetime | None = Field(default=None, sa_type=utc_timestamp_type())
+    #: SET NULL for the reason ``requested_by_id`` is: the judgement outlives the
+    #: account that made it.
+    conflict_dismissed_by_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="app_user.id",
+        ondelete="SET NULL",
+    )

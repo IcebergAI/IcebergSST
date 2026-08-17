@@ -169,6 +169,16 @@ class ApiSettings(SecretStoreSettings):
     #: Deliveries attempted per maintenance round. Bounds how long one round can
     #: take when a channel is timing out.
     notification_batch_size: int = Field(default=50, ge=1, le=1000)
+
+    #: How long a delivered hand-over may go without the receiver saying anything
+    #: before it reads as a silent integration (#141). Sync health, not a retry
+    #: ceiling: nothing is re-sent, because the work item exists and re-sending
+    #: would be asking for the duplicate the idempotency key prevents. A receiver
+    #: with nothing to report looks exactly like one that has stopped calling
+    #: back, and this is where a deployment says how long it will wait before
+    #: treating the two the same.
+    handoff_silent_after_hours: int = Field(default=72, ge=1)
+
     # ─── Rate limiting (#63) ──────────────────────────────────────────────────
     # Ceilings on the endpoints an unauthenticated caller can reach. Not the last
     # line of defence — authentication is — so these are set to stop floods, not

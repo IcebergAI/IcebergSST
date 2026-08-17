@@ -368,6 +368,48 @@ class HandoffStatus(StrEnum):
     FAILED = "failed"
 
 
+class HandoffExternalState(StrEnum):
+    """What the receiving system last said about the work item (#141).
+
+    A **closed vocabulary**, which is the point: every ITSM and SOAR platform has
+    its own status names, and accepting them verbatim would make "is this being
+    worked?" unanswerable without knowing which product each row came from. The
+    mapping from a vendor's statuses onto these five belongs on the receiving
+    side, next to the automation that already knows them.
+
+    Deliberately *not* :class:`FindingState`. These describe somebody else's work
+    item, and a finding's state is a decision made here by a named analyst
+    (`iceberg_api.findings.triage`). Keeping the vocabularies apart is what makes
+    a disagreement between them expressible rather than a value that silently
+    overwrote the other.
+    """
+
+    #: Received, not started.
+    OPEN = "open"
+    #: Somebody is working it.
+    IN_PROGRESS = "in_progress"
+    #: The work item was completed.
+    RESOLVED = "resolved"
+    #: The receiver refused it — wrong queue, not actionable, a duplicate of
+    #: something they already had.
+    REJECTED = "rejected"
+    #: Withdrawn on their side without being worked.
+    CANCELLED = "cancelled"
+
+
+#: External states that mean nobody over there is going to do anything more.
+#: ``rejected`` and ``cancelled`` are in here with ``resolved`` because for the
+#: purpose of "is this still moving?" they are the same answer, and the reason
+#: they differ is carried by the state itself.
+HANDOFF_EXTERNAL_TERMINAL: frozenset[HandoffExternalState] = frozenset(
+    {
+        HandoffExternalState.RESOLVED,
+        HandoffExternalState.REJECTED,
+        HandoffExternalState.CANCELLED,
+    }
+)
+
+
 class NotificationEventKind(StrEnum):
     """What an announcement is about (#60, #146).
 

@@ -25,9 +25,10 @@ import uuid
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from iceberg_core.enums import HandoffStatus, HandoffTargetType, UserRole
 from iceberg_core.models import (
+    AUDIT_HANDOFF_CONFLICT_DISMISSED,
     AUDIT_HANDOFF_REPLAYED,
     AUDIT_HANDOFF_TARGET_CREATED,
     AUDIT_HANDOFF_TARGET_DELETED,
@@ -43,21 +44,32 @@ from iceberg_core.secrets import SecretStoreError
 from pydantic import ValidationError
 from sqlmodel import col, select
 
-from iceberg_api import audit
-from iceberg_api.auth.dependencies import CsrfProtected, SecretStoreDep, SessionDep
+from iceberg_api import audit, ratelimit
+from iceberg_api.auth.dependencies import (
+    CsrfProtected,
+    SecretStoreDep,
+    SessionDep,
+    SettingsDep,
+)
 from iceberg_api.auth.rbac import ROLE_RANK, AdminUser, AnalystUser
-from iceberg_api.handoff import service
+from iceberg_api.handoff import callback, service
 from iceberg_api.handoff.schemas import (
     FindingHandoffRead,
+    HandoffCallback,
+    HandoffConflictRead,
+    HandoffHealthRead,
     HandoffRequest,
     HandoffTargetChoice,
     HandoffTargetCreate,
     HandoffTargetRead,
     HandoffTargetUpdate,
+    SilentHandoffRead,
     public_config,
     validate_config,
 )
 from iceberg_api.notifications.schemas import SECRET_REF_KEY, EventFilter
+from iceberg_api.notifications.transports import SIGNATURE_HEADER, TIMESTAMP_HEADER
+from iceberg_api.ratelimit import RateLimitStoreDep
 
 router = APIRouter(tags=["handoff"])
 logger = structlog.get_logger()
@@ -77,7 +89,10 @@ def _read_target(target: HandoffTarget) -> HandoffTargetRead:
     )
 
 
-def _read_handoff(handoff: FindingHandoff, target_name: str) -> FindingHandoffRead:
+def _read_handoff(
+    handoff: FindingHandoff, target_name: str, finding: Finding | None = None
+) -> FindingHandoffRead:
+    conflict = callback.conflict_of(handoff, finding) if finding is not None else None
     return FindingHandoffRead(
         id=handoff.id,
         target_id=handoff.target_id,
@@ -90,6 +105,10 @@ def _read_handoff(handoff: FindingHandoff, target_name: str) -> FindingHandoffRe
         external_url=handoff.external_url,
         last_error=handoff.last_error,
         requested_by_id=handoff.requested_by_id,
+        external_state=handoff.external_state,
+        external_state_at=handoff.external_state_at,
+        last_callback_at=handoff.last_callback_at,
+        conflict=conflict.reason if conflict else None,
         next_attempt_at=handoff.next_attempt_at,
         delivered_at=handoff.delivered_at,
         created_at=handoff.created_at,
@@ -361,13 +380,13 @@ async def list_handoffs(
     secret's details", which is the same class of question as the target list
     itself rather than part of reading a finding.
     """
-    _load_finding(db, finding_id)
+    finding = _load_finding(db, finding_id)
     handoffs = db.exec(
         select(FindingHandoff)
         .where(col(FindingHandoff.finding_id) == finding_id)
         .order_by(col(FindingHandoff.created_at))
     )
-    return [_read_handoff(handoff, _target_name(db, handoff)) for handoff in handoffs]
+    return [_read_handoff(handoff, _target_name(db, handoff), finding) for handoff in handoffs]
 
 
 @router.post(
@@ -444,6 +463,235 @@ async def replay_handoff(
     db.refresh(handoff)
     logger.info("handoff_replayed", handoff_id=str(handoff.id), actor_id=str(analyst.id))
     return _read_handoff(handoff, _target_name(db, handoff))
+
+
+# ─── What comes back (receiver, then analyst) ─────────────────────────────────
+
+
+async def _capped_body(request: Request) -> bytes:
+    """The request body, refusing to buffer more than the cap.
+
+    Streamed and measured as it arrives rather than read whole and checked
+    afterwards — checking afterwards is not a cap, it is a report on how much was
+    already spent. (Exactly the defect fixed on the outbound reply in #179; this
+    is the same read in the other direction, from a caller who has not
+    authenticated yet.)
+
+    ``Content-Length`` is checked first when it is offered, so an honest oversized
+    request is refused before a byte of it is read. It is not trusted as the only
+    check: a chunked request carries no length, and a dishonest one is why the
+    streamed count exists.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            length = int(declared)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "malformed callback body") from exc
+        if length > callback.MAX_CALLBACK_BYTES:
+            raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "callback body too large")
+
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > callback.MAX_CALLBACK_BYTES:
+            # One chunk over is enough to know, and the rest is never pulled off
+            # the socket.
+            raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "callback body too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+@router.post("/handoff/callback", status_code=status.HTTP_202_ACCEPTED)
+async def handoff_callback(
+    request: Request,
+    db: SessionDep,
+    store: SecretStoreDep,
+    settings: SettingsDep,
+    limits: RateLimitStoreDep,
+) -> dict[str, str]:
+    """What the receiving system says about a work item.
+
+    **No session and no CSRF token**: the caller is another system, not a
+    browser. It authenticates with the same HMAC scheme, the same headers, and
+    the same secret that signs what goes *out* to it — a receiver that can verify
+    our signature can produce one, so there is no second credential to issue,
+    rotate, or leak.
+
+    `202`, not `200`: this records what was said. It deliberately does not change
+    the finding, so claiming to have applied anything would be a lie.
+
+    Every failure answers `401` with the same body. Which of "unknown key", "bad
+    signature", "stale timestamp" and "target has no secret" actually failed is
+    not something an unauthenticated caller gets to learn by trying, and the
+    idempotency key is guessable enough to be worth not confirming.
+
+    The order of the first two steps is the security-relevant part: **charged,
+    then read against a cap, then authenticated.** Anything else lets an
+    unauthenticated caller spend a worker's memory before this route has decided
+    whether to talk to them at all.
+    """
+    # Charged to the address, like every other unauthenticated endpoint (#63),
+    # and charged *first*: this is reachable before anything has been verified,
+    # so it has to cost the caller something before it costs us anything.
+    ratelimit.enforce(
+        request,
+        limits,
+        settings,
+        bucket="handoff_callback",
+        identity=ratelimit.client_address(request, trusted_proxy_hops=settings.trusted_proxy_hops),
+        limit=settings.auth_rate_limit,
+        window_seconds=settings.auth_rate_limit_window_seconds,
+    )
+    raw = await _capped_body(request)
+
+    try:
+        body = HandoffCallback.model_validate_json(raw)
+    except ValidationError as exc:
+        # A malformed body is answered before any lookup, so a caller cannot use
+        # the difference between "bad JSON" and "unknown key" as an oracle.
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "malformed callback body") from exc
+
+    try:
+        handoff = callback.find_handoff(db, body.idempotency_key)
+        target = db.get(HandoffTarget, handoff.target_id)
+        if target is None:
+            raise callback.CallbackRefused("target no longer exists")
+        callback.verify(
+            raw,
+            signature=request.headers.get(SIGNATURE_HEADER),
+            timestamp=request.headers.get(TIMESTAMP_HEADER),
+            target=target,
+            store=store,
+        )
+    except callback.CallbackRefused as exc:
+        logger.info("handoff_callback_refused", reason=str(exc))
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "callback rejected") from exc
+
+    callback.record(
+        db,
+        handoff,
+        state=body.state,
+        external_id=body.external_id,
+        external_url=body.external_url,
+        state_at=body.state_at,
+    )
+    db.commit()
+    return {"status": "recorded"}
+
+
+@router.get("/handoff/conflicts")
+async def list_conflicts(analyst: AnalystUser, db: SessionDep) -> list[HandoffConflictRead]:
+    """Every hand-over whose two systems currently disagree.
+
+    The review queue the epic asks for. Derived at read time from the receiver's
+    last word and the finding's state, so a conflict somebody has already settled
+    — by triaging the finding, or because the receiver moved on — is simply not
+    in the list. There is nothing to clean up and nothing to go stale.
+
+    Loudest case first in practice: the work item is resolved or rejected while
+    the finding is still open, which means the secret is exposed and nobody
+    outside this deployment is doing anything about it.
+    """
+    return [
+        HandoffConflictRead(
+            handoff_id=handoff.id,
+            finding_id=finding.id,
+            target_id=handoff.target_id,
+            target_name=_target_name(db, handoff),
+            kind=conflict.kind,
+            reason=conflict.reason,
+            finding_state=finding.state,
+            # Never None here: `conflict_of` returns nothing without one.
+            external_state=handoff.external_state,  # type: ignore[arg-type]
+            external_url=handoff.external_url,
+            external_state_at=handoff.external_state_at,
+        )
+        for handoff, finding, conflict in callback.open_conflicts(db)
+    ]
+
+
+@router.get("/handoff/health")
+async def handoff_health(
+    analyst: AnalystUser, db: SessionDep, settings: SettingsDep
+) -> HandoffHealthRead:
+    """Whether the hand-over integrations are actually working.
+
+    Two questions, and nothing else in the API answers either. Conflicts are the
+    two systems disagreeing — a decision waiting for somebody. Silence is the
+    absence of evidence: a receiver with nothing to report looks exactly like one
+    that has stopped calling back, so only elapsed time separates them.
+
+    Nothing is re-sent on the strength of silence. The work item exists, and
+    re-sending would ask for the duplicate the idempotency key exists to prevent
+    — this says *look at that integration*, not *try again*.
+    """
+    return HandoffHealthRead(
+        conflicts=len(callback.open_conflicts(db)),
+        silent_after_hours=settings.handoff_silent_after_hours,
+        silent=[
+            SilentHandoffRead(
+                handoff_id=handoff.id,
+                finding_id=handoff.finding_id,
+                target_id=handoff.target_id,
+                target_name=_target_name(db, handoff),
+                external_id=handoff.external_id,
+                delivered_at=handoff.delivered_at,
+            )
+            for handoff in callback.stale_handoffs(db, settings)
+        ],
+    )
+
+
+@router.post(
+    "/findings/{finding_id}/handoffs/{handoff_id}/dismiss-conflict",
+    dependencies=[CsrfProtected],
+)
+async def dismiss_conflict(
+    finding_id: uuid.UUID,
+    handoff_id: uuid.UUID,
+    analyst: AnalystUser,
+    db: SessionDep,
+) -> FindingHandoffRead:
+    """Record that somebody looked at this divergence and accepted it.
+
+    There is deliberately no counterpart that *applies* the external state to the
+    finding. That is triage — it has a route, a state machine that enforces the
+    legal moves, and an evidence policy — and a second path into it that a
+    receiver could steer would be a way around all three. An analyst who agrees
+    with the receiver resolves the finding in the ordinary way, and the conflict
+    clears itself because the two now agree.
+
+    The dismissal is pinned to the external state it was made about, so a
+    receiver moving on raises the question again rather than staying silenced by
+    a judgement about a different situation.
+    """
+    handoff = db.get(FindingHandoff, handoff_id)
+    if handoff is None or handoff.finding_id != finding_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "handoff not found")
+    finding = _load_finding(db, finding_id)
+    if callback.conflict_of(handoff, finding) is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "that handoff is not in conflict; there is nothing to dismiss",
+        )
+
+    callback.dismiss(handoff, actor_id=analyst.id)
+    db.add(handoff)
+    audit.record(
+        db,
+        actor_id=analyst.id,
+        action=AUDIT_HANDOFF_CONFLICT_DISMISSED,
+        target_type=AUDIT_TARGET_HANDOFF,
+        target_id=handoff.id,
+        to_value=handoff.external_state.value if handoff.external_state else None,
+        detail={"finding_id": str(finding_id), "finding_state": finding.state.value},
+    )
+    db.commit()
+    db.refresh(handoff)
+    logger.info("handoff_conflict_dismissed", handoff_id=str(handoff.id), actor_id=str(analyst.id))
+    return _read_handoff(handoff, _target_name(db, handoff), finding)
 
 
 def _target_name(db: SessionDep, handoff: FindingHandoff) -> str:
