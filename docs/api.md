@@ -298,6 +298,25 @@ drives; the delivery loop reads these rows.
   hand-over, `200` when one already existed.
 - `POST /findings/{id}/handoffs/{hid}/replay` (analyst+) — queue a `failed` hand-over for another
   attempt. A mismatched pair is a `404`.
+- `POST /handoff/callback` (**no session, no CSRF** — signed by the receiver) — what the receiving
+  system says about a work item. Answers `202`: it records, it does not apply.
+- `GET  /handoff/conflicts` (analyst+) — hand-overs whose two systems currently disagree.
+- `GET  /handoff/health` (analyst+) — sync health: the conflict count, and delivered hand-overs no
+  receiver has ever reported on.
+- `POST /findings/{id}/handoffs/{hid}/dismiss-conflict` (analyst+) — accept one divergence.
+
+**Inbound state is recorded, never written onto the finding.** A finding's state is a decision made
+by a named analyst through a state machine that enforces the legal moves and the evidence policy; a
+receiver is not a person. So a callback writes to the hand-over row, and a disagreement between the
+two systems is *shown* rather than resolved on somebody's behalf — the conflict is derived when
+read, so it clears itself when they agree, whether that is a new callback or ordinary triage. There
+is deliberately no endpoint that applies external state to a finding: that is triage, and a second
+path into it that a receiver could steer would bypass both the state machine and the policy.
+
+The callback authenticates with the same HMAC scheme and the same secret used to sign what goes out
+to that target, so there is no second credential. Every authentication failure — unknown key, bad
+signature, stale timestamp, target with no secret — answers the same `401`. Details, the closed
+`state` vocabulary, and sync health are in [`handoff.md`](./handoff.md).
 
 **Admins decide where, analysts decide which.** Approving a destination is administrative for the
 same reason a notification channel is; choosing that this finding belongs in that queue is triage.

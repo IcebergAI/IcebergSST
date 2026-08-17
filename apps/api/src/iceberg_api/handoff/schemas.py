@@ -18,7 +18,12 @@ system. The same three rules apply, enforced the same way (docs/handoff.md):
 import uuid
 from typing import Any
 
-from iceberg_core.enums import HandoffStatus, HandoffTargetType
+from iceberg_core.enums import (
+    FindingState,
+    HandoffExternalState,
+    HandoffStatus,
+    HandoffTargetType,
+)
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from iceberg_api.notifications.schemas import SECRET_REF_KEY, EventFilter
@@ -150,6 +155,86 @@ class HandoffRequest(BaseModel):
     target_id: uuid.UUID
 
 
+class HandoffCallback(BaseModel):
+    """``POST /handoff/callback``: what the receiving system says about a work item.
+
+    Keyed by the idempotency key we sent, because that is the value the receiver
+    was told to treat as the work item's identity — asking it to hold a second
+    identifier of ours would be asking for no reason.
+
+    ``extra="forbid"`` so a receiver sending a field this does not model is told
+    so, rather than having it silently dropped and wondering why nothing changed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(min_length=1, max_length=128)
+    #: A closed vocabulary. The mapping from a vendor's own statuses onto these
+    #: belongs on the receiving side, next to the automation that knows them.
+    state: HandoffExternalState
+    #: When it reached that state on their side. Optional, and only as good as
+    #: what they send; the API stamps its own arrival time regardless.
+    state_at: UtcDatetime | None = None
+    #: Sent when the receiver is naming the work item for the first time — which
+    #: is the ordinary way a lost reply to the original POST gets repaired.
+    external_id: str | None = Field(default=None, max_length=255)
+    external_url: str | None = Field(default=None, max_length=2048)
+
+
+class HandoffConflictRead(BaseModel):
+    """A hand-over whose two systems currently disagree.
+
+    Derived at read time from the receiver's last word and the finding's state,
+    so it cannot describe a disagreement that has already been settled.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    handoff_id: uuid.UUID
+    finding_id: uuid.UUID
+    target_id: uuid.UUID
+    target_name: str
+    #: Stable enough to switch on; ``reason`` is the sentence for a human.
+    kind: str
+    reason: str
+    finding_state: FindingState
+    external_state: HandoffExternalState
+    external_url: str | None
+    external_state_at: UtcDatetime | None
+
+
+class SilentHandoffRead(BaseModel):
+    """A hand-over delivered long ago that no receiver has ever reported on."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    handoff_id: uuid.UUID
+    finding_id: uuid.UUID
+    target_id: uuid.UUID
+    target_name: str
+    external_id: str | None
+    delivered_at: UtcDatetime | None
+
+
+class HandoffHealthRead(BaseModel):
+    """Whether the hand-over integrations are actually working.
+
+    Two questions an operator cannot answer from anywhere else. **Conflicts** are
+    the two systems disagreeing, which is a decision waiting for somebody.
+    **Silence** is the absence of evidence: a receiver with nothing to report
+    looks exactly like one that has stopped calling back, so only elapsed time
+    tells them apart, and only against a clock this deployment controls.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    #: How many hand-overs currently disagree with their receiver.
+    conflicts: int
+    #: How long a delivered hand-over may stay quiet before it is listed below.
+    silent_after_hours: int
+    silent: list[SilentHandoffRead]
+
+
 class FindingHandoffRead(BaseModel):
     """One finding's hand-over to one target, as the API exposes it.
 
@@ -181,3 +266,13 @@ class FindingHandoffRead(BaseModel):
     delivered_at: UtcDatetime | None
     created_at: UtcDatetime
     updated_at: UtcDatetime
+
+    #: What the receiver last said, and when we last heard it. Null means no
+    #: callback has ever arrived — which for a hand-over delivered long ago is
+    #: itself the answer to "is that integration still working?"
+    external_state: HandoffExternalState | None = None
+    external_state_at: UtcDatetime | None = None
+    last_callback_at: UtcDatetime | None = None
+    #: The disagreement between the receiver and this deployment, if there is one
+    #: right now. Derived, so it disappears when the two agree.
+    conflict: str | None = None

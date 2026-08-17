@@ -87,6 +87,10 @@ REQUIRED_ACTIONS = {
     # hand-over is a named person putting this finding into another system's queue.
     "handoff.requested",
     "handoff.replayed",
+    # A receiver's callback is *not* here: it is machine traffic against one row,
+    # like an engine heartbeat, and it changes no decision. Accepting the
+    # divergence it reveals is a human judgement, so that one is audited.
+    "handoff.conflict_dismissed",
 }
 
 

@@ -76,6 +76,11 @@ AUDIT_HANDOFF_TARGET_DELETED = "handoff_target.deleted"
 AUDIT_HANDOFF_TARGET_SECRET_SET = "handoff_target.secret_set"  # noqa: S105  # an audit action name
 AUDIT_HANDOFF_REQUESTED = "handoff.requested"
 AUDIT_HANDOFF_REPLAYED = "handoff.replayed"
+#: A receiver's callback is *not* audited — it is machine traffic against one
+#: row, like an engine's heartbeat, and it changes no decision. Accepting the
+#: divergence it reveals is a human judgement about whether two systems may stay
+#: out of step, so that one is.
+AUDIT_HANDOFF_CONFLICT_DISMISSED = "handoff.conflict_dismissed"
 
 #: Values for ``target_type``.
 AUDIT_TARGET_USER = "user"

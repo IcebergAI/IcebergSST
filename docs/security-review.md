@@ -127,7 +127,7 @@ declared action has no call site and when the reviewed list drifts from the decl
 | `engine.registered`, `engine.token_rotated` | `engines/routes.py`, `cli.py` |
 | `channel.created`, `channel.updated`, `channel.deleted`, `channel.secret_set` | `notifications/routes.py` |
 | `handoff_target.created`, `handoff_target.updated`, `handoff_target.deleted`, `handoff_target.secret_set` | `handoff/routes.py` |
-| `handoff.requested`, `handoff.replayed` | `handoff/service.py`, `handoff/routes.py` |
+| `handoff.requested`, `handoff.replayed`, `handoff.conflict_dismissed` | `handoff/service.py`, `handoff/routes.py` |
 | `retention.purged` | `retention.py` |
 
 Each row records the actor (null for system actions), the target, and before/after values where
@@ -149,6 +149,10 @@ question, and it has an answer (#141).
   the list. A regime that requires read auditing should put it in front of the API.
 - **Engine lease and heartbeat traffic.** Operational volume, not administrative action. It is in
   the structured logs and the Prometheus series.
+- **Hand-over callbacks.** A receiver reporting on a work item is machine traffic against one row
+  and changes no decision here — inbound state is recorded, never applied to a finding (#141). The
+  row itself carries what was said and when it last arrived, which is the record that matters.
+  *Accepting* a divergence between the two systems is a human judgement, and that is audited.
 - **Failed logins.** The provider owns the authentication event; the API only sees the result. IdP
   logs are the system of record for this, and `rate_limited` covers the abuse case.
 

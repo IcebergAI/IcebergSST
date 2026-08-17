@@ -66,6 +66,9 @@ into somebody else's queue.
 - `POST /findings/{id}/handoffs/{hid}/replay` (analyst+) — queue a `failed` hand-over for another
   attempt. Only a failed one: a pending one is already queued, and a delivered one has a work item
   on the other side.
+- `POST /handoff/callback` (**no session** — signed by the receiver) · `GET /handoff/conflicts`
+  (analyst+) · `POST /findings/{id}/handoffs/{hid}/dismiss-conflict` (analyst+). See
+  [coming back the other way](#coming-back-the-other-way).
 
 A target's `config` is validated by one definition that both `POST` and `PATCH` go through, so a
 working target cannot be edited into a destination the sender will not deliver to. The URL is
@@ -111,6 +114,7 @@ the same idea would be a second one to get subtly wrong:
 | `ICEBERG_NOTIFICATION_RETRY_BACKOFF_SECONDS` | `60` | First retry delay; doubles each attempt. |
 | `ICEBERG_NOTIFICATION_BATCH_SIZE` | `50` | Hand-overs attempted per maintenance round. |
 | `ICEBERG_WEBHOOK_TIMEOUT_SECONDS` | `10` | Per-attempt ceiling for the POST. |
+| `ICEBERG_HANDOFF_SILENT_AFTER_HOURS` | `72` | How long a delivered hand-over may go with no callback before it reads as a silent integration. Sync health only — nothing is re-sent. |
 
 ## Payload
 
@@ -224,3 +228,91 @@ afterwards.
   target, and retrying a canonical-host or trailing-slash redirect just produces the same redirect
   forever. Point the target at the URL you actually serve.
 - Return the work item's id and URL if you have them. Everything still works if you do not.
+- **Call back when the work item changes state**, if you want the two systems to stay in step. See
+  below; it is optional, and a hand-over that never hears anything back still works.
+
+## Coming back the other way
+
+`POST /handoff/callback` — no session and no CSRF token, because the caller is another system. It
+authenticates with the **same HMAC scheme, the same headers, and the same secret** used to sign what
+goes out to it: a receiver that can verify our signature can produce one, so there is no second
+credential to issue, rotate, or leak. A target with no secret cannot receive state back, because
+there would be nothing to authenticate it with.
+
+```json
+{
+  "idempotency_key": "iceberg-handoff-…-…",
+  "state": "in_progress",
+  "state_at": "2026-08-17T09:14:00+00:00",
+  "external_id": "SEC-1234",
+  "external_url": "https://soar.example.test/tickets/SEC-1234"
+}
+```
+
+Keyed by the idempotency key, because that is the value you were already told to treat as the work
+item's identity. `state` is a **closed vocabulary** — `open`, `in_progress`, `resolved`, `rejected`,
+`cancelled` — and mapping your own statuses onto it belongs on your side, next to the automation
+that already knows them. A state outside the five is a `400`, as is a field this shape does not
+model: silently dropping it would leave you wondering why nothing changed.
+
+Sending `external_id`/`external_url` repairs the case where the reply to the original `POST` was
+lost. Omitting them later never blanks them — silence is not a retraction.
+
+**Send `state_at`, and callbacks may arrive in any order.** A retried `in_progress` overtaking the
+`resolved` that followed it is ordinary once anything queues or retries in between, and applying it
+would move the work item backwards and raise a conflict that had stopped being true. Only your clock
+can order two reports — ours records when they reached us, which is the thing in question — so a
+callback whose `state_at` predates the one already recorded is accepted, counted as the integration
+being alive, and otherwise ignored. Without a `state_at` there is nothing to compare and the newest
+wins.
+
+The answer is **`202`, not `200`**, and that is the whole design:
+
+> **What a receiver says is recorded. It is never written onto the finding.**
+
+A finding's state is a decision made by a named analyst, through a state machine that enforces the
+legal moves and the deployment's evidence policy ([`api.md`](./api.md) § Findings, ADR 0012). A
+receiver is not a person and has no standing to make that decision, so its report is evidence about
+the work item and nothing more. The alternative — letting inbound state drive triage — means either
+inventing an actor for the audit trail or going around the evidence policy, and both are worse than
+telling an analyst that two systems disagree.
+
+### Conflicts
+
+A conflict is a **disagreement between the receiver's last word and the finding's current state**.
+It is derived when read rather than stored, so it cannot go stale and there is nothing to tidy up:
+
+| The work item is | The finding is | |
+|---|---|---|
+| `resolved` / `rejected` / `cancelled` | `open` | **conflict** — nobody is working this unless somebody here picks it up |
+| `open` / `in_progress` | anything but `open` | **conflict** — somebody may be working something already decided |
+| anything | agreeing | no conflict |
+
+`GET /handoff/conflicts` (analyst+) is the review queue. A conflict clears **by itself** the moment
+the two agree — because the receiver moved on, or because an analyst triaged the finding in the
+ordinary way.
+
+That last part is deliberate: there is no endpoint that applies the external state to a finding.
+An analyst who agrees with the receiver resolves the finding through the normal triage route, with
+the legal moves and the evidence policy intact, and the disagreement stops existing because there
+is no longer one. A second path into triage that a receiver could steer would be a way around all
+of it.
+
+`POST /findings/{id}/handoffs/{hid}/dismiss-conflict` (analyst+) records the other judgement: *I
+have looked, and these two may stay out of step.* It is audited, and it is **pinned to the external
+state it was made about** — when the receiver moves on, the question is a different one and gets
+asked again.
+
+### Sync health
+
+`GET /handoff/health` (analyst+) answers both questions an operator has about these integrations:
+how many hand-overs currently disagree with their receiver, and which delivered ones have never
+been reported on at all.
+
+`last_callback_at` is our clock, not theirs, and is what makes the second answerable: a receiver
+with nothing to report looks exactly like one that has stopped calling back, and
+`ICEBERG_HANDOFF_SILENT_AFTER_HOURS` (default `72`) is where a deployment says how long it will
+wait before treating the two the same.
+
+Nothing is re-sent on that basis. The work item exists, and re-sending would ask for the duplicate
+the idempotency key exists to prevent.
