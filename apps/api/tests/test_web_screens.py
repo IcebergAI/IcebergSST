@@ -183,6 +183,57 @@ def test_a_rejected_source_re_renders_the_form_with_the_reason(
     assert 'id="source-form"' in response.text
 
 
+def test_editing_a_source_the_form_cannot_express_is_refused_not_a_500(
+    client: TestClient,
+    session: Session,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """A fileshare source is API-supported, so it can exist — but the console has
+    no form for it yet. Saving its edit page must re-render the form with the
+    reason, not crash on the type the form fields cannot describe."""
+    headers = login_as(make_user(UserRole.ADMIN))
+    source = Source(
+        name="finance-share",
+        type=SourceType.FILESHARE,
+        connection={"mount_path": "/mnt/shares/finance"},
+    )
+    session.add(source)
+    session.commit()
+
+    response = client.post(
+        f"/sources/{source.id}",
+        data={
+            "csrf_token": headers["X-CSRF-Token"],
+            "name": "finance-share",
+            "base_url": "https://irrelevant.example",
+            "enabled": "on",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert "not available yet" in response.text
+    assert 'id="source-form"' in response.text
+
+
+def test_a_hand_posted_type_without_a_form_is_refused_not_a_500(
+    client: TestClient, make_user: Callable[..., User], login_as: Callable[[User], dict[str, str]]
+) -> None:
+    """`fileshare` parses as a SourceType, so it gets past the enum guard — the
+    connection-blob assembly is what has no shape for it."""
+    headers = login_as(make_user(UserRole.ADMIN))
+
+    response = client.post(
+        "/sources",
+        data=CONFLUENCE_FORM | {"csrf_token": headers["X-CSRF-Token"], "type": "fileshare"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert "not available yet" in response.text
+
+
 def test_a_viewer_cannot_create_a_source_from_the_ui(
     client: TestClient, make_user: Callable[..., User], login_as: Callable[[User], dict[str, str]]
 ) -> None:
@@ -456,6 +507,24 @@ def test_terminal_coverage_states_are_explicit_in_the_polled_fragment(
     assert f'class="{notice_class}" role=' in response.text
     assert "Coverage manifest" in response.text
     assert f"/api/v1/scans/{scan.id}/coverage/export" in response.text
+
+
+def test_a_viewer_source_page_does_not_autoload_the_analyst_only_cursors(
+    client: TestClient,
+    make_source: Callable[..., Source],
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """The cursors panel is analyst-only. For a viewer the page must simply not
+    ask for it — an `hx-trigger="load"` fetch would 403 and inject a role-denied
+    banner into a page the viewer is fully entitled to see."""
+    login_as(make_user(UserRole.VIEWER))
+    source = make_source()
+
+    response = client.get(f"/sources/{source.id}")
+
+    assert response.status_code == 200
+    assert f"/sources/{source.id}/cursors" not in response.text
 
 
 def test_source_detail_shows_latest_coverage_summary(

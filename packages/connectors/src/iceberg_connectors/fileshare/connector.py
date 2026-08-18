@@ -261,6 +261,17 @@ class FileshareConnector:
         seen: set[tuple[int, int]] = set()
         stack: list[tuple[Path, int]] = [(root, 0)]
         files = 0
+        try:
+            # The root's identity too, or a symlink loop *back to the root* is
+            # invisible to the dedupe below — the root was pushed directly onto
+            # the stack, so it was never registered — and its direct files are
+            # yielded (and counted) twice.
+            info = root.stat()
+            seen.add((info.st_dev, info.st_ino))
+        except OSError:
+            # An unreadable root fails on the scandir below, where the coverage
+            # gap is recorded; nothing to dedupe against by then.
+            pass
 
         while stack:
             directory, depth = stack.pop()

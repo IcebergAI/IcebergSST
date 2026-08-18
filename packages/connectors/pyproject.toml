@@ -1,11 +1,11 @@
 [project]
 name = "iceberg-connectors"
 version = "0.1.0"
-description = "Connector interface and source connectors (Confluence MVP; Jira/SMB later)."
+description = "Connector SDK and source connectors: Confluence, Jira, SMB/NFS file shares."
 requires-python = ">=3.14"
 dependencies = [
     "iceberg-core",
-    "structlog>=25.5.0",
+    "structlog>=26.1.0",
     # PDF text layer. No OCR — a scanned page yields nothing, by design (#46).
     "pypdf>=6.15.0",
     # Connectors talk to source APIs over HTTP (#47).

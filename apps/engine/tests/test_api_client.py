@@ -139,6 +139,21 @@ def test_a_heartbeat_reports_held_tasks_and_returns_cancellations() -> None:
     assert str(script.requests[0].url).endswith(f"/engines/{ENGINE_ID}/heartbeat")
 
 
+def test_a_heartbeat_fails_fast_rather_than_riding_the_retry_ladder() -> None:
+    """The loop beats again in a minute, so the next beat is the retry. A beat
+    that blocked through the shared 4-attempt ladder against a slow-failing
+    control plane would eat the "four missed beats per lease" margin the
+    renewal arithmetic promises."""
+    script = Script(httpx2.Response(503))
+    client, slept = _client(script, retry=RetryPolicy(attempts=4, base_delay_seconds=0.5))
+
+    with pytest.raises(EngineApiError, match="after 1 attempts"):
+        client.heartbeat(task_ids=[TASK_ID])
+
+    assert len(script.requests) == 1
+    assert slept == []
+
+
 def test_results_without_an_idempotency_key_are_refused_before_sending() -> None:
     """Keeping the bug where it was written, rather than as a 422 from the API."""
     script = Script(httpx2.Response(200, json={}))

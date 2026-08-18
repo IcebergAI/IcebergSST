@@ -57,8 +57,10 @@ EXPOSE 9191
 
 # Engines have no HTTP API, so the metrics endpoint is the liveness signal: if the
 # process is up and its Prometheus server answers, the worker is alive.
+# The port from the same env var the worker reads, so overriding
+# ICEBERG_METRICS_PORT does not leave the probe checking a port nobody serves.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=5 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9191/metrics').read()"]
+    CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen(f\"http://127.0.0.1:{os.environ.get('ICEBERG_METRICS_PORT', '9191')}/metrics\").read()"]
 
 # Deliberately not the `dramatiq` CLI: the worker starts its own consumer so that
 # importing the module stays side-effect free (see iceberg_engine.worker.main),

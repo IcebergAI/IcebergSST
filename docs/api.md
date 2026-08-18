@@ -235,6 +235,17 @@ Suppressed findings are **recorded, not discarded** (ADR 0008): they stay in the
 of the record. There is no `PATCH`: editing a live suppression's pattern would silently re-scope
 what it hides, and creating a replacement leaves both decisions in the audit trail.
 
+## Validation policies (ADR 0010)
+- `GET  /validation-policies` (admin) · `GET /validation-policies/{id}` (admin)
+- `POST /validation-policies` (admin) — `rule_id` + `provider` (unique together), `validator_id`
+  (names reviewed engine code), `contract_version`, `rationale`, and the resource limits
+  (`timeout_seconds`, `requests_per_minute`, `max_attempts_per_task`). Disabled by default.
+- `PATCH /validation-policies/{id}` (admin) · `DELETE /validation-policies/{id}` (admin)
+
+Admin-only on purpose: a policy authorizes plaintext egress to a provider during scanning, so it
+is an egress decision like a notification channel, not detection tuning. Mechanism and controls
+are in [`secret-validation.md`](./secret-validation.md).
+
 ## Rules
 - `GET /rules` → the detection surface currently in force (read-only; rules are code, per ADR 0008)
 

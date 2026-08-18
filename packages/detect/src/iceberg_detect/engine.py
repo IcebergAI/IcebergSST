@@ -22,7 +22,10 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 import structlog
-from iceberg_core.enums import Severity
+
+# The shared rank, not a local re-derivation: core's comment says anything
+# ranking severities must agree with it, and one dict cannot drift from itself.
+from iceberg_core.enums import SEVERITY_RANK
 from iceberg_core.redaction import RedactionError, Span, context_window, redact_snippet
 
 from iceberg_detect.rules import Rule, RulePack
@@ -38,11 +41,6 @@ DEFAULT_CONFIDENCE_THRESHOLD = 0.5
 #: generated key file, a base64 blob — not a page an analyst will triage. Cutting
 #: it off bounds the size of one results submission and the redaction behind it.
 MAX_MATCHES_PER_UNIT = 500
-
-#: Report-cap ranking. `Severity` is a `StrEnum`, so sorting it directly would
-#: order by spelling; its members are declared weakest first, and enumerating them
-#: keeps a level added there ranked without a second list to update here.
-_SEVERITY_RANK = {member: rank for rank, member in enumerate(Severity)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,7 +181,7 @@ def _strongest(candidates: list[_Candidate], limit: int) -> list[_Candidate]:
     """
     ranked = sorted(
         candidates,
-        key=lambda c: (-_SEVERITY_RANK[c.rule.severity], -c.score, c.span.start),
+        key=lambda c: (-SEVERITY_RANK[c.rule.severity], -c.score, c.span.start),
     )
     return sorted(ranked[:limit], key=lambda c: c.span.start)
 

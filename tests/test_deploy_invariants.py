@@ -212,6 +212,11 @@ def test_both_pod_templates_checksum_the_secret_they_read() -> None:
 
         assert "checksum/secret" in template, role
         assert f"if not .Values.secrets.{toggle}" in template, role
+        # Scoped to the role's own values: a hash over the whole rendered
+        # secrets.yaml made rotating one role's secret roll the *other* role's
+        # fleet too (an engine-token reissue restarting every api pod, an api
+        # session-secret rotation restarting engines mid-lease).
+        assert f"toYaml .Values.secrets.{role} | sha256sum" in template, role
 
 
 def test_the_chart_separates_the_two_roles_secrets() -> None:

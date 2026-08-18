@@ -17,8 +17,17 @@ lengths and three unique constraints that had been created as unique indexes. No
 changes; the fix keeps `--autogenerate` from folding them into an unrelated migration later.
 Reversible, and the downgrade restores the previous shape exactly.
 
+`0017` adds the external hand-over tables (`handoff_target`, `finding_handoff`), unique on
+`(target_id, finding_id)` and on a never-regenerated idempotency key so repeated delivery creates
+one external work item (#141). `0018` adds the inbound state-sync columns — what the receiver
+says is recorded beside the finding, never written onto it. Both are reversible.
+
 ### Added
 
+- External hand-over (#141, #179–#186): admin-configured targets receive a signed POST with a
+  finding's context, delivered through the same outbox pattern as notifications; the receiver can
+  report its own state back through a signed callback, and an analyst resolves any divergence from
+  the console. See [`docs/handoff.md`](./docs/handoff.md).
 - Release policy, a signed release pipeline, and a version-consistency invariant (#147). Every
   published artifact — both role images, the Helm chart, and the source archive — is signed with
   cosign's keyless flow and carries an SBOM and GitHub build provenance, so an operator can verify

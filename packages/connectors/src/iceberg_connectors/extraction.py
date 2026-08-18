@@ -319,7 +319,8 @@ def extract_office_text(data: bytes, limits: ExtractionLimits) -> _Parsed:
                 continue
             # Read bounded even after the declared-size check: the header is
             # attacker-controlled and may simply lie about file_size.
-            raw = archive.open(member).read(budget + 1)
+            with archive.open(member) as handle:
+                raw = handle.read(budget + 1)
             if len(raw) > budget:
                 # Honest and simply larger than what is left of the budget — a
                 # 100k-row `sheet1.xml`, which passes every gate above and is the

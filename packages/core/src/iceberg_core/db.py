@@ -7,6 +7,7 @@ engine and asserts this module never appears in ``sys.modules``.
 Engines reach the database through the API or not at all.
 """
 
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -17,6 +18,7 @@ from sqlmodel import Session, create_engine
 from iceberg_core.config import ApiSettings, get_api_settings
 
 _engine: Engine | None = None
+_engine_lock = threading.Lock()
 
 
 def create_db_engine(database_url: str, *, echo: bool = False) -> Engine:
@@ -59,11 +61,19 @@ def enforce_sqlite_foreign_keys(engine: Engine) -> None:
 
 
 def get_db_engine(settings: ApiSettings | None = None) -> Engine:
-    """Return the process-wide engine, creating it on first use."""
+    """Return the process-wide engine, creating it on first use.
+
+    Locked, because first use is concurrent: the background-maintenance thread
+    and the first request (FastAPI runs sync dependencies in a threadpool) can
+    both arrive here at process start, and without the lock each would build an
+    engine — the loser's connection pool never disposed for the process lifetime.
+    """
     global _engine
     if _engine is None:
-        resolved = settings or get_api_settings()
-        _engine = create_db_engine(resolved.database_url, echo=resolved.db_echo)
+        with _engine_lock:
+            if _engine is None:
+                resolved = settings or get_api_settings()
+                _engine = create_db_engine(resolved.database_url, echo=resolved.db_echo)
     return _engine
 
 

@@ -668,6 +668,30 @@ def test_the_overdue_queue_counts_only_actionable_work(
     assert [row["id"] for row in body["items"]] == [str(late.id)]
 
 
+def test_a_finding_without_a_due_date_is_not_overdue_but_not_dropped(
+    client: TestClient,
+    api: str,
+    admin_headers: dict[str, str],
+    make_source: Callable[..., Source],
+    make_finding: Callable[..., Finding],
+) -> None:
+    """`overdue=true` and `overdue=false` must partition the actionable set.
+
+    A finding with no due date (no response target for its severity) is simply
+    not overdue — but `NOT (NULL < now)` is NULL in SQL, so a naive negation
+    drops it from both views."""
+    source = make_source()
+    dateless = make_finding(source)
+    on_time = make_finding(source, due_at=datetime.now(UTC) + timedelta(days=1))
+    late = make_finding(source, due_at=datetime.now(UTC) - timedelta(days=1))
+
+    overdue = client.get(f"{api}/findings?overdue=true", headers=admin_headers).json()
+    not_overdue = client.get(f"{api}/findings?overdue=false", headers=admin_headers).json()
+
+    assert {row["id"] for row in overdue["items"]} == {str(late.id)}
+    assert {row["id"] for row in not_overdue["items"]} == {str(dateless.id), str(on_time.id)}
+
+
 def test_the_owner_filter_narrows_to_one_team(
     client: TestClient,
     api: str,

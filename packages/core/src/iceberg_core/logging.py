@@ -6,6 +6,7 @@ sensitive-looking keys are masked before rendering — credentials must never
 reach log output, even by accident (see docs/security.md).
 """
 
+import logging
 import re
 import sys
 from collections.abc import Mapping
@@ -84,27 +85,36 @@ def _json_default(value: object) -> str:
     return _scrub_url_userinfo(repr(value))
 
 
-def configure_logging(*, role: str, stream: TextIO | None = None) -> None:
+def configure_logging(*, role: str, stream: TextIO | None = None, level: str = "INFO") -> None:
     """Configure structlog for a role (``api`` or ``engine``).
 
     Output is JSON on stdout by default; ``stream`` exists for tests. Bind
     per-request/per-task correlation ids with
     ``structlog.contextvars.bind_contextvars``.
+
+    ``level`` is the role's ``log_level`` setting (``ICEBERG_LOG_LEVEL``); lines
+    below it are dropped. An unrecognized name falls back to ``INFO`` — a typo in
+    an env var should cost verbosity accuracy, not the process.
     """
 
     def add_role(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
         event_dict.setdefault("role", role)
         return event_dict
 
+    threshold = logging.getLevelNamesMapping().get(level.upper(), logging.INFO)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
             add_role,
+            # Before the redaction pass, so the rendered traceback string still
+            # goes through the URL-userinfo scrub like any other value.
+            structlog.processors.format_exc_info,
             redact_sensitive,
             structlog.processors.JSONRenderer(default=_json_default),
         ],
+        wrapper_class=structlog.make_filtering_bound_logger(threshold),
         logger_factory=structlog.PrintLoggerFactory(stream or sys.stdout),
         cache_logger_on_first_use=False,
     )

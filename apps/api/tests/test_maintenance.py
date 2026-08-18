@@ -6,8 +6,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from conftest import RecordingDispatcher
 from iceberg_api import maintenance
+from iceberg_api.dispatch import Dispatcher
 from iceberg_api.engines.auth import record_heartbeat
 from iceberg_api.scans import service
+from iceberg_api.scheduler import ScanLauncher
+from iceberg_api.scheduler_launcher import build_launcher
 from iceberg_core.config import ApiSettings
 from iceberg_core.db import set_db_engine
 from iceberg_core.enums import (
@@ -100,6 +103,35 @@ def test_a_round_launches_due_scans_and_advances_the_schedule(
     assert dispatcher.enqueued  # its discovery task was dispatched
     session.refresh(schedule)
     assert schedule.last_run_at is not None
+
+
+def test_a_round_hands_the_resolved_store_to_the_launcher(
+    dispatcher: RecordingDispatcher,
+    secret_store: SecretStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The launcher must see the store the round *resolved*, not the raw argument.
+
+    Handing it the raw ``store`` parameter — ``None`` in production, where the
+    round builds its own — makes ``_rotating`` assume a pepper rotation is always
+    in flight, silently promoting every scheduled incremental scan to a full one
+    (#143)."""
+    settings = ApiSettings(
+        database_url="postgresql+psycopg://unused/unused",
+        master_key=SecretStr("unused"),
+    )
+    monkeypatch.setattr(maintenance, "build_secret_store", lambda resolved: secret_store)
+    handed: list[SecretStore | None] = []
+
+    def capture(dispatcher: Dispatcher, store: SecretStore | None = None) -> ScanLauncher:
+        handed.append(store)
+        return build_launcher(dispatcher, store)
+
+    monkeypatch.setattr(maintenance, "build_launcher", capture)
+
+    maintenance.run_once(dispatcher, settings=settings)
+
+    assert handed == [secret_store]
 
 
 def test_a_round_reclaims_expired_leases(

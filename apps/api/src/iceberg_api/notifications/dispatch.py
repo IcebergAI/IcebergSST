@@ -47,6 +47,7 @@ from iceberg_core.models import (
     Source,
 )
 from iceberg_core.secrets import SecretStore
+from sqlalchemy import func
 from sqlmodel import Session, col, select
 
 from iceberg_api.findings import ownership
@@ -98,7 +99,9 @@ def newly_opened_findings(db: Session, scan: Scan) -> list[Finding]:
         col(Finding.suppressed_at).is_(None),
     )
     # A re-opened finding was first seen by some earlier scan, so it is identified
-    # by the event ingest wrote when the secret came back — which names this scan.
+    # by the event ingest wrote when the secret came back — which carries this
+    # scan's id. (Not the display comment: rewording that in ingest must not
+    # silently stop reopen announcements.)
     reopened = (
         select(Finding)
         .join(FindingEvent, col(FindingEvent.finding_id) == col(Finding.id))
@@ -107,7 +110,7 @@ def newly_opened_findings(db: Session, scan: Scan) -> list[Finding]:
             col(Finding.state) == FindingState.OPEN,
             col(Finding.suppressed_at).is_(None),
             col(FindingEvent.kind) == FindingEventKind.REOPENED,
-            col(FindingEvent.comment) == f"seen again by scan {scan.id}",
+            col(FindingEvent.scan_id) == scan.id,
         )
     )
     findings = {finding.id: finding for finding in db.exec(first_seen)}
@@ -494,12 +497,14 @@ def _fail(
 
 def pending_count(db: Session, *, channel_id: uuid.UUID | None = None) -> int:
     """How much is queued. Used by the tests and worth having for an operator."""
-    statement = select(NotificationDelivery).where(
-        col(NotificationDelivery.status) == NotificationDeliveryStatus.PENDING
+    statement = (
+        select(func.count())
+        .select_from(NotificationDelivery)
+        .where(col(NotificationDelivery.status) == NotificationDeliveryStatus.PENDING)
     )
     if channel_id is not None:
         statement = statement.where(col(NotificationDelivery.channel_id) == channel_id)
-    return len(list(db.exec(statement)))
+    return db.exec(statement).one()
 
 
 __all__ = [

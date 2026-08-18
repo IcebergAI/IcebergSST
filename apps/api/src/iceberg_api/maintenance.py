@@ -75,7 +75,8 @@ def run_once(
             logger.debug("maintenance_round_not_leader")
             return
         with session_scope() as db:
-            tick(db, now=at, launcher=build_launcher(dispatcher, store), lock=_already_leader)
+            launcher = build_launcher(dispatcher, secret_store)
+            tick(db, now=at, launcher=launcher, lock=_already_leader)
         with session_scope() as db:
             service.reclaim_expired_leases(db, dispatcher=dispatcher, now=at)
         # The safety nets (ADR 0009): a crash between the commit that ends a task

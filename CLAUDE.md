@@ -8,14 +8,16 @@ IcebergSST — a secret-scanning platform for non-git enterprise sources (Conflu
 shares). See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the design spec and [`docs/adr/`](./docs/adr/)
 for decision rationale.
 
-**Where the code is:** M0–M4 are built. `packages/core` (config, DB session, secret store,
-redaction, fingerprinting, the SQLModel schema), `packages/detect` (rule packs, the detection
-engine), `packages/connectors` (Confluence, extraction, the sandbox), `apps/api` (auth, sources,
-scans, findings, notification channels *and* dispatch via the `notification_delivery` outbox,
-engine-facing routes, scheduler/maintenance, retention, and the server-rendered web console under
-`apps/api/src/iceberg_api/web/`), `apps/engine` (the Dramatiq worker), Alembic, the docker-compose
-stack and the Helm chart under `deploy/helm/` all exist and are tested. `docs/backlog.md` tracks
-what is left.
+**Where the code is:** M0–M6 are built. `packages/core` (config, DB session, secret store,
+redaction, fingerprinting, correlation, the SQLModel schema), `packages/detect` (rule packs, the
+detection engine), `packages/connectors` (the connector SDK + conformance kit, Confluence, Jira,
+SMB/NFS file shares, extraction, the sandbox), `apps/api` (auth, sources, scans with checkpoints
+and incremental cursors, findings with triage/ownership/remediation/correlation, secret
+validation, notification channels *and* dispatch via the `notification_delivery` outbox, external
+hand-over, engine-facing routes, scheduler/maintenance, retention, and the server-rendered web
+console under `apps/api/src/iceberg_api/web/`), `apps/engine` (the Dramatiq worker), Alembic, the
+docker-compose stack and the Helm chart under `deploy/helm/` all exist and are tested.
+`docs/backlog.md` tracks what is left.
 
 ## Non-negotiable invariants
 
@@ -43,10 +45,11 @@ change the corresponding ADR:
 Python 3.14 · FastAPI · SQLModel/PostgreSQL · Redis + Dramatiq · HTMX + Alpine.js ·
 docker-compose (dev) / Helm (prod).
 
-## Planned layout
+## Layout
 
-`apps/api`, `apps/engine`, `packages/core`, `packages/detect`, `packages/connectors`, `web/`,
-`deploy/`, `docs/`.
+`apps/api`, `apps/engine`, `packages/core`, `packages/detect`, `packages/connectors`, `web/` (the
+asset-vendoring tool that feeds the console's `static/`), `deploy/`, `docs/`, and cross-role
+invariant tests in the root `tests/`.
 
 ## Invariants that are already tests
 
@@ -65,6 +68,11 @@ Prefer extending these over adding prose:
   document, and every vendored asset matches its `assets.lock.json` integrity.
 - `apps/api/tests/test_web_shell.py` — no template carries an inline `<script>`/`<style>` or an
   `onclick=`-style handler, and the CSP never grows `'unsafe-inline'`/`'unsafe-eval'` for scripts.
+- `tests/test_suppression_consistency.py` — the API's pre-filter and the engine's in-flight
+  suppression agree on one shared implementation.
+- `tests/test_release_invariants.py` and `tests/test_docs_invariants.py` — every shipped component
+  declares the same version and documents its migrations; CI, the Makefile, and CONTRIBUTING agree
+  about what runs.
 
 ## Working style
 

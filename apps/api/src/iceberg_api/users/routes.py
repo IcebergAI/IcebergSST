@@ -33,10 +33,9 @@ from iceberg_api.auth.rbac import AdminUser
 from iceberg_api.pagination import (
     DEFAULT_LIMIT,
     MAX_LIMIT,
-    Cursor,
-    CursorError,
     after,
-    resolve_cursor,
+    build_page,
+    position,
 )
 from iceberg_api.schemas import Page, UserRead, UserUpdate
 
@@ -52,29 +51,15 @@ async def list_users(
     cursor: str | None = Query(default=None),
 ) -> Page[UserRead]:
     """List users, oldest first, in stable `(created_at, id)` order."""
-    try:
-        position = resolve_cursor(cursor)
-    except CursorError as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "cursor is not valid") from exc
-
     statement = after(
         select(User),
         created_at=User.created_at,  # type: ignore[arg-type]  # instrumented attribute
         row_id=User.id,  # type: ignore[arg-type]
-        cursor=position,
+        cursor=position(cursor),
     )
     # One extra row answers "is there another page?" without a second count query.
     rows = list(db.exec(statement.limit(limit + 1)))
-    page, has_more = rows[:limit], len(rows) > limit
-
-    return Page(
-        items=[UserRead.model_validate(user) for user in page],
-        next_cursor=(
-            Cursor(created_at=page[-1].created_at, row_id=page[-1].id).encode()
-            if has_more and page
-            else None
-        ),
-    )
+    return build_page(rows, limit=limit, read=UserRead.model_validate)
 
 
 @router.patch("/{user_id}", dependencies=[CsrfProtected])

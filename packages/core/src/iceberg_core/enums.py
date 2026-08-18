@@ -415,7 +415,7 @@ class NotificationEventKind(StrEnum):
 
     Two things a channel hears, with different meanings and different dedup keys:
     a finding *opened* — once per scan that opened it — and a finding that went
-    *overdue* — once per deadline it missed. Stored as a checked VARCHAR like
+    *overdue* — once per deadline it missed. Stored as a plain VARCHAR like
     every other enum here, so a third kind is a value, not a migration.
     """
 

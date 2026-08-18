@@ -72,12 +72,15 @@ def json_type() -> Any:
 
 
 def enum_type[EnumT: StrEnum](enum_class: type[EnumT], *, name: str) -> Any:
-    """Column type for a :class:`~enum.StrEnum`, stored as a checked VARCHAR.
+    """Column type for a :class:`~enum.StrEnum`, stored as a plain VARCHAR.
 
     ``native_enum=False`` is deliberate. Native Postgres enum types make adding
-    a value a schema migration with table locks; a VARCHAR + CHECK constraint
-    gives the same validation with an ordinary ALTER, and behaves identically on
-    SQLite.
+    a value a schema migration with table locks; a bare VARCHAR makes it a code
+    change, and behaves identically on SQLite. Validation is bind-time only
+    (``validate_strings=True``) — SQLAlchemy emits no CHECK constraint here
+    (``create_constraint`` defaults to false), so an out-of-band write can store
+    a value the enum does not know. The trade is deliberate: vocabulary lives in
+    code, and the API is the only writer of record.
     """
     return SAEnum(
         enum_class,

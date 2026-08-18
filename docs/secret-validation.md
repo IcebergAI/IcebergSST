@@ -48,6 +48,13 @@ No AWS, password, private-key, JWT, connection-string, or generic-entropy rule i
 eligible. Those shapes either require additional material, lack a side-effect-free
 identity request, or are too ambiguous for safe validation.
 
+## Policy administration
+
+Policies are CRUD-managed at `/validation-policies` (admin-only — a policy authorizes plaintext
+egress to a provider, so it is an egress decision, not detection tuning). Routes and payloads are
+in [`api.md`](./api.md) § Validation policies; the stored shape is in
+[`data-model.md`](./data-model.md) § ValidationPolicy.
+
 ## Deployment controls
 
 Production deployments must enforce outbound policy in addition to the

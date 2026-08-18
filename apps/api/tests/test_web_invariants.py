@@ -56,8 +56,22 @@ def test_the_web_package_has_modules_to_check() -> None:
 
 @pytest.mark.parametrize("module", WEB_MODULES, ids=lambda path: path.name)
 def test_no_web_module_imports_the_orm(module: Path) -> None:
-    source = module.read_text(encoding="utf-8")
-    offenders = [name for name in FORBIDDEN_IMPORTS if f"import {name}" in source]
+    """Parsed, not substring-matched: this repo imports as ``from X import Y``,
+    which a check for the literal text ``import X`` never sees."""
+    tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [node.module] if node.module else []
+        else:
+            continue
+        offenders.extend(
+            name
+            for name in names
+            if any(name == banned or name.startswith(f"{banned}.") for banned in FORBIDDEN_IMPORTS)
+        )
 
     assert offenders == [], (
         f"{module.name} imports {offenders}; the web layer reaches the database "
@@ -67,7 +81,13 @@ def test_no_web_module_imports_the_orm(module: Path) -> None:
 
 @pytest.mark.parametrize("module", WEB_MODULES, ids=lambda path: path.name)
 def test_no_web_module_builds_a_query_or_commits(module: Path) -> None:
-    """`db` is passed through to an API handler, never used here."""
+    """`db` is passed through to an API handler, never used here.
+
+    Two nets: the query-shaped names anywhere (a bare ``select()`` from any
+    receiver), and *any* method call on a name called ``db`` — which is what
+    catches ``db.get(Finding, id)`` or ``db.add(...)``, reads and writes the
+    generic name check cannot see.
+    """
     tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
     offenders: list[str] = []
     for node in ast.walk(tree):
@@ -83,6 +103,12 @@ def test_no_web_module_builds_a_query_or_commits(module: Path) -> None:
         )
         if name in FORBIDDEN_CALLS:
             offenders.append(f"{name}() at line {node.lineno}")
+        elif (
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "db"
+        ):
+            offenders.append(f"db.{target.attr}() at line {node.lineno}")
 
     assert offenders == [], f"{module.name} touches the database directly: {offenders}"
 

@@ -49,7 +49,23 @@ A scan target.
 
 ### Schedule
 - `id`, `source_id` (FK), `cron` (5-field expr), `enabled`
+- `mode`: enum `full | incremental` — a *request*; the API promotes to full whenever a watermark
+  cannot be trusted (ADR 0013)
 - `next_run_at`, `last_run_at`
+
+### SourceCursor
+How far a completed scan of one *scope* (a space, a project) got, for the next incremental scan
+(#143, ADR 0013). Per scope rather than per source, because scopes complete independently; only
+written when a scan reaches `completed` with complete coverage, so a partial scan can never move a
+watermark forward.
+- `id`, `source_id` (FK, CASCADE), `scope` — unique together
+- `position`: JSON, authored by the connector and opaque to the API; may hold a provider change
+  token, so it is never logged
+- `rulepack_version`, `source_configuration_version` — what the position is valid under; a change
+  to either invalidates it
+- `minted_by_scan_id` (FK, RESTRICT), `minted_at`
+- `invalidated_at`, `invalidation_reason`: set rather than deleted, so "why did this become a full
+  scan?" stays answerable
 
 ## Scans
 
@@ -181,6 +197,27 @@ Analyst-managed allowlist (ADR 0008).
 - `id`, `scope`: enum `path_glob | fingerprint | rule`
 - `pattern` (glob / fingerprint / rule_id), `source_id` (FK, nullable = global)
 - `reason`, `created_by` (FK User), `expires_at` (nullable), `created_at`
+
+### ValidationPolicy
+Authorization and resource limits for one detector/provider pair (ADR 0010). Disabled by default;
+no credential or provider response is ever stored here.
+- `id`, `rule_id`, `provider` — unique together
+- `validator_id` (names reviewed engine code), `contract_version` (pins the side-effect-free
+  protocol that code must honor)
+- `enabled`, `rationale`, `timeout_seconds`, `requests_per_minute`, `max_attempts_per_task`
+
+### HandoffTarget, FindingHandoff
+External hand-over (#141, [`handoff.md`](./handoff.md)).
+- **HandoffTarget** — `id`, `name` (unique), `type` (one type: signed HTTP POST), `config` (JSON),
+  `event_filter` (JSON, same vocabulary as a notification channel's), `enabled`. Admin-only to
+  configure, like a channel and for a stronger reason: it is an egress destination.
+- **FindingHandoff** — `id`, `target_id` (FK, CASCADE), `finding_id` (FK, CASCADE), unique
+  together so repeated delivery creates one external work item; `idempotency_key` (unique, never
+  regenerated — a retry carries the key the receiver already deduplicated on);
+  `requested_by_id` (FK, SET NULL: a hand-over outlives the account that asked for it); `status`
+  plus the same retry columns as `NotificationDelivery`; and the inbound sync columns (migration
+  0018) — `external_state` and friends record what the receiver said *beside* the finding, never
+  onto it, so a disagreement is expressible rather than silently overwritten.
 
 ## Engines & notifications
 

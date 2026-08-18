@@ -1000,14 +1000,7 @@ def _created_at(issue: Mapping[str, Any]) -> datetime | None:
     contiguous and half-open precisely so that a timezone shift can move a boundary
     without opening a hole.
     """
-    fields = issue.get("fields")
-    raw = fields.get("created") if isinstance(fields, Mapping) else None
-    if not isinstance(raw, str) or len(raw) < 16:
-        return None
-    try:
-        return datetime.strptime(raw[:16], "%Y-%m-%dT%H:%M")
-    except ValueError:
-        return None
+    return _field_at(issue, "created")
 
 
 def _stamp(value: date) -> str:

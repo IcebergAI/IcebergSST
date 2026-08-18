@@ -38,7 +38,7 @@ type: ## mypy across apps/ and packages/
 test: ## pytest across all workspace members
 	uv run pytest
 
-check: lint type test ## Everything CI runs
+check: lint type docs-check test ## Everything CI's checks job runs
 
 docs-check: ## Verify links, documented make targets, and named settings
 	uv run python scripts/check_docs.py

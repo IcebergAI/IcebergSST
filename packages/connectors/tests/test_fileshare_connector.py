@@ -231,6 +231,22 @@ def test_a_symlink_within_the_root_is_followed_when_asked(share: Path) -> None:
     assert "eng/nested/config.env" in [unit.locator.resource_id for unit in units]
 
 
+def test_a_symlink_loop_back_to_the_root_does_not_double_scan(share: Path) -> None:
+    """The dedupe set registers directories as they are *discovered*, so the root
+    — pushed onto the stack directly — needs registering too. Without it a loop
+    back to the root re-walks it: every direct file yielded and counted twice,
+    an inflated manifest that cannot be reconciled against the share."""
+    (share / "eng" / "sub").mkdir()
+    (share / "eng" / "sub" / "loop").symlink_to(share / "eng")
+
+    units, outcome = _fetch(
+        FileshareConnector(), _connection(share, follow_symlinks=True), root="eng"
+    )
+
+    assert [unit.locator.resource_id for unit in units] == ["eng/deploy.sh"]
+    assert outcome.coverage.as_payload()["counts"]["scanned"] == 1
+
+
 def test_a_symlink_to_another_root_is_not_followed(share: Path) -> None:
     """Containment is against the *root*, not the mount. Following a link into a
     sibling root would have two fetch tasks scan the same files — double-counted
@@ -298,6 +314,7 @@ def test_a_fifo_is_skipped_rather_than_opened(share: Path) -> None:
     assert CoverageReason.UNSUPPORTED_TYPE.value in _reasons(outcome)
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permission bits")
 def test_an_unreadable_file_is_a_failure_not_a_skip(share: Path) -> None:
     """A file that *should* have been readable and was not means a source-wide
     reconciliation must not treat its absent findings as remediated."""
@@ -314,6 +331,7 @@ def test_an_unreadable_file_is_a_failure_not_a_skip(share: Path) -> None:
     assert CoverageReason.PERMISSION_DENIED.value in _reasons(outcome)
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permission bits")
 def test_an_unreadable_directory_does_not_stop_the_rest_of_the_walk(share: Path) -> None:
     """One subtree, not the task: the rest of the root is still worth reading."""
     locked = share / "eng" / "restricted"
@@ -328,12 +346,6 @@ def test_an_unreadable_directory_does_not_stop_the_rest_of_the_walk(share: Path)
 
     assert [unit.locator.resource_id for unit in units] == ["eng/deploy.sh"]
     assert CoverageReason.PERMISSION_DENIED.value in _reasons(outcome)
-
-
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permission bits")
-def test_permission_tests_mean_something_as_this_user() -> None:
-    """Guards the two tests above: as root they would pass for the wrong reason."""
-    assert os.geteuid() != 0
 
 
 # ─── Policy: what is in scope ─────────────────────────────────────────────────

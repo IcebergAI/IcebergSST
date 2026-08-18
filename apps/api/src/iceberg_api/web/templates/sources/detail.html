@@ -117,14 +117,17 @@
     </section>
 
     {#- Loaded on its own, not rendered inline: the cursor API is analyst-only
-        while this page is viewer-accessible, so a viewer simply gets nothing
-        here rather than the page dropping to analyst-only for everyone. -#}
+        while this page is viewer-accessible. The template gate is a courtesy so
+        a viewer gets nothing here rather than a role-denied banner from the
+        auto-load; the route's RBAC dependency remains the actual control. -#}
+    {% if role in ('analyst', 'admin') %}
     <section
       class="card card-pad"
       hx-get="/sources/{{ source.id }}/cursors"
       hx-trigger="load"
       hx-swap="innerHTML"
     ></section>
+    {% endif %}
 
     <section class="card card-pad">
       <div class="eyebrow" style="margin-bottom:10px">Details</div>
@@ -133,6 +136,7 @@
         <dt>Type</dt><dd>{{ source.type.value }}</dd>
         <dt>Base URL</dt><dd class="mono" style="font-size:12px">{{ source.connection.get('base_url', '—') }}</dd>
         <dt>Auth</dt><dd>{{ 'Cloud (email + token)' if source.connection.get('email') else 'Server/DC (bearer token)' }}</dd>
+        {% if source.type.value == 'confluence' %}
         <dt>Spaces</dt>
         <dd>
           {% if source.connection.get('spaces') %}
@@ -141,9 +145,24 @@
             <span class="muted">every readable space</span>
           {% endif %}
         </dd>
+        {% elif source.type.value == 'jira' %}
+        <dt>Projects</dt>
+        <dd>
+          {% if source.connection.get('projects') %}
+            {% for project in source.connection.projects %}<span class="tag">{{ project }}</span> {% endfor %}
+          {% else %}
+            <span class="muted">every readable project</span>
+          {% endif %}
+        </dd>
+        {% endif %}
         <dt>Comments</dt><dd>{{ 'scanned' if source.connection.get('include_comments', True) else 'skipped' }}</dd>
         <dt>Attachments</dt><dd>{{ 'scanned' if source.connection.get('include_attachments', True) else 'skipped' }}</dd>
+        {% if source.type.value == 'confluence' %}
         <dt>Personal</dt><dd>{{ 'included' if source.connection.get('include_personal_spaces', False) else 'excluded' }}</dd>
+        {% elif source.type.value == 'jira' %}
+        <dt>History</dt><dd>{{ 'scanned' if source.connection.get('include_history', False) else 'skipped' }}</dd>
+        <dt>Archived</dt><dd>{{ 'included' if source.connection.get('include_archived_projects', False) else 'excluded' }}</dd>
+        {% endif %}
         <dt>Created</dt><dd class="mono" style="font-size:12px">{{ source.created_at | dt }}</dd>
         <dt>Updated</dt><dd class="mono" style="font-size:12px">{{ source.updated_at | dt }}</dd>
       </dl>
@@ -187,9 +206,11 @@
       </p>
       <button type="button" class="btn btn--danger btn--sm" x-show="!armed" @click="arm()">Delete this source</button>
       <div class="row-inline" x-show="armed" x-cloak>
+        {#- No hx-confirm here: the confirmAction arming above *is* the
+            confirmation, and stacking a native dialog on top is the
+            window.confirm UX tags.js exists to avoid. -#}
         <button class="btn btn--danger btn--sm"
-                hx-delete="/sources/{{ source.id }}"
-                hx-confirm="Delete {{ source.name }} and everything it found?">
+                hx-delete="/sources/{{ source.id }}">
           Yes, delete it
         </button>
         <button type="button" class="btn btn--quiet btn--sm" @click="disarm()">Cancel</button>

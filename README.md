@@ -7,11 +7,12 @@ Most secret-scanning tooling is git-centric. IcebergSST targets the *non-git* lo
 credentials quietly accumulate — **Confluence**, **Jira**, and **network file shares** — with an
 API-first management plane and horizontally scalable, isolated scanner engines.
 
-> ⚠️ **Status: M0–M4 built.** The core package, the control-plane API, the detection engine, the
-> Confluence connector, the engine worker, notification dispatch, the local container stack, the web
-> console and the Helm chart all exist and are tested. See
-> [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`docs/`](./docs/) for the spec, and the GitHub
-> milestones/issues for what is left.
+> ⚠️ **Status: M0–M6 built.** The core package, the control-plane API, the detection engine, the
+> Confluence, Jira and SMB/NFS file-share connectors, incremental scanning, the engine worker,
+> notification dispatch, exposure clusters, remediation evidence, ownership and escalation,
+> external hand-over, the local container stack, the web console and the Helm chart all exist and
+> are tested. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`docs/`](./docs/) for the spec, and
+> the GitHub milestones/issues for what is left.
 
 ## The console
 
@@ -72,7 +73,7 @@ bootstrap script (which the CSP would forbid anyway).
 
 ## What it does
 
-- **Discover & scan** content in Confluence and Jira, with SMB/NFS file shares to follow.
+- **Discover & scan** content in Confluence, Jira, and SMB/NFS file shares.
 - **Detect** secrets with a custom regex + entropy + keyword-proximity engine driven by
   versioned rule packs.
 - **Never store plaintext** — findings keep only a redacted snippet and a salted fingerprint
@@ -139,7 +140,7 @@ apps/api        FastAPI control plane
 apps/engine     Dramatiq scanner worker
 packages/core   shared models, config, secret-store, fingerprinting, redaction
 packages/detect rule packs + detection engine
-packages/connectors  connector interface + Confluence and Jira (SMB later)
+packages/connectors  connector SDK + Confluence, Jira, and SMB/NFS file shares
 apps/api/…/web  the console: Jinja templates, Alpine components, design system
 web/            frontend asset vendoring (no Node toolchain)
 deploy/compose  docker-compose development stack
