@@ -21,6 +21,7 @@ from typing import Annotated, Any
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Form, HTTPException, Query, Request, Response
+from fastapi.responses import RedirectResponse
 from iceberg_core.enums import FindingState, RemediationActionKind, Severity, UserRole
 from pydantic import ValidationError
 
@@ -110,6 +111,11 @@ async def findings_page(  # one parameter per filter, by design
     cursor: Annotated[str | None, Query()] = None,
 ) -> Response:
     """The queue. Every filter is in the URL; none is applied behind your back."""
+    # The default view is a redirect into an explicit query string (see the
+    # module docstring): the bare URL — the rail link — lands on the open queue
+    # with the URL saying so, not on a silently mixed list.
+    if not request.query_params:
+        return RedirectResponse("/findings?state=open&suppressed=false", status_code=303)
     assignee_id = user.id if assignee == ASSIGNEE_ME else id_or_none(assignee)
     # One control for two API parameters: a team, or the unowned queue. The API
     # keeps them separate (`?owner_group_id=` and `?unowned=`) because an absent
@@ -203,7 +209,6 @@ async def triage(  # one parameter per form field
     assignee: Annotated[str, Form()] = "",
     owner: Annotated[str, Form()] = "",
     comment: Annotated[str, Form()] = "",
-    notes: Annotated[str | None, Form()] = None,
     csrf_token: Annotated[str, Form()] = "",
 ) -> Response:
     """Record a triage decision, then re-render the panel with its new history.
@@ -224,8 +229,6 @@ async def triage(  # one parameter per form field
         payload: dict[str, Any] = {"state": FindingState(state) if state else None}
         if comment.strip():
             payload["comment"] = comment.strip()
-        if notes is not None:
-            payload["notes"] = notes.strip() or None
         if assignee == "none":
             payload["assignee_id"] = None
         elif assignee:

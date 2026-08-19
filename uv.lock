@@ -453,7 +453,7 @@ requires-dist = [
     { name = "httpx2", specifier = ">=2.7.0" },
     { name = "iceberg-core", editable = "packages/core" },
     { name = "pypdf", specifier = ">=6.15.0" },
-    { name = "structlog", specifier = ">=25.5.0" },
+    { name = "structlog", specifier = ">=26.1.0" },
 ]
 
 [[package]]

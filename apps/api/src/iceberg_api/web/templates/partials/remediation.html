@@ -58,7 +58,9 @@
         <li class="{{ 'is-accent' if not action.retracted_at }}">
           <div class="timeline-head">
             <span class="timeline-kind"{% if action.retracted_at %} style="text-decoration:line-through"{% endif %}>{{ action.kind.value | humanize }}</span>
-            <span class="timeline-actor">{{ user_names.get(action.actor_id, 'system') if action.actor_id else 'system' }}</span>
+            {#- Same rule as the triage timeline: a null actor is the system, a
+                real one the reader cannot name is a shortened id. -#}
+            <span class="timeline-actor">{{ action.actor_id | person(user_names) if action.actor_id else 'system' }}</span>
             <span class="timeline-ts">{{ (action.occurred_at or action.created_at) | dt }}</span>
             {% if action.retracted_at %}
             <span class="tag tag--c is-neutral">retracted</span>

@@ -256,7 +256,7 @@ class _Batcher:
         """
         self.pending = (candidates, coverage, dict(counts))
 
-    def due(self, checkpoint: Checkpoint | None, candidates: int, now: float) -> bool:
+    def due(self, checkpoint: Checkpoint | None, now: float) -> bool:
         """Whether there is a boundary worth spending a round trip on."""
         if self.in_flight is not None:
             # An unacknowledged batch outranks any new one: until its fate is
@@ -683,7 +683,11 @@ def _discover(connector: Connector, lease: Lease, report: TaskReport) -> None:
             # and the API nulls the whole manifest's `scope.requested` when the
             # equation does not balance (scans/coverage.py). The operator silently
             # loses "you asked for three projects and we enumerated three".
-            scope = str(spec.params.get(scope_param) or "")
+            # Normalized the same way as `configured_scopes` above and the gap
+            # attribution in `_record_task_gap`: a connector yielding one scope
+            # under differing case must not count it discovered twice, which
+            # would unbalance the requested/discovered equation all the same.
+            scope = str(spec.params.get(scope_param) or "").strip().casefold()
             if scope and scope in seen_scopes:
                 continue
             seen_scopes.add(scope)
@@ -743,7 +747,7 @@ def _fetch(
             if (
                 batcher is not None
                 and published is not None
-                and batcher.due(published, len(candidates), monotonic())
+                and batcher.due(published, monotonic())
             ):
                 _flush(batcher, published, candidates, suppression_rules, validator)
 

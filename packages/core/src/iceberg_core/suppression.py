@@ -54,10 +54,12 @@ class SuppressionRule:
         ignored a scope it did not recognise would pre-filter differently from the
         API, which is the one divergence this module exists to prevent.
         """
+        pattern = payload.get("pattern")
+        if not isinstance(pattern, str):
+            # Outside the try, or the generic handler below would swallow this
+            # deliberately specific diagnosis (it subclasses ValueError).
+            raise SuppressionPayloadError(f"suppression pattern must be a string: {payload}")
         try:
-            pattern = payload["pattern"]
-            if not isinstance(pattern, str):
-                raise SuppressionPayloadError(f"suppression pattern must be a string: {payload}")
             return cls(
                 id=uuid.UUID(payload["id"]),
                 scope=SuppressionScope(payload["scope"]),

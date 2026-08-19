@@ -117,8 +117,11 @@
             <span class="timeline-kind">{{ event.kind.value | humanize }}</span>
             <span class="timeline-actor">
               {#- A null actor is the system: reconciliation auto-resolving, or
-                  ingest applying a suppression. Naming it is the point. -#}
-              {{ user_names.get(event.actor_id, 'system') if event.actor_id else 'system' }}
+                  ingest applying a suppression. Naming it is the point. A *real*
+                  actor whose name this reader cannot see (the directory is
+                  admin-only) shows as a shortened id — never as "system", which
+                  would relabel a person's triage as automation. -#}
+              {{ event.actor_id | person(user_names) if event.actor_id else 'system' }}
             </span>
             <span class="timeline-ts">{{ event.created_at | dt }}</span>
           </div>

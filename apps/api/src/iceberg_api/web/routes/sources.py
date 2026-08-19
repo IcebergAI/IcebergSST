@@ -34,9 +34,10 @@ from iceberg_api.web.templating import hx_redirect, render_fragment, render_page
 
 router = APIRouter(include_in_schema=False)
 
-#: The select renders these and nothing else, because `validate_connection`
-#: refuses the rest with an explanation anyway — offering a choice the API will
-#: reject is a worse experience than not offering it.
+#: The select renders these and nothing else. The API supports more (fileshare,
+#: via `SUPPORTED_SOURCE_TYPES`), but the console has no form fields for them
+#: yet — offering a choice this form cannot express would post a
+#: Confluence-shaped blob for something else.
 SELECTABLE_TYPES = (SourceType.CONFLUENCE, SourceType.JIRA)
 
 
@@ -200,20 +201,24 @@ async def create_source(  # one parameter per form field
     except ValueError:
         return _form_error(request, viewer, None, {}, ValueError("unknown source type"))
 
-    connection = _connection_form(
-        chosen,
-        base_url=base_url,
-        email=optional(email),
-        api_prefix=optional(api_prefix),
-        spaces=string_list(spaces),
-        projects=string_list(projects),
-        include_comments=checkbox(include_comments),
-        include_attachments=checkbox(include_attachments),
-        include_personal_spaces=checkbox(include_personal_spaces),
-        include_history=checkbox(include_history),
-        include_archived_projects=checkbox(include_archived_projects),
-    )
+    connection: dict[str, Any] = {}
     try:
+        # Inside the try: a type the console has no form for (hand-posted, since
+        # the select offers only SELECTABLE_TYPES) raises ValueError, and that
+        # must re-render the form with the message — not surface as a 500.
+        connection = _connection_form(
+            chosen,
+            base_url=base_url,
+            email=optional(email),
+            api_prefix=optional(api_prefix),
+            spaces=string_list(spaces),
+            projects=string_list(projects),
+            include_comments=checkbox(include_comments),
+            include_attachments=checkbox(include_attachments),
+            include_personal_spaces=checkbox(include_personal_spaces),
+            include_history=checkbox(include_history),
+            include_archived_projects=checkbox(include_archived_projects),
+        )
         body = SourceCreate(
             name=name.strip(),
             type=chosen,
@@ -258,20 +263,24 @@ async def update_source(  # one parameter per form field
     # how to interpret a stored source.
     source = await api.read_source(source_id=source_id, user=admin, db=db)
 
-    connection = _connection_form(
-        source.type,
-        base_url=base_url,
-        email=optional(email),
-        api_prefix=optional(api_prefix),
-        spaces=string_list(spaces),
-        projects=string_list(projects),
-        include_comments=checkbox(include_comments),
-        include_attachments=checkbox(include_attachments),
-        include_personal_spaces=checkbox(include_personal_spaces),
-        include_history=checkbox(include_history),
-        include_archived_projects=checkbox(include_archived_projects),
-    )
+    connection: dict[str, Any] = {}
     try:
+        # Inside the try: a stored source of a type this form cannot express
+        # (e.g. fileshare, created through the API) raises ValueError, and that
+        # must re-render the form with the message — not surface as a 500.
+        connection = _connection_form(
+            source.type,
+            base_url=base_url,
+            email=optional(email),
+            api_prefix=optional(api_prefix),
+            spaces=string_list(spaces),
+            projects=string_list(projects),
+            include_comments=checkbox(include_comments),
+            include_attachments=checkbox(include_attachments),
+            include_personal_spaces=checkbox(include_personal_spaces),
+            include_history=checkbox(include_history),
+            include_archived_projects=checkbox(include_archived_projects),
+        )
         changes = SourceUpdate(
             name=name.strip(),
             connection=connection,

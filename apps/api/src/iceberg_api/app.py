@@ -20,7 +20,7 @@ import structlog
 from fastapi import FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
 from iceberg_core import metrics as _metrics  # noqa: F401  # registers iceberg_* series
-from iceberg_core.config import ApiSettings
+from iceberg_core.config import ApiSettings, CoreSettings
 from iceberg_core.logging import configure_logging
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
@@ -75,7 +75,10 @@ def create_app(settings: ApiSettings | None = None, *, background: bool = True) 
     what tests want, since they drive those directly and would otherwise race a
     timer against their own fixtures.
     """
-    configure_logging(role="api")
+    # `CoreSettings` rather than the full `ApiSettings` when none were passed:
+    # the log level is the only setting needed this early, and resolving it must
+    # not demand a database URL from an entrypoint that never uses one.
+    configure_logging(role="api", level=(settings or CoreSettings()).log_level)
 
     # The packaged guidance catalog is validated here rather than on the first
     # request that needs it (ADR 0012 says loud failure, and lazily loud is not

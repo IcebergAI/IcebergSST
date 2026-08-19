@@ -6,7 +6,7 @@ Design specification and reference docs. Start with [`../ARCHITECTURE.md`](../AR
 - [`data-model.md`](./data-model.md) — SQLModel entities and relationships
 - [`api.md`](./api.md) — REST surface (human + engine-facing)
 - [`web.md`](./web.md) — the console: HTMX/Alpine conventions, CSP, assets, design system
-- [`connectors.md`](./connectors.md) — connector interface + Confluence (MVP)
+- [`connectors.md`](./connectors.md) — connector interface + Confluence, Jira, and file shares
 - [`connector-sdk.md`](./connector-sdk.md) — versioned connector contract and conformance kit
 - [`rules.md`](./rules.md) — detection engine, rule packs, suppressions
 - [`secret-validation.md`](./secret-validation.md) — opt-in credential liveness contracts and controls

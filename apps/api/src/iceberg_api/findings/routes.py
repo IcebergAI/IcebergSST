@@ -21,7 +21,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from iceberg_core.enums import FindingState, Severity, UserRole
 from iceberg_core.models import Finding, FindingEvent, OwnerGroup, User
 from sqlalchemy import func
-from sqlmodel import col, select
+from sqlmodel import col, or_, select
 
 from iceberg_api.auth.dependencies import CsrfProtected, SessionDep, SettingsDep
 from iceberg_api.auth.rbac import ROLE_RANK, AnalystUser, ViewerUser
@@ -115,7 +115,11 @@ async def list_findings(
         # `ownership.overdue` applies to a single row — kept in one place so the
         # queue and the badge on the finding cannot disagree.
         late = col(Finding.due_at) < datetime.now(UTC)
-        statement = statement.where(*ownership.actionable()).where(late if overdue else ~late)
+        # A finding with no due date is simply not overdue, so it belongs in the
+        # `overdue=false` set — `~late` alone would drop it, because NULL < now
+        # is NULL, not false.
+        not_late = or_(col(Finding.due_at).is_(None), ~late)
+        statement = statement.where(*ownership.actionable()).where(late if overdue else not_late)
     if suppressed is not None:
         hidden = col(Finding.suppressed_at).is_not(None)
         statement = statement.where(hidden if suppressed else ~hidden)

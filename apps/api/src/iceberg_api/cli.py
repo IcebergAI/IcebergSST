@@ -178,8 +178,8 @@ def reindex_correlation(key: bytes, *, batch: int = 1000) -> reindex.ReindexOutc
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    configure_logging(role="api")
     settings = get_api_settings()
+    configure_logging(role="api", level=settings.log_level)
 
     match args.command:
         case "mint-engine-token":
@@ -206,7 +206,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = tick(
                     db,
                     now=datetime.now(UTC),
-                    launcher=build_launcher(dispatcher),
+                    launcher=build_launcher(dispatcher, build_secret_store(settings)),
                     lock=postgres_advisory_lock,
                 )
             print(

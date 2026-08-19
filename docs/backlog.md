@@ -65,7 +65,7 @@ Confluence-scan-to-triaged-finding flow). M3–M4 complete the product.
   `ConnectorMetadata`/capabilities, and `assert_connector_conformance`.
 - **Epic: Scan coverage & gap manifest (#148)** *(shipped)* — every enumerated object gets exactly
   one disposition; unknown remainder is a scope gap, never an invented clean count.
-- **Epic: Jira connector (#144)** — Cloud (REST v3): projects, issues, comments, attachments, and
+- **Epic: Jira connector (#144)** *(shipped)* — Cloud (REST v3): projects, issues, comments, attachments, and
   opt-in field history. First consumer of the #149 SDK. Discovery windows each project by the
   immutable `created` field, which bounds what an interrupted task re-reads; **not** checkpointed
   resume, which stays with #143. Data Center seams exist but are uncertified. Shares its transport
@@ -78,7 +78,7 @@ Confluence-scan-to-triaged-finding flow). M3–M4 complete the product.
   rule: an incremental scan **never** auto-resolves, and the API promotes one to a full scan whenever
   a watermark cannot be trusted — which is what makes the periodic full reconciliation a guarantee
   rather than a convention. See [`adr/0013-incremental-scanning.md`](./adr/0013-incremental-scanning.md).
-- **Epic: SMB/NFS file-share connector (#145)** — one `fileshare` connector over a **read-only
+- **Epic: SMB/NFS file-share connector (#145)** *(shipped)* — one `fileshare` connector over a **read-only
   mount** rather than two protocol clients: SMB and NFS both have kernel-side implementations, and
   re-implementing either would put a second authentication stack in the engine. Bounded, contained,
   resumable traversal with explicit gaps; the credential lives in the mount, never in a lease. See
@@ -95,7 +95,15 @@ Confluence-scan-to-triaged-finding flow). M3–M4 complete the product.
   evidence scrubbing under retention (ADR 0012). A reappearing credential — including one a
   validator (ADR 0010) reports live, since validation only accompanies a sighting — reopens with
   its remediation history intact.
+- **Epic: Ownership & response targets (#146)** *(shipped)* — owner groups and routing rules, an
+  unowned queue that drains on every scan, per-severity response targets with due dates, and
+  overdue escalation to the owning team's channel (#164, #165, #170, #172).
+- **Epic: External hand-over (#141)** *(shipped)* — admin-configured hand-over targets (signed
+  HTTP POST, one target type by design), outbox delivery with the notification retry ladder,
+  dedup by unique constraint plus a never-regenerated idempotency key, and inbound state sync
+  recorded beside the finding rather than written onto it (#179, #182, #185, #186). See
+  [`handoff.md`](./handoff.md).
 
 ## MVP non-goals
-SMB connectors, image OCR, external ticket creation, multi-tenancy. (Incremental/delta scanning
-was an MVP non-goal and shipped in M5 as #143.)
+Image OCR, multi-tenancy. (Incremental/delta scanning, SMB connectors, and external ticket
+hand-over were MVP non-goals and shipped in M5/M6 as #143, #145, and #141.)

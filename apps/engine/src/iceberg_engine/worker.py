@@ -192,6 +192,13 @@ def build_broker(redis_url: str | None = None) -> dramatiq.Broker:
         broker = StubBroker()
     broker.add_middleware(CorrelationMiddleware())
     dramatiq.set_broker(broker)
+    # The `@dramatiq.actor` decorator ran at import time and declared the actor on
+    # whatever broker existed then — dramatiq's implicit default, never this one.
+    # A worker only consumes queues declared on *its* broker, so without this
+    # re-declaration an engine starts zero consumers and every dispatched task
+    # sits in Redis forever while the fleet reads as healthy.
+    run_scan_task.broker = broker
+    broker.declare_actor(run_scan_task)
     return broker
 
 
@@ -203,7 +210,7 @@ def bootstrap(settings: EngineSettings | None = None) -> tuple[HTTPServer, drama
     "no raw env reads" invariant checkable (ADR 0007).
     """
     resolved = settings or get_engine_settings()
-    configure_logging(role="engine")
+    configure_logging(role="engine", level=resolved.log_level)
     # Before anything is consumed, because a tokenless engine cannot process a
     # single message: it boots, serves metrics, drops every task it is handed, and
     # the API's reclaim hands each one straight back to it. The fleet reads as

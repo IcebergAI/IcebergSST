@@ -249,7 +249,17 @@ class EngineClient:
         if rulepack:
             body["rulepack"] = rulepack
 
-        payload = self._request("POST", f"/engines/{self.engine_id}/heartbeat", json=body)
+        # One attempt, not the shared retry ladder: the loop beats again in a
+        # minute, so the next beat *is* the retry — and a slow-failing control
+        # plane must cost one beat, not block the thread through four 30s
+        # timeouts plus backoff, eating the "four missed beats" margin the
+        # lease arithmetic promises.
+        payload = self._request(
+            "POST",
+            f"/engines/{self.engine_id}/heartbeat",
+            json=body,
+            retry=RetryPolicy(attempts=1),
+        )
         return _parse_cancelled_ids(payload.get("cancelled_task_ids"))
 
     def lease(self, task_id: uuid.UUID) -> Lease:
@@ -283,14 +293,20 @@ class EngineClient:
     # ─── Transport ────────────────────────────────────────────────────────────
 
     def _request(
-        self, method: str, path: str, *, json: dict[str, Any] | None = None
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+        retry: RetryPolicy | None = None,
     ) -> dict[str, Any]:
         url = f"{self.base_url.rstrip('/')}/api/v1{path}"
         last_error: Exception | None = None
+        policy = retry or self.retry
 
-        for attempt in range(self.retry.attempts):
+        for attempt in range(policy.attempts):
             if attempt:
-                delay = self.retry.delay_for(attempt - 1)
+                delay = policy.delay_for(attempt - 1)
                 logger.info("engine_api_retry", path=path, attempt=attempt, delay_seconds=delay)
                 ENGINE_API_RETRIES.inc()
                 self.sleep(delay)
@@ -308,7 +324,7 @@ class EngineClient:
                 last_error = RetryableApiError(f"{type(exc).__name__}: {exc}")
 
         raise EngineApiError(
-            f"{method} {path} failed after {self.retry.attempts} attempts: {last_error}"
+            f"{method} {path} failed after {policy.attempts} attempts: {last_error}"
         ) from last_error
 
     def _send(self, method: str, url: str, json: dict[str, Any] | None) -> dict[str, Any]:
@@ -350,12 +366,13 @@ def _parse_cancelled_ids(raw: object) -> list[uuid.UUID]:
 
     This runs on the heartbeat thread, so an API that returned ``null`` or a
     non-UUID here must not raise and kill the thread — a bad entry is skipped,
-    not fatal. A wholly wrong shape is retryable, since a healthy API never sends
-    it (a proxy or a mid-deploy regression might)."""
+    not fatal. A wholly wrong shape raises: it runs after ``_request`` returned,
+    so nothing retries it — the error costs this beat and the next beat is the
+    retry."""
     if raw is None:
         return []
     if not isinstance(raw, list):
-        raise RetryableApiError("heartbeat returned a malformed cancelled_task_ids")
+        raise EngineApiError("heartbeat returned a malformed cancelled_task_ids")
     parsed: list[uuid.UUID] = []
     for value in raw:
         try:

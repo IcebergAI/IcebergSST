@@ -11,12 +11,14 @@ from dramatiq.worker import Worker
 from iceberg_connectors import registry
 from iceberg_core.config import EngineSettings
 from iceberg_core.logging import configure_logging
+from iceberg_core.tasks import SCAN_TASK_ACTOR, SCAN_TASK_QUEUE
 from iceberg_engine.worker import (
     api_client,
     bootstrap,
     build_broker,
     close_api_client,
     register_connectors,
+    run_scan_task,
 )
 from pydantic import SecretStr
 
@@ -24,6 +26,25 @@ from pydantic import SecretStr
 def test_build_broker_defaults_to_stub() -> None:
     broker = build_broker()
     assert isinstance(broker, StubBroker)
+
+
+def test_the_configured_broker_carries_the_scan_task_actor() -> None:
+    """The actor decorator ran at import time, against whatever broker existed
+    then — not the one `build_broker` makes. A worker only consumes queues
+    declared on its own broker, so if the configured broker lacks the actor the
+    engine boots "healthy" (metrics up, heartbeats reporting) while every
+    dispatched task sits in the queue forever."""
+    broker = build_broker()
+
+    assert broker.get_actor(SCAN_TASK_ACTOR) is run_scan_task
+    assert SCAN_TASK_QUEUE in broker.get_declared_queues()
+
+    consumer = Worker(broker, queues={SCAN_TASK_QUEUE}, worker_threads=1)
+    consumer.start()
+    try:
+        assert any(SCAN_TASK_QUEUE in name for name in consumer.consumers)
+    finally:
+        consumer.stop()
 
 
 def test_processed_message_logs_carry_task_id() -> None:

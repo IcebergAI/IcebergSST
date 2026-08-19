@@ -26,8 +26,10 @@ spec:
         # pepper-rotation window with `previousFingerprintPepperRef`, changes
         # nothing else in the release. Omitted when the Secret is managed out of
         # band — the chart does not render it, so this would be a constant that
-        # never moves when the Secret behind it does.
-        checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+        # never moves when the Secret behind it does. Hashed over this role's own
+        # values, not the whole rendered secrets.yaml: reissuing an *engine*
+        # token must not roll the api pods.
+        checksum/secret: {{ toYaml .Values.secrets.api | sha256sum }}
         {{- end }}
         {{- with .Values.api.podAnnotations }}
         {{- toYaml . | nindent 8 }}

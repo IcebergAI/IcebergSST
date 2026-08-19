@@ -11,17 +11,16 @@ Use Python 3.14, [uv](https://docs.astral.sh/uv/), and Docker. From a fresh chec
 make sync
 make init-env
 make check
-make docs-check
 ```
 
-`make check` is `make lint`, `make type` and `make test` — the same gate CI runs, in the same
-order. The rest of CI is reachable the same way, so nothing in the pipeline is a command you can
-only run by pushing:
+`make check` is `make lint`, `make type`, `make docs-check` and `make test` — the same gate CI
+runs, in the same order. The rest of CI is reachable the same way, so nothing in the pipeline is a
+command you can only run by pushing:
 
 | Command | What it proves | When you need it |
 |---|---|---|
-| `make check` | lint, types, and the whole test suite | always |
-| `make docs-check` | links, `make` targets, and settings the docs name still exist | always |
+| `make check` | lint, types, doc integrity, and the whole test suite | always |
+| `make docs-check` | links, `make` targets, and settings the docs name still exist | in `check`; also standalone |
 | `make version-check` | every shipped component declares the same version | before tagging |
 | `make images-verify` | both images build, serve, and hold the ADR 0002 boundary | container or dependency changes |
 | `make helm-verify` | the rendered chart carries no engine database credentials | chart changes |

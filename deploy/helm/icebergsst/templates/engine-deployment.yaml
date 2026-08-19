@@ -33,8 +33,10 @@ spec:
         {{- if not .Values.secrets.existingEngineSecret }}
         # Rotating an engine token is a Secret-only change, so without this the
         # fleet keeps authenticating with the token it started with. Same guard
-        # and same reasoning as the api Deployment.
-        checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+        # and same reasoning as the api Deployment. Hashed over this role's own
+        # values, not the whole rendered secrets.yaml: rotating an *api* secret
+        # (session key, pepper window) must not restart every engine mid-lease.
+        checksum/secret: {{ toYaml .Values.secrets.engine | sha256sum }}
         {{- end }}
         {{- with .Values.engine.podAnnotations }}
         {{- toYaml . | nindent 8 }}

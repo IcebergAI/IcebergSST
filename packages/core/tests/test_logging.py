@@ -129,6 +129,64 @@ def test_logging_does_not_mutate_caller_owned_values() -> None:
     assert attempts[0]["api_key"] == FAKE_CREDENTIAL
 
 
+def test_an_exception_log_renders_the_traceback() -> None:
+    """`logger.exception(...)` exists to diagnose a crash; without exception
+    rendering in the processor chain it emits `"exc_info": true` and silently
+    discards the type, message, and traceback."""
+    buf = io.StringIO()
+    configure_logging(role="test", stream=buf)
+    try:
+        raise ValueError("the diagnostic message")
+    except ValueError:
+        structlog.get_logger().exception("operation_failed")
+
+    raw = buf.getvalue()
+    assert "the diagnostic message" in raw
+    assert "ValueError" in raw
+    assert "Traceback" in raw
+
+
+def test_a_rendered_traceback_still_gets_the_url_scrub() -> None:
+    """The traceback is a string like any other value: a connection URL inside
+    an exception message must not carry its password into the log."""
+    buf = io.StringIO()
+    configure_logging(role="test", stream=buf)
+    try:
+        raise RuntimeError("cannot reach postgresql://user:hunter2@db.local/iceberg")
+    except RuntimeError:
+        structlog.get_logger().exception("connect_failed")
+
+    raw = buf.getvalue()
+    assert "hunter2" not in raw
+    assert "db.local" in raw
+
+
+def test_the_configured_level_filters_output() -> None:
+    """`ICEBERG_LOG_LEVEL` is documented and plumbed through compose and the
+    chart; a level that does not filter is a knob that silently does nothing."""
+    buf = io.StringIO()
+    configure_logging(role="test", stream=buf, level="WARNING")
+    logger = structlog.get_logger()
+    logger.debug("too_quiet")
+    logger.info("still_too_quiet")
+    logger.warning("loud_enough")
+
+    lines = buf.getvalue().splitlines()
+    assert [json.loads(line)["event"] for line in lines] == ["loud_enough"]
+
+
+def test_an_unknown_level_falls_back_to_info() -> None:
+    """A typo in an env var should cost verbosity accuracy, not the process."""
+    buf = io.StringIO()
+    configure_logging(role="test", stream=buf, level="VERBOSE")
+    logger = structlog.get_logger()
+    logger.debug("dropped")
+    logger.info("kept")
+
+    lines = buf.getvalue().splitlines()
+    assert [json.loads(line)["event"] for line in lines] == ["kept"]
+
+
 def test_self_referential_value_is_truncated_not_fatal() -> None:
     """A cycle must bottom out in a marker rather than blow the stack mid-log."""
     cyclic: dict[str, object] = {"host": "confluence.local"}

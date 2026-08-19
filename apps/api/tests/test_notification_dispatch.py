@@ -288,9 +288,13 @@ def test_a_reopened_finding_is_announced_again(
         FindingEvent(
             finding_id=finding.id,
             kind=FindingEventKind.REOPENED,
+            # The event's scan_id is what identifies an ingest reopen — the
+            # comment is display text, and rewording it must not silently stop
+            # reopen announcements.
+            scan_id=scan.id,
             from_value=FindingState.RESOLVED.value,
             to_value=FindingState.OPEN.value,
-            comment=f"seen again by scan {scan.id}",
+            comment="any wording at all",
         )
     )
     session.commit()
