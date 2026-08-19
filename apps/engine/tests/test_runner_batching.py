@@ -13,11 +13,13 @@ tests exist to pin that the runner reconciles them rather than assuming they agr
 import base64
 import json
 import uuid
+from collections.abc import Iterator
 from typing import Any
 
 import httpx2
 import pytest
-from iceberg_connectors import FakeConnector, FakePage, registry
+from dramatiq.middleware import TimeLimitExceeded
+from iceberg_connectors import FakeConnector, FakePage, RateLimitError, registry
 from iceberg_detect import load_named_pack
 from iceberg_engine import runner
 from iceberg_engine.api_client import EngineClient
@@ -220,6 +222,85 @@ def test_a_refused_batch_does_not_raise_out_of_the_task() -> None:
     api = Api(progress_status=503)
 
     assert run_task(TASK_ID, client=_client(api), pack=PACK) is not None
+
+
+# ─── A task-wide failure is reported by both kinds of connector ───────────────
+
+
+class _Throttled(FakeConnector):
+    """Gives out after the units it could read — a real pagination cap, a source
+    that stops answering. The units before it are still reported; what the task
+    never got to is a blind spot the manifest has to show."""
+
+    def fetch(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
+        yield from super().fetch(*args, **kwargs)
+        raise RateLimitError("retries exhausted against space DOCS")
+
+
+def _throttled(*, resumable: bool) -> Api:
+    registry.register(
+        _Throttled(spaces={"DOCS": _pages(3)}, resumable=resumable),
+        replace=True,
+    )
+    api = Api()
+    run_task(TASK_ID, client=_client(api), pack=PACK)
+    return api
+
+
+def test_a_task_wide_gap_reaches_the_api_after_the_batches_that_went_before_it() -> None:
+    """The remainder is a delta, and a scope gap has to travel in one (#193).
+
+    The gap says "this task did not read everything it was asked to", which is
+    what stops the manifest reporting a known scope size the scan never
+    established. It is recorded after the fetch ends, so a design that froze the
+    remainder while the fetch was unwinding dropped it — silently, and only for
+    connectors that batch."""
+    api = _throttled(resumable=True)
+    coverage = api.submission["coverage"]
+
+    assert api.batches, "fixture must actually batch for this to test anything"
+    assert api.submission["status"] == "failed"
+    assert coverage["scope"]["gaps"] == 1
+    assert coverage["reasons"] == [{"outcome": "scope_gap", "reason": "rate_limited", "count": 1}]
+    assert [gap["reason"] for gap in coverage["gaps"]] == ["rate_limited"]
+    # Still a delta: the pages the batches carried are not counted a second time.
+    assert coverage["counts"]["scanned"] == 1
+
+
+def test_a_failing_task_reports_the_same_gap_whether_or_not_it_batched() -> None:
+    """Two connectors, one failure, one story. Whether a source can resume is a
+    performance property of the source; it must not change what the scan says it
+    read. The counts legitimately differ — one submission is a remainder — but the
+    blind spot is the whole task's either way, down to the reference operators
+    correlate on."""
+    plain = _throttled(resumable=False).submission["coverage"]
+    batched = _throttled(resumable=True).submission["coverage"]
+
+    assert plain["scope"]["gaps"] == batched["scope"]["gaps"]
+    assert plain["reasons"] == batched["reasons"]
+    assert plain["gaps"] == batched["gaps"]
+
+
+def test_an_interrupted_batching_task_still_reports_where_it_ran_out_of_time() -> None:
+    """The time limit is a `BaseException`, submitted from its own handler — the
+    other path onto the same seam, and the one where a blind spot matters most: a
+    task killed mid-source has read some unknowable fraction of it."""
+
+    class _OutOfTime(FakeConnector):
+        def fetch(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
+            yield from super().fetch(*args, **kwargs)
+            raise TimeLimitExceeded
+
+    registry.register(_OutOfTime(spaces={"DOCS": _pages(3)}, resumable=True), replace=True)
+    api = Api()
+
+    with pytest.raises(TimeLimitExceeded):
+        run_task(TASK_ID, client=_client(api), pack=PACK)
+
+    coverage = api.submission["coverage"]
+    assert api.batches
+    assert coverage["scope"]["gaps"] == 1
+    assert coverage["reasons"] == [{"outcome": "scope_gap", "reason": "timeout", "count": 1}]
 
 
 # ─── Resuming ─────────────────────────────────────────────────────────────────
