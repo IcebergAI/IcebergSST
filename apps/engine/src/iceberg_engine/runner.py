@@ -107,13 +107,16 @@ class TaskReport:
     task_specs: list[dict[str, Any]] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
     coverage: TaskCoverage | None = None
-    #: Set when the coverage above is a *remainder* rather than the whole task —
+    #: Set when the coverage submitted is a *remainder* rather than the whole task —
     #: the rest went out in progress batches (#143). Zero means one submission
     #: carried everything, which is the ordinary case.
     checkpoint_sequence: int = 0
-    #: Overrides `coverage` when batching has already sent part of it, because a
-    #: delta cannot be expressed as a `TaskCoverage`.
-    coverage_payload: dict[str, Any] | None = None
+    #: Coverage the API already accepted in this task's batches, as a payload.
+    #: Set only when batching engaged, and what `coverage` is reported as a delta
+    #: against. Holding the baseline rather than a pre-computed delta keeps
+    #: `coverage` the whole task's tally right up to submission, so a task-wide
+    #: gap recorded after the fetch ends still reaches the API (#193).
+    sent_coverage: dict[str, Any] | None = None
     #: Where the next scan of this scope should start, if the connector said.
     cursor: dict[str, Any] | None = None
 
@@ -130,10 +133,11 @@ class TaskReport:
             submission["error"] = self.error
         if rulepack_version:
             submission["rulepack_version"] = rulepack_version
-        if self.coverage_payload is not None:
-            submission["coverage"] = self.coverage_payload
-        elif self.coverage is not None:
-            submission["coverage"] = self.coverage.as_payload()
+        if self.coverage is not None:
+            coverage = self.coverage.as_payload()
+            if self.sent_coverage is not None:
+                coverage = _coverage_delta(coverage, self.sent_coverage)
+            submission["coverage"] = coverage
         if self.cursor is not None:
             submission["cursor"] = self.cursor
         return submission
@@ -794,10 +798,12 @@ def _fetch(
                 key: value - batcher.sent_counts.get(key, 0) for key, value in counts.items()
             }
             report.counts["prefiltered"] = suppressed
-            report.coverage_payload = _coverage_delta(outcome.as_coverage(), batcher.sent_coverage)
+            report.sent_coverage = batcher.sent_coverage
         else:
             report.counts = {**counts, "prefiltered": suppressed}
-            report.coverage = outcome.coverage
+        # The whole task's coverage either way; the delta against what the batches
+        # carried is taken at submission, after any task-wide gap has been added.
+        report.coverage = outcome.coverage
         if outcome.cursor is not None:
             report.cursor = outcome.cursor.as_payload()
 

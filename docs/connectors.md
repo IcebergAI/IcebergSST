@@ -380,6 +380,13 @@ separate scope gap; connectors must not invent an object count for it. Discovery
 configured/discovered scopes without claiming that an unrestricted source exposed objects the
 credential could not enumerate.
 
+A task that gives out partway — the source stopped answering, the engine hit its time limit —
+records one task-wide scope gap of its own, on top of whatever the connector classified before
+it. That is what stops the manifest reporting a scope size the scan never established. It happens
+whether or not the connector checkpoints: a resumable connector's final submission is the
+*remainder* the batches did not carry, and the gap travels in it (#193). What a scan says it read
+must not depend on whether its source could be resumed.
+
 The engine maps connector/parser detail onto the stable public reasons in
 `iceberg_core.enums.CoverageReason` (permission denied, rate limited, size/output limits,
 unsupported/binary/empty content, invalid responses/metadata, parser timeout/failure, connector

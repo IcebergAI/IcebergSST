@@ -44,6 +44,17 @@ says is recorded beside the finding, never written onto it. Both are reversible.
 
 ### Fixed
 
+- A scan could report clean coverage for a task that died halfway through a resumable source
+  (#193). When a connector checkpoints, the engine's last submission carries only the *remainder*
+  the progress batches did not — but the task-wide gap that says "this task never finished reading
+  its scope" was written onto the whole-task tally, which that submission no longer sent. So a
+  timed-out or rate-limited fetch against Confluence, Jira or a file share left no blind spot on
+  the manifest, and a scope the scan had only partly read counted as fully enumerated. The same
+  failure against a connector without checkpoints reported the gap correctly, which is the
+  inconsistency that gave it away. The remainder is now derived at submission, after the gap is
+  recorded, so both kinds of connector tell the same story. No operator action; manifests already
+  written are not recomputed, so re-run any scan whose partial fetch you need accounted for.
+
 - Overdue escalation could stall behind findings that had nobody to escalate to (#190). A team
   configured with no channel is silent by choice, and an unowned finding no channel's filter selects
   has nowhere to go either — but neither writes an outbox row, so the "already escalated?" exclusion
