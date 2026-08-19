@@ -52,6 +52,13 @@ Telling six channels about work that has an owner is how alerting becomes noise.
 fallback exists because "late, **and** nobody has picked it up" is the state most worth saying out
 loud, and it is exactly the state with no team to tell.
 
+A finding in the silent row of that table is **excluded by the query that selects the beat's work**,
+not skipped after it. Both matter and the order is the point: a silent finding writes no outbox row,
+so "has this been escalated?" keeps answering no, and since the beat takes the oldest deadlines
+first, a handful of them would sit at the front of every page and starve everything behind them
+(#190). Deciding it in SQL costs one reading of the channel filters in the database as well as in
+Python; a test holds the two readings against each other.
+
 **Once per deadline.** The outbox row carries the `due_at` it is about, and a partial unique index
 over `(channel_id, finding_id, due_at)` enforces one escalation per deadline per channel. The
 existing constraint cannot do this: it includes `scan_id`, which is NULL on an escalation, and

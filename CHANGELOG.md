@@ -44,6 +44,15 @@ says is recorded beside the finding, never written onto it. Both are reversible.
 
 ### Fixed
 
+- Overdue escalation could stall behind findings that had nobody to escalate to (#190). A team
+  configured with no channel is silent by choice, and an unowned finding no channel's filter selects
+  has nowhere to go either — but neither writes an outbox row, so the "already escalated?" exclusion
+  kept selecting them. The beat takes the oldest deadlines first and is bounded at 200, so once that
+  many silent findings accumulated they held the front of every page and nothing behind them was
+  ever escalated. Findings with no target are now excluded by the selecting query rather than
+  skipped after it, so silence costs only the silent. No operator action: the next beat picks up
+  whatever had been starved.
+
 - A reclaimed file-share task could skip files and report the scope clean (#189). The walk handed
   a directory's own files over before descending into subdirectories that sort before them, while
   the resume comparison read the stored position as a plain string — two orders that disagree, so
