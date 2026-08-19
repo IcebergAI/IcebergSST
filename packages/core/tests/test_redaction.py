@@ -211,6 +211,52 @@ def test_a_copy_overlapping_the_target_cannot_be_bisected_by_the_left_edge() -> 
     assert not any(other[index : index + 12] in snippet for index in range(len(other) - 12))
 
 
+def test_a_copy_running_into_a_neighbours_mask_does_not_leak_its_head() -> None:
+    """A window edge is not the only edge that can bisect a copy (#188).
+
+    An unmatched copy of the secret that runs into the *side of a neighbour's
+    mask* is cut by that mask, so the context scrub — which replaces whole copies
+    — never sees it, and the part sticking out used to be emitted verbatim.
+    """
+    secret = "SECRETAAAABBBBCCCCDD"
+    text = "XX" + secret + "--------" + secret + " tail"
+    copy_start = text.rindex(secret)
+    # A neighbour matched the copy's second half, so its mask starts mid-copy.
+    neighbour = Span(copy_start + 10, copy_start + len(secret))
+
+    snippet = redact_snippet(text, Span(2, 22), other_spans=(neighbour,))
+
+    assert secret not in snippet
+    assert not any(secret[:k] in snippet for k in range(2, len(secret) + 1))
+    assert not any(secret[i : i + 6] in snippet for i in range(len(secret) - 6))
+
+
+def test_a_periodic_secret_does_not_leak_its_tail_past_its_own_mask() -> None:
+    """A secret that repeats inside itself overlaps its own match: a copy starts
+    mid-target and runs out the far side, so the target's own mask bisects it. No
+    neighbour and no window edge is involved — the seam is the match's own."""
+    secret = "abcdefghij" * 2
+    text = secret + "abcdefghij" + " tail"
+
+    snippet = redact_snippet(text, Span(0, len(secret)))
+
+    assert secret not in snippet
+    assert not any(secret[i : i + 6] in snippet for i in range(len(secret) - 6))
+
+
+def test_a_periodic_secret_does_not_leak_its_head_before_its_own_mask() -> None:
+    """The same, on the other side: the copy begins before the match and ends
+    inside it, so the head is what would have been emitted."""
+    secret = "0123456789" * 2
+    text = "lead " + "0123456789" + secret + " tail"
+    target_start = text.index(secret)
+
+    snippet = redact_snippet(text, Span(target_start, target_start + len(secret)))
+
+    assert secret not in snippet
+    assert not any(secret[i : i + 6] in snippet for i in range(len(secret) - 6))
+
+
 def test_a_match_found_elsewhere_in_the_unit_is_scrubbed_not_dropped() -> None:
     """A stray copy of a match whose own span is far outside the window is scrubbed
     from the context; the finding is redacted, not discarded by the assert."""
