@@ -335,9 +335,17 @@ somebody created last week. One task per configured root, or one for the mount.
 a different point does not orphan every finding on it (ADR 0006). It is also the `path` display
 key, which is what an analyst writes a `path_glob` suppression against.
 
-**Resuming.** The walk is sorted at every level, which is what makes a checkpoint mean "everything
-up to this path has been handed over". A reclaimed task resumes after that path and neither repeats
-nor skips (#143).
+**Resuming.** The walk hands files over in one order across the whole root — a subdirectory's
+subtree comes before the siblings that sort after it, rather than a directory's own files being
+delivered ahead of everything below it — which is what makes a checkpoint mean "everything up to
+this path has been handed over". A reclaimed task resumes after that path and neither repeats nor
+skips (#143).
+
+The stored position is compared **segment by segment**, not as a whole string: `/` sorts after `.`,
+so `"a/b" > "a.txt"` as strings while the walk yields `a/b` first, and comparing the joined keys
+would drop `a.txt` on resume (#189). Positions written by an engine that walked the earlier order
+carry checkpoint version `1`; this connector publishes `2` and discards `1`, restarting the root
+rather than resuming into an order it does not walk.
 
 **Gaps are explicit.** A permission-denied file is a *failure* (it should have been readable, so
 reconciliation must not treat its absent findings as remediated); an image or an excluded path is a

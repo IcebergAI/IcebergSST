@@ -42,6 +42,19 @@ says is recorded beside the finding, never written onto it. Both are reversible.
   setting the docs name still exists, and reads only the files git tracks — so it no longer fails
   on a contributor's unrelated local directory (#150).
 
+### Fixed
+
+- A reclaimed file-share task could skip files and report the scope clean (#189). The walk handed
+  a directory's own files over before descending into subdirectories that sort before them, while
+  the resume comparison read the stored position as a plain string — two orders that disagree, so
+  an attempt resuming from a checkpoint silently passed over whatever fell between them, and the
+  coverage manifest counted the root as fully scanned. Files and subdirectories now take one
+  order, and a position is compared segment by segment (`/` sorts after `.`, so `"a/b" > "a.txt"`
+  as strings while the walk yields `a/b` first). The file-share checkpoint version moves to `2`;
+  a `1` position names a place in the old order, so it is discarded and the root re-read. The
+  conformance kit's `assert_checkpoint_resume` — which this connector declared `CHECKPOINTS`
+  without ever running — now covers it, as it already did for Confluence and Jira.
+
 ### Security
 
 - A redacted snippet could carry a fragment of the secret it was masking (#188). An unmatched copy

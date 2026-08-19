@@ -59,7 +59,12 @@ FILESHARE_CONNECTOR_TYPE = "fileshare"
 #: Bump it when the meaning of a stored position changes — the engine discards a
 #: checkpoint whose version it does not recognise and restarts the spec, which
 #: costs a re-read, whereas misreading one costs coverage.
-FILESHARE_CHECKPOINT_VERSION = "1"
+#:
+#: ``2`` because the walk order a position is read against changed (#189): a
+#: position stored by a ``1`` engine names a place in an order this one does not
+#: walk, so resuming from it would skip files. Discarding it re-reads the root,
+#: which is the cheap half of that trade.
+FILESHARE_CHECKPOINT_VERSION = "2"
 
 #: Directory depth below a root. Past it the subtree is a recorded gap rather than
 #: a silent stop: a share with a thousand nested levels is either a mistake or a
@@ -231,7 +236,7 @@ class FileshareConnector:
             return
 
         for entry in self._walk(root, mount, config, outcome):
-            if resume_after is not None and entry.key <= resume_after:
+            if resume_after is not None and _position(entry.key) <= _position(resume_after):
                 # Already delivered by the attempt that published the checkpoint.
                 # Skipped silently rather than counted: it was covered, and
                 # counting it again would double the manifest across a reclaim.
@@ -259,7 +264,8 @@ class FileshareConnector:
         cannot walk forever.
         """
         seen: set[tuple[int, int]] = set()
-        stack: list[tuple[Path, int]] = [(root, 0)]
+        # Files as well as directories, so both take their turn in one order.
+        stack: list[_Entry | tuple[Path, int]] = [(root, 0)]
         files = 0
         try:
             # The root's identity too, or a symlink loop *back to the root* is
@@ -274,7 +280,18 @@ class FileshareConnector:
             pass
 
         while stack:
-            directory, depth = stack.pop()
+            pending = stack.pop()
+            if isinstance(pending, _Entry):
+                # A file, reached in its place in the order rather than ahead of
+                # the subdirectories that sort before it (#189).
+                files += 1
+                if files > MAX_FILES_PER_SPEC:
+                    outcome.scope_gap_for(CoverageReason.CONNECTOR_ERROR, {"root": str(root)})
+                    return
+                yield pending
+                continue
+
+            directory, depth = pending
             if depth > MAX_DEPTH:
                 outcome.skipped_for(
                     CoverageReason.UNSUPPORTED_TYPE,
@@ -320,9 +337,15 @@ class FileshareConnector:
                 entries = entries[:MAX_ENTRIES_PER_DIRECTORY]
             entries.sort(key=lambda item: item.name)
 
-            # Reversed, because the stack pops last-in-first: pushing in reverse
-            # makes the walk visit them in sorted order.
-            for item in reversed(entries):
+            # Files and subdirectories are collected together and pushed as one
+            # sorted batch, rather than files being yielded here and only
+            # directories deferred. Yielding on the spot handed every file of a
+            # directory over before anything in a subdirectory that sorts before
+            # them, which is not the order the resume comparison assumes — so a
+            # reclaimed attempt skipped whatever fell on the wrong side of it
+            # (#189).
+            children: list[_Entry | tuple[Path, int]] = []
+            for item in entries:
                 child = Path(item.path)
                 if item.is_symlink() and not config.follow_symlinks:
                     # Not an error and not a silent omission: a share full of
@@ -361,7 +384,7 @@ class FileshareConnector:
                         # the directory itself is already being covered.
                         continue
                     seen.add(identity)
-                    stack.append((resolved, depth + 1))
+                    children.append((resolved, depth + 1))
                     continue
 
                 if not stat.S_ISREG(info.st_mode):
@@ -383,11 +406,13 @@ class FileshareConnector:
                     )
                     continue
 
-                files += 1
-                if files > MAX_FILES_PER_SPEC:
-                    outcome.scope_gap_for(CoverageReason.CONNECTOR_ERROR, {"root": str(root)})
-                    return
-                yield _Entry(key=key, path=resolved, size=info.st_size)
+                children.append(_Entry(key=key, path=resolved, size=info.st_size))
+
+            # Reversed, because the stack pops last-in-first: pushing in reverse
+            # makes the walk take them in sorted order, and a subdirectory's own
+            # children land on top when it pops, so its whole subtree is walked
+            # before the siblings that sort after it.
+            stack.extend(reversed(children))
 
     def _read(
         self,
@@ -522,6 +547,19 @@ def _selected(key: str, config: ShareConfig) -> bool:
     if any(fnmatch(key, pattern) for pattern in config.exclude):
         return False
     return not config.include or any(fnmatch(key, pattern) for pattern in config.include)
+
+
+def _position(key: str) -> tuple[str, ...]:
+    """A key as the path segments the walk actually orders by.
+
+    Comparing the joined strings instead would be wrong at exactly the boundary
+    this matters on: ``/`` (0x2F) sorts after ``.`` (0x2E), so ``"a/b" > "a.txt"``
+    as strings, while the walk yields ``a/b`` first — a directory's subtree comes
+    before a sibling file whose name merely extends the directory's. Segment
+    tuples put the two in the order the walk uses, because comparing them stops
+    at the segment where the paths diverge, which is where the sort decided (#189).
+    """
+    return tuple(key.split("/"))
 
 
 def _resume_key(checkpoint: Checkpoint | None) -> str | None:
