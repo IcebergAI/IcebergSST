@@ -47,7 +47,7 @@ from iceberg_core.models import (
     Source,
 )
 from iceberg_core.secrets import SecretStore
-from sqlalchemy import func
+from sqlalchemy import ColumnElement, and_, func, or_, true
 from sqlmodel import Session, col, select
 
 from iceberg_api.findings import ownership
@@ -137,6 +137,71 @@ def channel_wants(channel: Filtered, finding: Finding) -> bool:
     ):
         return False
     return not (event_filter.source_ids and finding.source_id not in event_filter.source_ids)
+
+
+def _severities_at_or_above(minimum: Severity) -> list[Severity]:
+    """The severities a ``min_severity`` filter accepts.
+
+    Enumerated rather than compared in SQL, because the column stores the label
+    and the order is this filter's policy, not the label's.
+    """
+    return [level for level in Severity if _SEVERITY_RANK[level] >= _SEVERITY_RANK[minimum]]
+
+
+def _wanted_by(channel: Filtered) -> ColumnElement[bool]:
+    """:func:`channel_wants`, as a predicate the database can apply.
+
+    The same parsed :class:`EventFilter` drives both, so there is one filter
+    *vocabulary*; only the place it is evaluated differs, and
+    ``test_the_two_readings_of_a_channel_filter_agree`` holds the two answers
+    together rather than trusting them to stay in step.
+
+    It exists because "does this finding have anywhere to escalate to?" has to be
+    answerable *before* the limit. Answering it in Python after the page is
+    selected is what let findings with no target hold the front of the queue
+    forever (#190).
+    """
+    event_filter = EventFilter.model_validate(channel.event_filter)
+    clauses: list[ColumnElement[bool]] = []
+    if event_filter.min_severity is not None:
+        clauses.append(
+            col(Finding.severity).in_(_severities_at_or_above(event_filter.min_severity))
+        )
+    if event_filter.source_ids:
+        clauses.append(col(Finding.source_id).in_(event_filter.source_ids))
+    return and_(*clauses) if clauses else true()
+
+
+def _has_escalation_target(
+    channels: list[NotificationChannel], groups: list[OwnerGroup]
+) -> ColumnElement[bool]:
+    """Whether an overdue finding has anywhere to go — the SQL twin of
+    :func:`_escalation_targets`.
+
+    Three ways to have a target, mirroring that function: an owning team whose
+    channel is enabled; no owner at all, or a disbanded one, plus some enabled
+    channel whose filter selects the finding. A team that is silent by choice
+    matches none of them, which is the point — silence is allowed, but it must not
+    cost everybody behind them their escalation (#190).
+    """
+    enabled_channel_ids = {channel.id for channel in channels}
+    targeted = [
+        group.id
+        for group in groups
+        if not group.disabled and group.notification_channel_id in enabled_channel_ids
+    ]
+    disbanded = [group.id for group in groups if group.disabled]
+    broadcast = or_(*[_wanted_by(channel) for channel in channels])
+    return or_(
+        col(Finding.owner_group_id).in_(targeted),
+        and_(
+            or_(
+                col(Finding.owner_group_id).is_(None),
+                col(Finding.owner_group_id).in_(disbanded),
+            ),
+            broadcast,
+        ),
+    )
 
 
 def enqueue_for_scan(db: Session, scan: Scan, *, now: datetime | None = None) -> int:
@@ -243,12 +308,23 @@ def escalate_overdue(db: Session, *, now: datetime | None = None, limit: int = 2
     # Bounded, because a deployment that turns escalation on after months of
     # backlog should not try to mail its whole history in one beat; with the
     # exclusion above, each beat now takes the *next* page rather than the same one.
+    # Owner groups are teams, so there are tens of them, not millions: loading
+    # them once answers "does this finding have a target?" for the query below and
+    # saves a `db.get` per finding in the loop after it.
+    groups = list(db.exec(select(OwnerGroup)))
     overdue = list(
         db.exec(
             select(Finding)
             .where(*ownership.actionable())
             .where(col(Finding.due_at).is_not(None), col(Finding.due_at) < at)
             .where(~escalated.exists())
+            # …and has somewhere to go. A finding with no target writes no row, so
+            # the exclusion above never stops selecting it: ordered by deadline,
+            # the oldest of them hold the front of the page and everything behind
+            # them starves. Excluded here rather than skipped in Python for the
+            # same reason the exclusion above is in SQL — it has to happen before
+            # the limit (#190).
+            .where(_has_escalation_target(channels, groups))
             .order_by(col(Finding.due_at))
             .limit(limit)
         )
@@ -257,12 +333,11 @@ def escalate_overdue(db: Session, *, now: datetime | None = None, limit: int = 2
         return 0
 
     by_id = {channel.id: channel for channel in channels}
+    by_group_id = {group.id: group for group in groups}
     queued = 0
     for finding in overdue:
         group = (
-            db.get(OwnerGroup, finding.owner_group_id)
-            if finding.owner_group_id is not None
-            else None
+            by_group_id.get(finding.owner_group_id) if finding.owner_group_id is not None else None
         )
         targets = _escalation_targets(finding, group, channels, by_id)
         for channel in targets:

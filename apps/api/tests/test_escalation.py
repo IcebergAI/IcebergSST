@@ -573,3 +573,106 @@ def test_an_escalation_is_delivered_and_marked_like_any_other(
     escalation = _escalations(session)[0]
     assert escalation.status is NotificationDeliveryStatus.DELIVERED
     assert escalation.scan_id is None
+
+
+def test_a_team_with_no_channel_does_not_block_everyone_elses_escalations(
+    session: Session,
+    make_channel: Callable[..., NotificationChannel],
+    make_group: Callable[..., OwnerGroup],
+    make_finding: Callable[..., Finding],
+) -> None:
+    """A finding with no escalation target writes no row, so the SQL exclusion —
+    which asks "has this been escalated?" — never stops selecting it. Ordered by
+    deadline, the oldest silent findings hold the front of the page for good, and
+    nothing behind them is ever escalated (#190).
+
+    The team here is silent by choice, which is allowed. What is not allowed is
+    their silence costing everybody else their escalations.
+    """
+    channel = make_channel()
+    silent_team = make_group(name="no-channel-team")
+    for index in range(3):
+        make_finding(owner_group_id=silent_team.id, due_at=LATE + timedelta(minutes=index))
+    # Later deadline, so it sorts behind every silent finding above.
+    heard = make_finding(owner_group_id=None, due_at=LATE + timedelta(hours=1))
+
+    for _ in range(5):
+        dispatch.escalate_overdue(session, now=NOW, limit=2)
+        session.commit()
+
+    escalated = {delivery.finding_id for delivery in _escalations(session)}
+    assert heard.id in escalated, "a finding behind the silent ones was never escalated"
+    assert escalated == {heard.id}
+    assert [delivery.channel_id for delivery in _escalations(session)] == [channel.id]
+
+
+@pytest.mark.parametrize(
+    "event_filter",
+    [
+        {},
+        {"min_severity": "high"},
+        {"min_severity": "critical"},
+        {"source_ids": []},
+    ],
+)
+def test_the_two_readings_of_a_channel_filter_agree(
+    session: Session,
+    source: Source,
+    make_channel: Callable[..., NotificationChannel],
+    make_finding: Callable[..., Finding],
+    event_filter: dict[str, Any],
+) -> None:
+    """`channel_wants` answers for one finding in Python; `_wanted_by` answers for
+    every finding at once in SQL. They are two readings of one filter, and the
+    escalation query is only correct while they agree — so they are checked
+    against each other rather than trusted to stay in step (#190).
+    """
+    channel = make_channel(event_filter=event_filter)
+    findings = [make_finding(severity=severity) for severity in Severity]
+
+    in_python = {finding.id for finding in findings if dispatch.channel_wants(channel, finding)}
+    in_sql = set(session.exec(select(Finding.id).where(dispatch._wanted_by(channel))).all())
+
+    assert in_python == in_sql
+
+
+def test_the_two_readings_agree_on_a_source_filter(
+    session: Session,
+    source: Source,
+    make_channel: Callable[..., NotificationChannel],
+    make_finding: Callable[..., Finding],
+) -> None:
+    """The other half of the filter vocabulary, which needs a real source id."""
+    channel = make_channel(event_filter={"source_ids": [str(source.id)]})
+    wanted = make_finding()
+    other = Source(
+        name="jira-prod",
+        type=SourceType.JIRA,
+        connection={"base_url": "https://example.atlassian.net"},
+    )
+    session.add(other)
+    session.commit()
+    unwanted = Finding(
+        source_id=other.id,
+        first_seen_scan_id=wanted.first_seen_scan_id,
+        last_seen_scan_id=wanted.last_seen_scan_id,
+        fingerprint=uuid.uuid4().hex,
+        rule_id="aws-access-key",
+        rulepack_version="2026.07.1",
+        resource_locator={"path": "/browse/OPS-1"},
+        redacted_snippet="AKIA****************",
+        secret_hash=uuid.uuid4().hex,
+        severity=Severity.HIGH,
+        confidence=0.9,
+        state=FindingState.OPEN,
+        due_at=LATE,
+    )
+    session.add(unwanted)
+    session.commit()
+
+    in_python = {
+        finding.id for finding in (wanted, unwanted) if dispatch.channel_wants(channel, finding)
+    }
+    in_sql = set(session.exec(select(Finding.id).where(dispatch._wanted_by(channel))).all())
+
+    assert in_python == in_sql == {wanted.id}
