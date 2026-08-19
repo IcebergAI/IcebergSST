@@ -42,6 +42,22 @@ says is recorded beside the finding, never written onto it. Both are reversible.
   setting the docs name still exists, and reads only the files git tracks — so it no longer fails
   on a contributor's unrelated local directory (#150).
 
+### Security
+
+- A redacted snippet could carry a fragment of the secret it was masking (#188). An unmatched copy
+  of a matched secret that ran into the *side of a mask* — a neighbouring match's, or the match's
+  own where a periodic secret overlaps itself — was cut in two: the context scrub only ever
+  replaces whole copies, so the part sticking out was stored verbatim, shown in the console, and
+  sent to notification and hand-over targets. Ten contiguous characters of a matched token in the
+  reproducing case. Any such copy is now masked in full, and the bisection check that previously
+  guarded only the two window edges guards every edge that emits context.
+
+  **Operator action:** snippets already in the database were written by the old engine and are not
+  rewritten in place. Ingest refreshes a finding's snippet every time the secret is seen again, so
+  a full scan on engines carrying this fix replaces the stored snippet of every finding that still
+  exists; a finding whose secret has since been removed keeps the snippet it was stored with, and
+  is only cleared by retention or by deleting it.
+
 ## [0.1.0] — unreleased
 
 The first tagged release. Everything below is the state of the project at the point a version

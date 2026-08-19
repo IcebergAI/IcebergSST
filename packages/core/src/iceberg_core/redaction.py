@@ -19,6 +19,7 @@ password are a quarter of the password.
 """
 
 import re
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -167,8 +168,8 @@ def redact_snippet(
     # secrets and miss a clipped one. Pull each edge back past the copy so nothing
     # partial is ever emitted.
     window = _clip_to_secret_boundaries(text, window, target, secrets)
-    masked = _masked_pieces(text, target, other_spans, window, resolved)
-    snippet = "".join(masked)
+    plan = _mask_plan(text, target, other_spans, window, resolved, secrets)
+    snippet = "".join(_masked_pieces(text, plan, other_spans, window))
 
     if window.start > 0:
         snippet = _ELLIPSIS + snippet
@@ -178,7 +179,7 @@ def redact_snippet(
     # Assert on the whole snippet, then truncate: truncation can only remove
     # already-proven-safe content, never smuggle a partial secret past the check.
     _assert_no_plaintext(snippet, secrets)
-    _assert_no_bisected_secret(text, window, target, secrets)
+    _assert_no_bisected_secret(text, plan, window, secrets)
     return snippet[:MAX_SNIPPET_CHARS]
 
 
@@ -229,14 +230,19 @@ def _straddler(text: str, boundary: int, secret: str) -> tuple[int, int] | None:
     return (index, index + length) if index != -1 else None
 
 
-def _masked_pieces(
+def _mask_plan(
     text: str,
     target: Span,
     other_spans: tuple[Span, ...],
     window: Span,
     policy: RedactionPolicy,
-) -> list[str]:
-    """Walk the window, emitting collapsed context and masked secrets in order."""
+    secrets: set[str],
+) -> list[tuple[Span, str]]:
+    """Every span the snippet masks, in order, each with the mask replacing it.
+
+    One description of what is masked, used twice: to emit the snippet, and to
+    work out which stretches are emitted as context so they can be checked.
+    """
     # The target's mask wins over any overlapping neighbour, but a neighbour that
     # reaches beyond the target — a generic entropy match around a narrower
     # vendor match, say — still owns the parts outside it. Those parts are kept
@@ -253,7 +259,6 @@ def _masked_pieces(
             neighbours.append(Span(span.start, target.start))
         if span.end > target.end:
             neighbours.append(Span(target.end, span.end))
-    neighbours.sort(key=lambda span: span.start)
 
     # Neighbours are masked with the conservative default policy: this code has no
     # way to know which rule produced them, so it assumes nothing is revealable.
@@ -261,8 +266,103 @@ def _masked_pieces(
     plan += [
         (span, mask_secret(text[span.start : span.end], RedactionPolicy())) for span in neighbours
     ]
+    plan = _cover_partial_copies(text, plan, window, secrets)
     plan.sort(key=lambda item: item[0].start)
+    return plan
 
+
+def _cover_partial_copies(
+    text: str, plan: list[tuple[Span, str]], window: Span, secrets: set[str]
+) -> list[tuple[Span, str]]:
+    """Mask the half of a copy that a mask's own edge would otherwise expose (#188).
+
+    :func:`_context` scrubs *whole* copies out of the context it emits, so a copy
+    lying entirely between two masks is already covered. A copy that runs into the
+    side of a mask is not: the scrub never sees it whole, and the part sticking out
+    is emitted verbatim. That part is key material — ten characters of a matched
+    token, in the case this was written for — so it gets a mask of its own.
+
+    Masked in pieces rather than by widening the mask it touches, because the
+    target's mask reports its own length and may reveal a structural prefix, and
+    neither would still be true of a wider span.
+    """
+    if not secrets:
+        return plan
+
+    # Each round masks at least one character that was not masked before and the
+    # window is finite, so this settles; the bound is a backstop against a bug in
+    # that reasoning becoming a hung engine rather than a dropped finding.
+    for _ in range(window.end - window.start + 1):
+        covered = _merged(span for span, _ in plan)
+        additions = [
+            gap
+            for secret in secrets
+            for copy in _occurrences(text, secret, window)
+            if any(copy.overlaps(span) for span in covered)
+            for gap in _uncovered(copy, covered, window)
+        ]
+        if not additions:
+            return plan
+        plan = plan + [
+            (span, mask_secret(text[span.start : span.end], RedactionPolicy()))
+            for span in additions
+        ]
+    raise RedactionError("redaction failed: could not mask every partial copy")
+
+
+def _merged(spans: Iterable[Span]) -> list[Span]:
+    """The spans combined into non-touching ranges, in order."""
+    merged: list[Span] = []
+    for span in sorted(spans, key=lambda item: item.start):
+        if merged and span.start <= merged[-1].end:
+            merged[-1] = Span(merged[-1].start, max(merged[-1].end, span.end))
+        else:
+            merged.append(span)
+    return merged
+
+
+def _occurrences(text: str, secret: str, region: Span) -> Iterator[Span]:
+    """Every literal occurrence of ``secret`` that reaches into ``region``.
+
+    Stepping one character at a time rather than a whole length, because a
+    periodic secret overlaps itself — and the copy starting inside the match is
+    exactly the one whose tail lands in the context.
+
+    Both ends of the search are bounded. Without a stop the final ``find`` scans
+    the rest of the unit to prove there is nothing more, which on a large document
+    is a whole pass per secret per snippet.
+    """
+    start = max(0, region.start - len(secret) + 1)
+    stop = min(len(text), region.end + len(secret) - 1)
+    index = text.find(secret, start, stop)
+    while index != -1:
+        yield Span(index, index + len(secret))
+        index = text.find(secret, index + 1, stop)
+
+
+def _uncovered(copy: Span, covered: list[Span], window: Span) -> list[Span]:
+    """The parts of ``copy`` inside ``window`` that no mask already hides."""
+    gaps: list[Span] = []
+    cursor, limit = max(copy.start, window.start), min(copy.end, window.end)
+    for span in covered:
+        if span.end <= cursor:
+            continue
+        if span.start >= limit:
+            break
+        if span.start > cursor:
+            gaps.append(Span(cursor, span.start))
+        cursor = max(cursor, span.end)
+        if cursor >= limit:
+            break
+    if cursor < limit:
+        gaps.append(Span(cursor, limit))
+    return gaps
+
+
+def _masked_pieces(
+    text: str, plan: list[tuple[Span, str]], other_spans: tuple[Span, ...], window: Span
+) -> list[str]:
+    """Walk the window, emitting collapsed context and masked secrets in order."""
     # The same secret often appears more than once in a page ("same as prod: …")
     # and only one occurrence need have been matched. Scrubbing every literal
     # occurrence out of the context keeps a stray copy from riding along. Built
@@ -278,14 +378,30 @@ def _masked_pieces(
     by_length = sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True)
     ordered = tuple((secret, mask) for secret, mask in by_length if len(secret) > 1)
 
-    pieces: list[str] = []
+    return [
+        _context(text[part.start : part.end], ordered) if isinstance(part, Span) else part
+        for part in _layout(plan, window)
+    ]
+
+
+def _layout(plan: list[tuple[Span, str]], window: Span) -> list[Span | str]:
+    """The snippet's parts in order: spans to emit as context, and masks verbatim.
+
+    The one description of which stretches of the unit reach the snippet as
+    plaintext. :func:`_masked_pieces` renders it and
+    :func:`_assert_no_bisected_secret` checks it, so the check cannot come to
+    disagree with what was actually emitted.
+    """
+    parts: list[Span | str] = []
     cursor = window.start
     for span, mask in plan:
-        pieces.append(_context(text[cursor : max(cursor, span.start)], ordered))
-        pieces.append(mask)
+        if span.start > cursor:
+            parts.append(Span(cursor, span.start))
+        parts.append(mask)
         cursor = max(cursor, span.end)
-    pieces.append(_context(text[cursor : max(cursor, window.end)], ordered))
-    return pieces
+    if window.end > cursor:
+        parts.append(Span(cursor, window.end))
+    return parts
 
 
 def _context(fragment: str, replacements: tuple[tuple[str, str], ...]) -> str:
@@ -303,8 +419,10 @@ def _assert_no_plaintext(snippet: str, secrets: set[str]) -> None:
             raise RedactionError("redaction failed: snippet still contains a matched secret")
 
 
-def _assert_no_bisected_secret(text: str, window: Span, target: Span, secrets: set[str]) -> None:
-    """Defence in depth for the clip: refuse a window edge that cuts through a copy.
+def _assert_no_bisected_secret(
+    text: str, plan: list[tuple[Span, str]], window: Span, secrets: set[str]
+) -> None:
+    """Defence in depth: refuse a snippet that emits part of a copy of a secret.
 
     The whole-secret check above cannot see a bisected copy, and half of a forty-
     character token is still key material. Checking the boundary rather than the
@@ -312,16 +430,17 @@ def _assert_no_bisected_secret(text: str, window: Span, target: Span, secrets: s
     assignment prefix — legitimately recurs in the context around it, so "a long
     run of the secret appears in the snippet" would refuse honest findings.
 
-    Only edges that emit context are checked. An edge clamped to the target sits
-    against the target's mask, and nothing beyond it is emitted at all.
+    Every edge of every emitted stretch is checked, not just the window's two: a
+    copy can run into the side of a mask in the middle of the snippet as easily as
+    off the end of the window (#188). Edges that emit no context need no check —
+    text on the far side of a mask is not emitted at all.
     """
-    edges = (
-        (window.end, window.end > target.end),
-        (window.start, window.start < target.start),
-    )
-    for boundary, emits_context in edges:
-        if not emits_context:
+    for part in _layout(plan, window):
+        if not isinstance(part, Span):
             continue
-        for secret in secrets:
-            if _straddler(text, boundary, secret) is not None:
-                raise RedactionError("redaction failed: window edge cuts through a matched secret")
+        for boundary in (part.start, part.end):
+            for secret in secrets:
+                if _straddler(text, boundary, secret) is not None:
+                    raise RedactionError(
+                        "redaction failed: an emitted edge cuts through a matched secret"
+                    )
