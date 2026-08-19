@@ -28,7 +28,11 @@ from iceberg_connectors.protocol import (
     FetchOutcome,
     TaskSpec,
 )
-from iceberg_connectors.testing import ConformanceCase, assert_connector_conformance
+from iceberg_connectors.testing import (
+    ConformanceCase,
+    assert_checkpoint_resume,
+    assert_connector_conformance,
+)
 from iceberg_core.enums import CoverageReason
 
 REFERENCE_KEY = b"\x00" * 32
@@ -506,6 +510,84 @@ def test_a_file_mode_test_helper_is_not_lying(share: Path) -> None:
     assert stat.S_ISREG((share / "eng" / "deploy.sh").stat().st_mode)
 
 
+def test_a_subdirectory_that_sorts_first_is_not_skipped_on_resume(share: Path) -> None:
+    """The walk must hand files over in the order the resume comparison assumes.
+
+    Yielding a directory's own files before descending put `a/x.txt` *after*
+    `m.txt` in the stream while the comparison read it as earlier, so a reclaimed
+    attempt resuming past `m.txt` skipped it — and the manifest called the scope
+    clean, which is the worst way for this scanner to be wrong (#189).
+    """
+    root = share / "resume"
+    (root / "a").mkdir(parents=True)
+    (root / "a" / "x.txt").write_text(SENTINEL)
+    (root / "b.txt").write_text("bee")
+    (root / "m.txt").write_text("em")
+
+    units, _outcome = _fetch(FileshareConnector(), _connection(share), root="resume")
+    order = [unit.locator.resource_id for unit in units]
+
+    assert order == ["resume/a/x.txt", "resume/b.txt", "resume/m.txt"]
+    # Resuming from any point delivers exactly the remainder — nothing skipped,
+    # nothing handed over twice.
+    for index, cut in enumerate(order):
+        resumed, _ = _fetch(
+            FileshareConnector(),
+            _connection(share),
+            root="resume",
+            resume_from=Checkpoint(version=FILESHARE_CHECKPOINT_VERSION, position={"after": cut}),
+        )
+        assert [unit.locator.resource_id for unit in resumed] == order[index + 1 :]
+
+
+def test_a_subtree_resumes_before_a_sibling_file_that_extends_its_name(share: Path) -> None:
+    """The names where comparing the joined keys is wrong rather than merely ugly.
+
+    `/` (0x2F) sorts after `.` (0x2E), so `"trap/a.txt" < "trap/a/b.txt"` as
+    plain strings while the walk yields `trap/a/b.txt` first — a directory's
+    subtree comes before a sibling file whose name extends the directory's. A
+    resume comparing whole keys would read `trap/a.txt` as already delivered and
+    drop it, so the position is compared segment by segment.
+    """
+    trap = share / "trap"
+    (trap / "a").mkdir(parents=True)
+    (trap / "a" / "b.txt").write_text("bee")
+    (trap / "a.txt").write_text("ay")
+
+    units, _outcome = _fetch(FileshareConnector(), _connection(share), root="trap")
+    order = [unit.locator.resource_id for unit in units]
+    assert order == ["trap/a/b.txt", "trap/a.txt"]
+    assert "trap/a.txt" < "trap/a/b.txt"  # the trap, as plain strings
+
+    resumed, _ = _fetch(
+        FileshareConnector(),
+        _connection(share),
+        root="trap",
+        resume_from=Checkpoint(
+            version=FILESHARE_CHECKPOINT_VERSION, position={"after": "trap/a/b.txt"}
+        ),
+    )
+
+    assert [unit.locator.resource_id for unit in resumed] == ["trap/a.txt"]
+
+
+def test_a_checkpoint_from_the_previous_walk_order_is_discarded(share: Path) -> None:
+    """A position written by an engine that walked the old order names a place in
+    an order this one does not walk. Discarding it re-reads the root; trusting it
+    would skip whatever the two orders disagree about."""
+    (share / "eng" / "later.txt").write_text("later")
+
+    units, _outcome = _fetch(
+        FileshareConnector(),
+        _connection(share),
+        root="eng",
+        resume_from=Checkpoint(version="1", position={"after": "eng/deploy.sh"}),
+    )
+
+    # Restarted from the top rather than resumed: deploy.sh is delivered again.
+    assert "eng/deploy.sh" in [unit.locator.resource_id for unit in units]
+
+
 def test_the_connector_passes_the_shared_conformance_kit(share: Path) -> None:
     """The kit every connector must satisfy (`docs/connector-sdk.md`): reproducible
     discovery, distinct task identities, coverage dispositions that reconcile, and
@@ -532,6 +614,31 @@ def test_the_connector_passes_the_shared_conformance_kit(share: Path) -> None:
     metadata = payload["metadata"]
     assert isinstance(metadata, dict)
     assert metadata["connector_type"] == FILESHARE_CONNECTOR_TYPE
+
+
+def test_the_connector_passes_the_shared_checkpoint_resume_kit(share: Path) -> None:
+    """The kit's resume check, which this connector declared CHECKPOINTS without
+    ever running (#189) — Confluence and Jira both call it.
+
+    The fixture is deliberately nested and wide enough to be a real test: a spec
+    needs three units before the kit will resume from partway through, and the
+    defect it exists to catch only appears when a subdirectory sorts before a file
+    beside it.
+    """
+    nested = share / "eng" / "alpha"
+    nested.mkdir(parents=True, exist_ok=True)
+    (nested / "one.txt").write_text("one")
+    (nested / "two.txt").write_text("two")
+    (share / "eng" / "zulu.txt").write_text("zulu")
+
+    assert_checkpoint_resume(
+        ConformanceCase(
+            connector=FileshareConnector(),
+            connection=_connection(share, roots=["eng"]),
+            credential=None,
+            reference_key=REFERENCE_KEY,
+        )
+    )
 
 
 def test_an_oversized_directory_is_capped_before_it_is_materialised(
