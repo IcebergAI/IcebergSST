@@ -190,6 +190,101 @@ def test_personal_spaces_are_excluded_unless_asked_for() -> None:
     assert len(opted_in) == 2
 
 
+# ─── Space types other than `global` are still content (#191) ────────────────
+
+
+@pytest.mark.parametrize(
+    "space_type",
+    ["collaboration", "knowledge_base", "system", "onboarding", "xflow_sample_space"],
+)
+def test_a_space_that_is_not_global_is_still_discovered(space_type: str) -> None:
+    """The defect this fixes. Excluding personal spaces was implemented as asking
+    the API for `type=global`, which reads as "everything except personal" and is
+    not: the v2 enum has seven values, so five were dropped — including the two
+    Confluence's own space-creation flow offers first. A knowledge base full of
+    credentials was never read, and the scan reported clean over it.
+
+    The fixture only ever modelled `global` and `personal`, which is why the whole
+    suite passed."""
+    site = FakeConfluence(
+        spaces=[
+            Space("s1", "DOCS", "Docs"),
+            Space("s2", "KB", "Knowledge", type=space_type),
+        ]
+    )
+
+    keys = [
+        spec.params["space_key"] for spec in _connector(site).discover(site.connection, API_TOKEN)
+    ]
+
+    assert keys == ["DOCS", "KB"]
+
+
+def test_a_personal_space_is_still_excluded_by_default() -> None:
+    """The behaviour the old filter was reaching for, now decided here — the API
+    has no way to say "every type but this one"."""
+    site = FakeConfluence(
+        spaces=[Space("s1", "DOCS", "Docs"), Space("s2", "~alice", "Alice", type="personal")]
+    )
+
+    keys = [
+        spec.params["space_key"] for spec in _connector(site).discover(site.connection, API_TOKEN)
+    ]
+
+    assert keys == ["DOCS"]
+
+
+@pytest.mark.parametrize("spelling", ["PERSONAL", "Personal", " personal "])
+def test_a_personal_space_is_excluded_whatever_case_the_site_reports(spelling: str) -> None:
+    """The spec documents lower_case; the v2 API has been reported returning
+    UPPER_CASE. A comparison that trusted the documented spelling would scan every
+    user's drafts on a site that asked not to — the failure this exclusion exists
+    to prevent, arrived from the other direction."""
+    site = FakeConfluence(
+        spaces=[Space("s1", "DOCS", "Docs"), Space("s2", "~alice", "Alice", type=spelling)]
+    )
+
+    keys = [
+        spec.params["space_key"] for spec in _connector(site).discover(site.connection, API_TOKEN)
+    ]
+
+    assert keys == ["DOCS"]
+
+
+def test_a_type_this_build_has_never_heard_of_is_scanned_and_reported() -> None:
+    """Scanned, because a space type Atlassian adds after this release must not
+    become content nobody looks at — that is the hole this issue is about, and
+    excluding the unknown would reopen it from the other side. Logged, because
+    "is the new type personal-like?" is a question an operator should get to
+    answer before a coverage report raises it for them."""
+    site = FakeConfluence(
+        spaces=[Space("s1", "DOCS", "Docs"), Space("s2", "NEW", "New", type="team_workspace")]
+    )
+
+    with capture_logs() as events:
+        keys = [
+            spec.params["space_key"]
+            for spec in _connector(site).discover(site.connection, API_TOKEN)
+        ]
+
+    assert keys == ["DOCS", "NEW"]
+    warned = [event for event in events if event["event"] == "confluence_unknown_space_types"]
+    assert warned and warned[0]["types"] == ["team_workspace"]
+
+
+def test_a_personal_space_named_in_the_scope_is_scanned() -> None:
+    """Naming it *is* the deliberate decision `include_personal_spaces` otherwise
+    stands in for. Refusing would report a space that plainly exists as "not
+    found", which is the one answer that is simply untrue."""
+    site = FakeConfluence(
+        spaces=[Space("s1", "DOCS", "Docs"), Space("s2", "~alice", "Alice", type="personal")]
+    )
+
+    specs = list(_connector(site).discover(site.connection | {"spaces": ["~alice"]}, API_TOKEN))
+
+    assert [spec.params["space_key"] for spec in specs] == ["~alice"]
+
+
 def test_discovery_pages_through_every_space() -> None:
     site = FakeConfluence(
         spaces=[Space(f"s{n}", f"S{n}", f"Space {n}") for n in range(5)], page_size=2

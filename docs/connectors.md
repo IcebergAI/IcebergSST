@@ -149,6 +149,22 @@ looking correct.
 
 Personal spaces are excluded unless `include_personal_spaces` is set: they are every user's drafts,
 they dominate the space count on a large site, and scanning them should be a deliberate decision.
+A space named explicitly in `spaces` is scanned whatever its type — naming it *is* that decision.
+
+**Every other space type is in scope, and the exclusion is decided here rather than by the API**
+(#191). The v2 `GET /spaces` `type` filter takes a single value out of `global`, `collaboration`,
+`knowledge_base`, `personal`, `system`, `onboarding` and `xflow_sample_space` — so there is no
+server-side way to say "everything except personal", and asking for `global` silently dropped five
+of the seven, including the two Confluence's own space-creation flow offers first. Discovery
+therefore lists all types and drops personal ones itself, comparing case-insensitively because the
+spec documents lower_case and the API has been reported returning UPPER_CASE.
+
+A type this build does not recognise is **scanned**, and logged as
+`confluence_unknown_space_types`. A space type Atlassian adds after a release must not become
+content nobody looks at; the log line is so an operator can decide whether the new type should be
+opt-in, rather than learning it from a coverage report. The cost of listing every type is a few
+extra metadata requests per scan on a site with many personal spaces, which is the right side of
+that trade.
 
 Attachment size is checked twice — against the declared `fileSize` so an oversized file costs no
 bandwidth, and against the bytes actually arriving, because that declaration comes from the same

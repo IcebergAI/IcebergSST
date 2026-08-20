@@ -142,6 +142,10 @@ class Space:
     key: str
     name: str
     pages: list[Page] = field(default_factory=list)
+    #: One of the v2 `GET /spaces` enum. The fixture modelled only `global` and
+    #: `personal`, which is why a connector asking for `type=global` — and
+    #: thereby dropping every collaboration space and knowledge base on a real
+    #: site — passed the whole suite (#191).
     type: str = "global"
 
     def as_payload(self) -> dict[str, Any]:
@@ -251,6 +255,9 @@ class FakeConfluence:
 
     def _api(self, path: str, params: dict[str, Any]) -> httpx2.Response:
         if path == "/spaces":
+            # Single-valued upstream, so this is `==` and not a membership test:
+            # there is no server-side way to ask for "every type but one", which
+            # is the whole reason the connector filters personal spaces itself.
             wanted_type = params.get("type")
             spaces = [s for s in self.spaces if not wanted_type or s.type == wanted_type]
             return self._collection([s.as_payload() for s in spaces], path, params)
