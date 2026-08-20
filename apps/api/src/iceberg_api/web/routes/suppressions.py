@@ -18,7 +18,8 @@ from fastapi import APIRouter, Form, HTTPException, Query, Request, Response
 from iceberg_core.enums import SuppressionScope
 from pydantic import ValidationError
 
-from iceberg_api.auth.dependencies import CsrfProtected, SessionDep
+from iceberg_api.auth.dependencies import CsrfProtected, SessionDep, SettingsDep
+from iceberg_api.auth.session import read_flash
 from iceberg_api.findings import suppression_routes as api
 from iceberg_api.findings.schemas import SuppressionCreate
 from iceberg_api.pagination import DEFAULT_LIMIT
@@ -36,6 +37,7 @@ async def suppressions_page(  # filters plus the prefilled draft
     viewer: CurrentViewer,
     user: WebViewer,
     db: SessionDep,
+    settings: SettingsDep,
     source_id: Annotated[str | None, Query()] = None,
     scope: Annotated[str | None, Query()] = None,
     active: Annotated[str | None, Query()] = None,
@@ -74,7 +76,7 @@ async def suppressions_page(  # filters plus the prefilled draft
             # already chosen; the form opens on its own when it does.
             "draft": {"scope": scope or "", "pattern": pattern or "", "source_id": source_id or ""},
             "prefilled": bool(pattern),
-            "error": error,
+            "error": read_flash(error, settings),
         },
     )
 
@@ -84,6 +86,7 @@ async def create_suppression(  # one parameter per form field
     viewer: CurrentViewer,
     analyst: WebAnalyst,
     db: SessionDep,
+    settings: SettingsDep,
     scope: Annotated[str, Form()],
     pattern: Annotated[str, Form()],
     reason: Annotated[str, Form()],
@@ -105,7 +108,7 @@ async def create_suppression(  # one parameter per form field
         # Round-tripped through the URL rather than a swapped fragment: this form
         # is short, and a full reload after a create is what shows the analyst the
         # findings that just disappeared from the queue.
-        return redirect_with_error("/suppressions", exc)
+        return redirect_with_error("/suppressions", exc, settings)
 
     return hx_redirect("/suppressions")
 
@@ -115,6 +118,7 @@ async def delete_suppression(
     suppression_id: uuid.UUID,
     analyst: WebAnalyst,
     db: SessionDep,
+    settings: SettingsDep,
 ) -> Response:
     """Delete one, releasing every finding it was hiding."""
     await api.delete_suppression(suppression_id=suppression_id, analyst=analyst, db=db)

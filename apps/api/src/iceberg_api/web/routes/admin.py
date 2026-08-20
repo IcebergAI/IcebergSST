@@ -16,6 +16,7 @@ from iceberg_core.enums import NotificationChannelType, UserRole
 from pydantic import SecretStr, ValidationError
 
 from iceberg_api.auth.dependencies import CsrfProtected, SecretStoreDep, SessionDep, SettingsDep
+from iceberg_api.auth.session import read_flash
 from iceberg_api.engines.routes import list_engines, register_engine
 from iceberg_api.engines.schemas import EngineRegister
 from iceberg_api.notifications import routes as channels_api
@@ -56,7 +57,7 @@ async def engines_page(
             # A minted token is never rendered from a stored value — only from
             # the one response that carried it, in the POST below.
             "credential": None,
-            "error": error,
+            "error": read_flash(error, settings),
         },
     )
 
@@ -83,7 +84,7 @@ async def register_engine_form(
             body=EngineRegister(name=name.strip()), admin=admin, db=db
         )
     except (HTTPException, ValidationError, ValueError) as exc:
-        return redirect_with_error("/engines", exc)
+        return redirect_with_error("/engines", exc, settings)
 
     engines = await list_engines(admin=admin, db=db)
     rules = await list_rules(user=admin, db=db, settings=settings)
@@ -125,6 +126,7 @@ async def channels_page(
     viewer: CurrentViewer,
     admin: WebAdmin,
     db: SessionDep,
+    settings: SettingsDep,
     error: Annotated[str | None, Query()] = None,
 ) -> Response:
     """Where findings are announced. Admin-only, and no secret is ever rendered."""
@@ -137,7 +139,7 @@ async def channels_page(
             "channels": channels,
             "types": list(NotificationChannelType),
             "island": {"type": "webhook"},
-            "error": error,
+            "error": read_flash(error, settings),
         },
     )
 
@@ -147,6 +149,7 @@ async def create_channel(  # one parameter per form field
     admin: WebAdmin,
     db: SessionDep,
     store: SecretStoreDep,
+    settings: SettingsDep,
     name: Annotated[str, Form()],
     channel_type: Annotated[str, Form(alias="type")],
     url: Annotated[str, Form()] = "",
@@ -169,7 +172,7 @@ async def create_channel(  # one parameter per form field
         )
         await channels_api.create_channel(body=body, admin=admin, db=db, store=store)
     except (HTTPException, ValidationError, ValueError) as exc:
-        return redirect_with_error("/channels", exc)
+        return redirect_with_error("/channels", exc, settings)
     return hx_redirect("/channels")
 
 
@@ -212,6 +215,7 @@ async def users_page(
     viewer: CurrentViewer,
     admin: WebAdmin,
     db: SessionDep,
+    settings: SettingsDep,
     error: Annotated[str | None, Query()] = None,
     cursor: Annotated[str | None, Query()] = None,
 ) -> Response:
@@ -225,7 +229,7 @@ async def users_page(
             "users": page.items,
             "next_cursor": page.next_cursor,
             "roles": list(UserRole),
-            "error": error,
+            "error": read_flash(error, settings),
         },
     )
 
@@ -235,6 +239,7 @@ async def change_user(
     user_id: uuid.UUID,
     admin: WebAdmin,
     db: SessionDep,
+    settings: SettingsDep,
     role: Annotated[str, Form()],
     disabled: Annotated[str | None, Form()] = None,
     csrf_token: Annotated[str, Form()] = "",
@@ -249,7 +254,7 @@ async def change_user(
         changes = UserUpdate(role=UserRole(role), disabled=checkbox(disabled))
         await update_user(user_id=user_id, changes=changes, admin=admin, db=db)
     except (HTTPException, ValidationError, ValueError) as exc:
-        return redirect_with_error("/users", exc)
+        return redirect_with_error("/users", exc, settings)
     return hx_redirect("/users")
 
 

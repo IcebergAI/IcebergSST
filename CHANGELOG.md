@@ -65,6 +65,28 @@ says is recorded beside the finding, never written onto it. Both are reversible.
 
 ### Fixed
 
+- The last of the codebase-review follow-ups (#197), in the console and the deploy scripts:
+
+  - **A crafted link could put words in the console's chrome.** A failed save redirects carrying
+    its reason, and that reason travelled as plain query text — autoescaped, so never script, but
+    `/login?error=Your account is locked, call 555-0100` reads exactly as though this console said
+    so. It is now a signed two-minute token under the session key, and a page renders nothing for
+    anything it cannot verify. The API's own sentence still reaches the analyst.
+  - **A successful triage left the rest of the page stale.** The swap updated the panel only, so
+    the header's state chips and the Record card's assignee, owner and due date showed pre-save
+    values until somebody reloaded. It now redirects, which is what `docs/web.md` already said a
+    change spanning more than one region should do; a *rejected* triage still answers the panel,
+    because nothing moved.
+  - **The "assigned to you" tile counted one capped page** and, unlike its "unassigned" sibling,
+    did not admit the cap — so an analyst with 300 findings assigned saw a number that was simply
+    wrong. It is a query now, with the same `+` the other tiles use.
+  - **The gitleaks image is pinned by digest**, in a repository whose own invariant test requires
+    every CI action to be pinned to a commit — and that container runs with the whole repository
+    history mounted into it. The test now covers images as well as actions.
+  - **`verify-chart.sh` printed its green line even after recording failures**, and inspected only
+    the first container of each pod, so a sidecar would have walked past every hardening check.
+    Both fixed; failures now name which container.
+
 - More follow-ups from the codebase review (#197), in `packages/core` and `packages/connectors`:
 
   - **The shared pytest plugin broke minimal environments.** `iceberg-core` publishes

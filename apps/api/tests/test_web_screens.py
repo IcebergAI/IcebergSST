@@ -9,10 +9,12 @@ a credential, a webhook secret, anything derived from a detected secret — do n
 import re
 import uuid
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from iceberg_api.auth.session import issue_flash
 from iceberg_api.pagination import DEFAULT_LIMIT
 from iceberg_api.scans.coverage import failure_report
 from iceberg_api.sources.routes import get_prober
@@ -21,6 +23,7 @@ from iceberg_api.sources.schemas import (
     SUPPORTED_SOURCE_TYPES,
     ConnectivityResult,
 )
+from iceberg_api.web.routes import shell
 from iceberg_core.enums import (
     CoverageReason,
     FindingEventKind,
@@ -63,6 +66,86 @@ CONFLUENCE_FORM = {
     "include_attachments": "on",
     "enabled": "on",
 }
+
+
+def _flashed(client: TestClient, response: Any) -> str:
+    """The message an analyst actually reads after a redirect (#197).
+
+    The reason no longer travels as text in the query string — a crafted link
+    could otherwise put attacker-chosen words in the console's own chrome — so
+    the assertion follows the redirect and reads the rendered page, which is
+    what a person would see either way.
+    """
+    return client.get(response.headers["HX-Redirect"]).text
+
+
+def test_the_assigned_tile_counts_what_is_assigned_not_what_fits_on_a_page(
+    client: TestClient,
+    session: Session,
+    make_user: Callable[..., User],
+    make_finding: Callable[..., Finding],
+    login_as: Callable[[User], dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Derived from one capped page, the tile said "3" to an analyst with 300
+    open findings assigned — and unlike its `unassigned` sibling it did not even
+    admit the cap (#197). Driven with a small cap rather than 200 fixtures: the
+    defect is that the count comes from a page, so any page will show it."""
+    monkeypatch.setattr(shell, "OVERVIEW_LIMIT", 2)
+    analyst = make_user(UserRole.ANALYST)
+    headers = login_as(analyst)
+    for index in range(4):
+        finding = make_finding(fingerprint=f"{index:064d}")
+        finding.assignee_id = analyst.id
+        session.add(finding)
+    session.commit()
+
+    body = client.get("/", headers=headers).text
+    # Scoped to this tile: the open-findings tile is capped in this fixture too,
+    # so a page-wide search for "2+" would pass without the fix.
+    tile = body.split("Assigned to you", 1)[1][:200]
+
+    # The page holds two; the answer is "at least two more than that", not "2".
+    assert "2+" in tile, tile
+
+
+# ─── A message in the chrome is one this deployment signed (#197) ────────────
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/login", "/schedules", "/suppressions", "/channels", "/users", "/engines", "/ownership"],
+)
+def test_a_crafted_link_cannot_put_words_in_the_consoles_own_chrome(
+    client: TestClient,
+    path: str,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """Autoescaping stops it being script; nothing stopped it being convincing.
+    `/login?error=Your account is locked, call 555-0100` reads exactly as though
+    this console said so. The parameter now carries a signed token and a page
+    renders nothing for anything it cannot verify."""
+    login_as(make_user(UserRole.ADMIN))
+    phishing = "Your account is locked, call 555-0100"
+
+    body = client.get(path, params={"error": phishing}).text
+
+    assert phishing not in body
+    assert "555-0100" not in body
+
+
+def test_a_message_this_deployment_signed_is_shown(
+    client: TestClient, api_settings: Any, make_user: Callable[..., User], login_as: Any
+) -> None:
+    """The other half: the API's own sentence is still what the analyst reads,
+    which is why this is signed rather than replaced by an enum of codes."""
+    login_as(make_user(UserRole.ADMIN))
+    token = issue_flash("base_url: is not a valid URL", api_settings)
+
+    body = client.get("/ownership", params={"error": token}).text
+
+    assert "base_url: is not a valid URL" in body
 
 
 # ─── #55 Sources ─────────────────────────────────────────────────────────────
@@ -859,17 +942,53 @@ def test_triage_updates_the_finding_and_renders_its_new_history(
         headers=headers,
     )
 
-    assert response.status_code == 200
+    # A successful triage moves the header chips and the Record card as well as
+    # the panel, so it redirects rather than swapping one region (#197).
+    assert response.status_code == 204
+    assert response.headers["HX-Redirect"] == f"/findings/{finding.id}"
     session.refresh(finding)
     assert finding.state is FindingState.FALSE_POSITIVE
 
     events = session.exec(select(FindingEvent).where(FindingEvent.finding_id == finding.id)).all()
     kinds = {event.kind for event in events}
     assert FindingEventKind.STATE_CHANGE in kinds
-    # The history is rendered with the change that produced it.
-    assert "Example credential in the onboarding guide" in response.text
-    assert analyst.display_name in response.text
-    assert "False positive" in response.text
+    # The page the browser lands on carries the change that produced it — and,
+    # unlike the swapped fragment, the new state everywhere else too.
+    reloaded = client.get(f"/findings/{finding.id}", headers=headers).text
+    assert "Example credential in the onboarding guide" in reloaded
+    assert analyst.display_name in reloaded
+    assert "False positive" in reloaded
+
+
+def test_a_refused_triage_still_answers_the_panel_the_analyst_is_looking_at(
+    client: TestClient,
+    session: Session,
+    make_user: Callable[..., User],
+    make_finding: Callable[..., Finding],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """The other half of the redirect above. Nothing moved, so there is no stale
+    chrome to refresh — and navigating away from a rejected decision would take
+    the analyst off the panel that explains it. The state machine refuses one
+    judgement moving straight to another (ADR 0006)."""
+    headers = login_as(make_user(UserRole.ANALYST))
+    finding = make_finding(state=FindingState.FALSE_POSITIVE)
+
+    response = client.post(
+        f"/findings/{finding.id}/triage",
+        data={
+            "csrf_token": headers["X-CSRF-Token"],
+            "state": FindingState.ACCEPTED_RISK.value,
+            "comment": "relabelling in place",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert "HX-Redirect" not in response.headers
+    assert 'id="triage"' in response.text
+    session.refresh(finding)
+    assert finding.state is FindingState.FALSE_POSITIVE
 
 
 def test_an_illegal_transition_is_refused_with_its_reason_and_changes_nothing(
@@ -1029,7 +1148,7 @@ def test_an_unparseable_expiry_comes_back_as_the_sentence_the_route_wrote(
     )
 
     assert response.status_code == 204
-    assert "expires_at%20must%20be%20a%20date%20and%20time" in response.headers["HX-Redirect"]
+    assert "expires_at must be a date and time" in _flashed(client, response)
 
 
 def test_the_suppressions_pager_carries_the_filters_that_built_the_page(
@@ -1161,7 +1280,7 @@ def test_an_invalid_cron_is_refused_with_an_explanation(
     )
 
     assert response.status_code == 204
-    assert "cron" in response.headers["HX-Redirect"]
+    assert "cron" in _flashed(client, response)
 
 
 @pytest.mark.parametrize("source_id", ["", "not-a-uuid"])
@@ -1181,7 +1300,7 @@ def test_a_schedule_with_no_source_says_which_choice_is_missing(
     )
 
     assert response.status_code == 204, response.text
-    assert "choose%20a%20source" in response.headers["HX-Redirect"]
+    assert "choose a source" in _flashed(client, response)
 
 
 def test_the_schedules_pager_carries_the_source_filter(

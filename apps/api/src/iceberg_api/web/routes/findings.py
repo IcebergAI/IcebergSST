@@ -48,7 +48,12 @@ from iceberg_api.sources.routes import list_sources
 from iceberg_api.users.routes import list_users
 from iceberg_api.web.dependencies import CurrentViewer, WebAnalyst, WebViewer
 from iceberg_api.web.forms import error_text, optional
-from iceberg_api.web.templating import id_or_none, render_fragment, render_page
+from iceberg_api.web.templating import (
+    hx_redirect,
+    id_or_none,
+    render_fragment,
+    render_page,
+)
 
 router = APIRouter(include_in_schema=False)
 
@@ -221,7 +226,6 @@ async def triage(  # one parameter per form field
     to be expressible or an analyst could not save a comment without also taking
     the routing decision away from the rules.
     """
-    error = None
     try:
         # Inside the try because ``FindingState(state)`` is a parse of a posted
         # string: a stale form or a hand-made request is a rejected decision the
@@ -251,12 +255,20 @@ async def triage(  # one parameter per form field
     except (HTTPException, ValidationError, ValueError) as exc:
         # A 409 is the state machine refusing a move between judgements, and
         # nothing else in the request was applied either. Show the finding as it
-        # actually is, with the reason above it.
-        error = error_text(exc)
+        # actually is, with the reason above it — as a fragment, because the
+        # analyst's context is this panel and a reload would take them away
+        # from it.
         finding = await api.read_finding(finding_id=finding_id, user=analyst, db=db)
+        context = await _detail_context(finding, analyst, db)
+        return render_fragment(request, "triage.html", viewer, context | {"error": error_text(exc)})
 
-    context = await _detail_context(finding, analyst, db)
-    return render_fragment(request, "triage.html", viewer, context | {"error": error})
+    # A successful triage changes more than this panel: the header's state chips
+    # and the Record card's assignee, owner and due date all move with it. The
+    # convention for a change bigger than one region is to redirect and let the
+    # browser navigate (docs/web.md § HTMX conventions) — swapping `#triage`
+    # alone left the rest of the page showing the values from before the save
+    # until somebody reloaded (#197).
+    return hx_redirect(f"/findings/{finding_id}")
 
 
 async def _detail_context(finding: Any, user: Any, db: Any) -> dict[str, Any]:

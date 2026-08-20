@@ -17,7 +17,8 @@ from fastapi import APIRouter, Form, HTTPException, Query, Request, Response
 from iceberg_core.enums import Severity
 from pydantic import ValidationError
 
-from iceberg_api.auth.dependencies import CsrfProtected, SessionDep
+from iceberg_api.auth.dependencies import CsrfProtected, SessionDep, SettingsDep
+from iceberg_api.auth.session import read_flash
 from iceberg_api.ownership import routes as api
 from iceberg_api.ownership.schemas import (
     OwnerGroupCreate,
@@ -41,6 +42,7 @@ async def ownership_page(
     viewer: CurrentViewer,
     admin: WebAdmin,
     db: SessionDep,
+    settings: SettingsDep,
     error: Annotated[str | None, Query()] = None,
 ) -> Response:
     """Who owns what, what routes it there, and how long they have.
@@ -66,7 +68,7 @@ async def ownership_page(
             "group_names": {group.id: group.name for group in groups},
             "source_names": {source.id: source.name for source in sources.items},
             "severities": list(Severity),
-            "error": error,
+            "error": read_flash(error, settings),
         },
     )
 
@@ -78,6 +80,7 @@ async def ownership_page(
 async def create_group(
     admin: WebAdmin,
     db: SessionDep,
+    settings: SettingsDep,
     name: Annotated[str, Form()],
     description: Annotated[str, Form()] = "",
     csrf_token: Annotated[str, Form()] = "",
@@ -89,7 +92,7 @@ async def create_group(
             db=db,
         )
     except (HTTPException, ValidationError, ValueError) as exc:
-        return redirect_with_error("/ownership", exc)
+        return redirect_with_error("/ownership", exc, settings)
     return hx_redirect("/ownership")
 
 
@@ -98,6 +101,7 @@ async def set_group_state(
     group_id: uuid.UUID,
     admin: WebAdmin,
     db: SessionDep,
+    settings: SettingsDep,
     disabled: Annotated[str, Form()] = "",
     csrf_token: Annotated[str, Form()] = "",
 ) -> Response:
@@ -116,17 +120,19 @@ async def set_group_state(
             db=db,
         )
     except (HTTPException, ValidationError, ValueError) as exc:
-        return redirect_with_error("/ownership", exc)
+        return redirect_with_error("/ownership", exc, settings)
     return hx_redirect("/ownership")
 
 
 @router.delete("/ownership/groups/{group_id}", dependencies=[CsrfProtected])
-async def delete_group(group_id: uuid.UUID, admin: WebAdmin, db: SessionDep) -> Response:
+async def delete_group(
+    group_id: uuid.UUID, admin: WebAdmin, db: SessionDep, settings: SettingsDep
+) -> Response:
     """Delete a group. A 409 (it still owns findings) is shown, not swallowed."""
     try:
         await api.delete_owner_group(group_id=group_id, admin=admin, db=db)
     except (HTTPException, ValidationError, ValueError) as exc:
-        return redirect_with_error("/ownership", exc)
+        return redirect_with_error("/ownership", exc, settings)
     return hx_redirect("/ownership")
 
 
@@ -137,6 +143,7 @@ async def delete_group(group_id: uuid.UUID, admin: WebAdmin, db: SessionDep) -> 
 async def create_rule(  # one parameter per form field
     admin: WebAdmin,
     db: SessionDep,
+    settings: SettingsDep,
     name: Annotated[str, Form()],
     owner_group_id: Annotated[str, Form()],
     priority: Annotated[str, Form()] = "100",
@@ -165,7 +172,7 @@ async def create_rule(  # one parameter per form field
             db=db,
         )
     except (HTTPException, ValidationError, ValueError) as exc:
-        return redirect_with_error("/ownership", exc)
+        return redirect_with_error("/ownership", exc, settings)
     return hx_redirect("/ownership")
 
 
@@ -174,6 +181,7 @@ async def set_rule_state(
     rule_id: uuid.UUID,
     admin: WebAdmin,
     db: SessionDep,
+    settings: SettingsDep,
     enabled: Annotated[str, Form()] = "",
     csrf_token: Annotated[str, Form()] = "",
 ) -> Response:
@@ -186,16 +194,18 @@ async def set_rule_state(
             db=db,
         )
     except (HTTPException, ValidationError, ValueError) as exc:
-        return redirect_with_error("/ownership", exc)
+        return redirect_with_error("/ownership", exc, settings)
     return hx_redirect("/ownership")
 
 
 @router.delete("/ownership/rules/{rule_id}", dependencies=[CsrfProtected])
-async def delete_rule(rule_id: uuid.UUID, admin: WebAdmin, db: SessionDep) -> Response:
+async def delete_rule(
+    rule_id: uuid.UUID, admin: WebAdmin, db: SessionDep, settings: SettingsDep
+) -> Response:
     try:
         await api.delete_routing_rule(rule_id=rule_id, admin=admin, db=db)
     except (HTTPException, ValidationError, ValueError) as exc:
-        return redirect_with_error("/ownership", exc)
+        return redirect_with_error("/ownership", exc, settings)
     return hx_redirect("/ownership")
 
 
@@ -206,6 +216,7 @@ async def delete_rule(rule_id: uuid.UUID, admin: WebAdmin, db: SessionDep) -> Re
 async def set_targets(  # one parameter per severity
     admin: WebAdmin,
     db: SessionDep,
+    settings: SettingsDep,
     critical: Annotated[str, Form()] = "",
     high: Annotated[str, Form()] = "",
     medium: Annotated[str, Form()] = "",
@@ -236,5 +247,5 @@ async def set_targets(  # one parameter per severity
                 db=db,
             )
     except (HTTPException, ValidationError, ValueError) as exc:
-        return redirect_with_error("/ownership", exc)
+        return redirect_with_error("/ownership", exc, settings)
     return hx_redirect("/ownership")
