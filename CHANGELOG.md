@@ -44,6 +44,17 @@ says is recorded beside the finding, never written onto it. Both are reversible.
 
 ### Fixed
 
+- A draining engine never finished shutting down (#192). `Worker.stop()` waits ten minutes by
+  default and both grace periods this project ships are two, so an engine with a long fetch in
+  flight was still waiting when SIGKILL arrived: the heartbeat, the API connection pool and the
+  metrics server were never stopped, and `engine_stopped` never appeared in the log. The wait is
+  now bounded by `ICEBERG_DRAIN_SECONDS` (default 90), which a deploy invariant holds below both
+  graces, and a task still running when the budget expires is named in an
+  `engine_drain_incomplete` warning before the engine goes. The drain policy — wait, then let the
+  lease hand the work to another engine rather than reporting a terminal failure — is written down
+  in [`docs/deployment.md`](./docs/deployment.md) § Draining an engine, along with why the
+  alternative was rejected.
+
 - A scan could report clean coverage for a task that died halfway through a resumable source
   (#193). When a connector checkpoints, the engine's last submission carries only the *remainder*
   the progress batches did not — but the task-wide gap that says "this task never finished reading

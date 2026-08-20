@@ -154,10 +154,12 @@ services:
       ICEBERG_ENGINE_TOKEN: ${ICEBERG_ENGINE_TOKEN:-}
       ICEBERG_WORKER_THREADS: ${ICEBERG_WORKER_THREADS:-4}
     # Matches terminationGracePeriodSeconds in the chart, and for the same
-    # reason: worker.py catches SIGTERM and finishes the task it has leased.
-    # Docker's default of 10s would SIGKILL a fetch in progress and leave the
-    # scan waiting out its 300s lease before anything reclaims it — so `make
-    # down` is only the clean shutdown the worker promises with this set.
+    # reason: worker.py catches SIGTERM and waits ICEBERG_DRAIN_SECONDS (90s) for
+    # the tasks it already holds. Docker's default of 10s would SIGKILL a fetch in
+    # progress and leave the scan waiting out its 300s lease before anything
+    # reclaims it — so `make down` is only the clean shutdown the worker promises
+    # with this set. It must stay *longer* than the drain budget, or the wait is
+    # killed before the heartbeat, the API pool and the metrics server are stopped.
     stop_grace_period: 120s
     depends_on:
       redis:

@@ -1,7 +1,10 @@
 import io
 import json
 import socket
+import threading
 import urllib.request
+import uuid
+from time import monotonic
 
 import dramatiq
 import pytest
@@ -13,14 +16,17 @@ from iceberg_core.config import EngineSettings
 from iceberg_core.logging import configure_logging
 from iceberg_core.tasks import SCAN_TASK_ACTOR, SCAN_TASK_QUEUE
 from iceberg_engine.worker import (
+    TASKS,
     api_client,
     bootstrap,
     build_broker,
     close_api_client,
+    drain,
     register_connectors,
     run_scan_task,
 )
 from pydantic import SecretStr
+from structlog.testing import capture_logs
 
 
 def test_build_broker_defaults_to_stub() -> None:
@@ -149,6 +155,53 @@ def test_shutdown_closes_the_shared_client() -> None:
 
     assert client._http.is_closed
     close_api_client()  # a shutdown path may run twice
+
+
+def test_a_drain_gives_up_on_a_long_task_rather_than_outliving_its_grace() -> None:
+    """The bug this budget exists for (#192).
+
+    Dramatiq's `Worker.stop()` waits ten minutes by default. Every grace period
+    this project ships is two, so a fetch still running at SIGTERM held the wait
+    until SIGKILL — and the heartbeat, the API pool and the metrics server were
+    never stopped. The wait is now bounded, and the task it gives up on is named
+    so an operator can see which scan is about to sit on a lease.
+    """
+    broker = build_broker()
+    running, release = threading.Event(), threading.Event()
+    task_id = uuid.uuid4()
+
+    @dramatiq.actor(broker=broker, queue_name="drain-test")
+    def slow_task() -> None:
+        with TASKS.holding(task_id):
+            running.set()
+            release.wait(timeout=30)
+
+    slow_task.send()
+    consumer = Worker(broker, queues={"drain-test"}, worker_timeout=50)
+    consumer.start()
+    try:
+        assert running.wait(timeout=5), "the fixture task never started"
+        started = monotonic()
+        with capture_logs() as events:
+            abandoned = drain(consumer, 0.25)
+        elapsed = monotonic() - started
+    finally:
+        release.set()
+
+    assert abandoned == [task_id]
+    assert elapsed < 5, f"the drain waited {elapsed:.1f}s on a 0.25s budget"
+    assert [event for event in events if event["event"] == "engine_drain_incomplete"]
+
+
+def test_a_drain_returns_as_soon_as_the_work_is_done() -> None:
+    """The budget is a ceiling, not a delay: the ordinary drain finds nothing in
+    flight and must not spend the grace period waiting to discover that."""
+    consumer = Worker(build_broker(), queues={SCAN_TASK_QUEUE}, worker_timeout=50)
+    consumer.start()
+    started = monotonic()
+
+    assert drain(consumer, 30.0) == []
+    assert monotonic() - started < 5
 
 
 def test_the_shipped_connectors_are_registered() -> None:

@@ -176,6 +176,37 @@ JSONB, `postgresql_where` partial indexes, or an `ALTER` that SQLite only surviv
 table. A revision that is valid in one dialect and not the other fails there rather than in the
 pre-upgrade `Job`.
 
+## Draining an engine
+
+A rolling deploy, `make down`, or a `kubectl delete pod` sends SIGTERM to an engine that may be
+halfway through a fetch. What it does then is a policy, and the policy is: **wait, then hand the
+work back to the lease** (#192).
+
+1. Dramatiq stops handing messages to worker threads. A thread that finishes its task exits rather
+   than taking another, and messages already pulled into the local queue go back to Redis.
+2. The process waits up to `ICEBERG_DRAIN_SECONDS` (default 90) for the tasks it *already holds*.
+   Most finish inside it.
+3. Anything still running when the budget expires is abandoned. The API reclaims it when its 300s
+   lease lapses and hands it to another engine, which — for Confluence, Jira and file shares —
+   resumes from the last checkpoint the old engine flushed rather than re-reading the scope.
+   The engine logs `engine_drain_incomplete` naming those tasks first.
+4. The heartbeat stops, the API connection pool closes, the metrics server stops, and the process
+   logs `engine_stopped`.
+
+Step 4 is why the budget matters: it has to be **shorter than the termination grace period**
+(`stop_grace_period` in compose, `terminationGracePeriodSeconds` in the chart — both 120s), or
+SIGKILL lands mid-wait and none of it runs. A test holds the default against both.
+
+An abandoned task is not failed. An engine may only report a task `completed` or `failed`, and a
+failed task is terminal — never reclaimed, and it makes its scan `partial`, which may not
+auto-resolve findings (ADR 0009 §4). Interrupting in-flight work to report it would trade one
+lease TTL of latency for a scan that cannot close a secret somebody has already fixed, on every
+deploy that lands mid-scan. Waiting costs latency instead, and keeps lease expiry the single
+re-delivery authority (ADR 0009 §2).
+
+Raise `ICEBERG_DRAIN_SECONDS` **and** both grace periods together if your fetches routinely run
+longer than the budget; raising one without the other only moves where the work is lost.
+
 ## Scaling model
 - Throughput scales by adding **engine** replicas — more Dramatiq consumers pulling scan tasks
   from Redis.

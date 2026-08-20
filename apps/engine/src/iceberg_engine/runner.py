@@ -575,11 +575,16 @@ def run_task(
         log.warning("scan_task_connector_failed", error=report.error)
         ENGINE_CONNECTOR_FAILURES.labels(source_type=lease.source_type).inc()
     except Interrupt as exc:
-        # Dramatiq's time limit and its shutdown both raise a `BaseException`, so
-        # neither handler here sees one and the task would end without reporting —
-        # leaving the API to wait out the lease and redeliver a task that will be
-        # interrupted at exactly the same point (#106). Report what the fetch got
-        # through, then let the interrupt go on killing the thread it was raised in.
+        # Dramatiq's time limit raises a `BaseException`, so neither handler here
+        # sees one and the task would end without reporting — leaving the API to
+        # wait out the lease and redeliver a task that will be interrupted at
+        # exactly the same point (#106). Report what the fetch got through, then
+        # let the interrupt go on killing the thread it was raised in.
+        #
+        # A drain does *not* arrive here: `notify_shutdown` is deliberately unset,
+        # so a shutdown never interrupts an actor and an abandoned task goes back
+        # through lease expiry instead of reporting a terminal failure. See
+        # `iceberg_engine.worker.drain` for why (#192).
         report.status = "failed"
         report.error = type(exc).__name__
         _record_task_gap(report, lease, CoverageReason.TIMEOUT, connector)
