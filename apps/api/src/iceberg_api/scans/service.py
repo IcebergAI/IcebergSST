@@ -691,8 +691,16 @@ def cancel_scan(db: Session, scan: Scan, *, now: datetime | None = None) -> Scan
     replacing that with a zero-count failure report made a cancelled scan's
     manifest say the task read nothing, which is both false and the opposite of
     what a manifest is for.
+
+    Merging is a read-modify-write, so it needs the same scan lock the engine's
+    two writers take before they touch a task of this scan. Without it a progress
+    submission landing between the read and the write would have its coverage
+    overwritten by a report merged from the snapshot before it — reintroducing the
+    loss in a narrower window. Scan first, then the task rows, which is the order
+    ``submit_progress`` and ``submit_results`` both take (#197).
     """
     at = now or datetime.now(UTC)
+    db.exec(select(Scan).where(col(Scan.id) == scan.id).with_for_update()).one_or_none()
     for task in db.exec(
         select(ScanTask).where(
             col(ScanTask.scan_id) == scan.id,

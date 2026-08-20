@@ -18,6 +18,7 @@ import pytest
 from conftest import RecordingDispatcher
 from fastapi.testclient import TestClient
 from iceberg_api.engines import routes as engine_routes
+from iceberg_api.scans import service as scan_service
 from iceberg_core.enums import ScanTaskKind, ScanTaskStatus
 from iceberg_core.models import Engine, Finding, FindingEvent, ScanTask
 from iceberg_core.secrets import EnvKeyBackend
@@ -415,3 +416,24 @@ def test_both_submission_paths_lock_the_scan_before_the_task(handler: str) -> No
     )
 
     assert scan_lock < task_write, f"{handler} locks the task before the scan"
+
+
+def test_cancellation_takes_the_same_scan_lock_before_it_merges() -> None:
+    """The third writer of a task's coverage, and the one that reads it first.
+
+    `cancel_scan` merges the cancellation gap onto what each task already
+    reported, which is a read-modify-write: a progress submission landing between
+    its read and its write would have its coverage overwritten by a report merged
+    from the snapshot before it. Same lock, same order, same reason (#197).
+    """
+    tree = ast.parse(Path(scan_service.__file__).read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "cancel_scan"
+    )
+
+    scan_lock = _statement_index(function, "with_for_update")
+    task_read = _statement_index(function, "cancelled_report")
+
+    assert scan_lock < task_read, "cancel_scan reads task coverage before locking the scan"
