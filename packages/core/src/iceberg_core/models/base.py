@@ -76,11 +76,28 @@ def enum_type[EnumT: StrEnum](enum_class: type[EnumT], *, name: str) -> Any:
 
     ``native_enum=False`` is deliberate. Native Postgres enum types make adding
     a value a schema migration with table locks; a bare VARCHAR makes it a code
-    change, and behaves identically on SQLite. Validation is bind-time only
-    (``validate_strings=True``) — SQLAlchemy emits no CHECK constraint here
-    (``create_constraint`` defaults to false), so an out-of-band write can store
-    a value the enum does not know. The trade is deliberate: vocabulary lives in
-    code, and the API is the only writer of record.
+    change, and behaves identically on SQLite.
+
+    **No CHECK constraint, decided rather than defaulted** (#197). SQLAlchemy
+    would emit one under ``create_constraint=True``; ``validate_strings=True``
+    gives bind-time validation only, so an out-of-band write can put a value in
+    the column that the enum does not know. Three things settle it:
+
+    * A CHECK reintroduces exactly the cost ``native_enum=False`` was chosen to
+      avoid. Adding a value becomes DROP CONSTRAINT / ADD CONSTRAINT — a table
+      scan under an ACCESS EXCLUSIVE lock on Postgres — which is the native enum's
+      pain spelled differently.
+    * It defends against a writer this architecture says does not exist. Only the
+      API writes (ADR 0002), so "out of band" means someone holding the database
+      credentials directly — and they can drop the constraint as easily as they
+      can violate it. It stops a typo in a manual UPDATE, not an adversary.
+    * The value could never be *believed* anyway. Reading an unknown one raises
+      ``LookupError`` naming the column's enum and its legal values, so the
+      failure is loud and immediate rather than a wrong answer. That property is
+      what the trade rests on, so ``packages/core/tests/test_enum_columns.py``
+      pins it.
+
+    Vocabulary lives in code; the database stores what the code wrote.
     """
     return SAEnum(
         enum_class,

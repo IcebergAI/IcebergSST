@@ -11,8 +11,20 @@ from typing import Any
 import pytest
 from iceberg_connectors import ConformanceCase, assert_connector_conformance
 from iceberg_connectors.jira import JiraConnector
-from iceberg_connectors.jira.connector import MAX_HISTORY_ENTRIES
-from iceberg_connectors.protocol import ConnectorError, CredentialError, FetchOutcome, TaskSpec
+from iceberg_connectors.jira.connector import (
+    JIRA_CHECKPOINT_VERSION,
+    MAX_HISTORY_ENTRIES,
+    _jql,
+    _resume_point,
+    _watermark,
+)
+from iceberg_connectors.protocol import (
+    Checkpoint,
+    ConnectorError,
+    CredentialError,
+    FetchOutcome,
+    TaskSpec,
+)
 from iceberg_connectors.units import GLOB_FRIENDLY_KEYS
 from jira_server import (
     API_TOKEN,
@@ -162,6 +174,70 @@ def test_a_malformed_project_key_fails_closed_rather_than_reaching_jql() -> None
 
     with pytest.raises(ConnectorError, match="malformed or duplicate"):
         list(_connector(site).discover(_connection(), API_TOKEN))
+
+
+# ─── Instants spliced into JQL come from stored state (#197) ─────────────────
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        '2026-01-01 00:00" OR project = "OPS',
+        '" OR issuekey = "ENG-1',
+        "2026-01-01",
+        "not a date",
+        12345,
+    ],
+)
+def test_a_window_bound_that_is_not_a_jql_instant_is_dropped(hostile: object) -> None:
+    """The bound arrives on the lease and the resume point on the checkpoint —
+    both round-trip through the API's database after this connector writes them,
+    and both are spliced into a *quoted* literal, where a `"` ends the literal
+    and changes the query rather than failing it. An `isinstance(str)` was the
+    whole check.
+
+    Dropped rather than fatal: the query widens, so the worst case is re-reading
+    issues that dedupe on their fingerprint."""
+    query = _jql("ENG", {"field": "created", "from": hostile})
+
+    assert query == 'project = "ENG" ORDER BY created ASC'
+
+
+def test_a_well_formed_bound_still_reaches_the_query() -> None:
+    query = _jql("ENG", {"field": "created", "from": "2026-01-01 00:00", "to": "2026-02-01 00:00"})
+
+    assert query == (
+        'project = "ENG" AND created >= "2026-01-01 00:00" '
+        'AND created < "2026-02-01 00:00" ORDER BY created ASC'
+    )
+
+
+def test_an_unusable_resume_instant_falls_back_to_the_window(caplog: Any) -> None:
+    """Not to nothing: the window's own bound is still good, and losing it would
+    re-read the whole project rather than the tail of it."""
+    query = _jql(
+        "ENG",
+        {"field": "created", "from": "2026-01-01 00:00"},
+        resume_from='2026-01-15 09:00" OR project = "OPS',
+    )
+
+    assert query == 'project = "ENG" AND created >= "2026-01-01 00:00" ORDER BY created ASC'
+
+
+def test_a_checkpoint_carrying_an_unusable_instant_restarts_the_spec() -> None:
+    """Same rule the connector already applies to a checkpoint version it does not
+    know: unusable is not empty, so the spec is read again from the top."""
+    hostile = Checkpoint(
+        version=JIRA_CHECKPOINT_VERSION,
+        position={"at": '2026-01-01 00:00" OR x = "', "seen": ["1"], "field": "created"},
+    )
+
+    assert _resume_point(hostile, {"field": "created"}) is None
+
+
+def test_a_cursor_carrying_an_unusable_watermark_scans_the_full_window() -> None:
+    assert _watermark({"ENG": {"updated": 'x" OR y = "'}}, "ENG") == ""
+    assert _watermark({"ENG": {"updated": "2026-01-01 00:00"}}, "ENG") == "2026-01-01 00:00"
 
 
 def test_archived_projects_are_out_of_scope_unless_asked_for() -> None:

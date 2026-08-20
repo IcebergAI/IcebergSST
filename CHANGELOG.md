@@ -65,6 +65,28 @@ says is recorded beside the finding, never written onto it. Both are reversible.
 
 ### Fixed
 
+- More follow-ups from the codebase review (#197), in `packages/core` and `packages/connectors`:
+
+  - **The shared pytest plugin broke minimal environments.** `iceberg-core` publishes
+    `iceberg_core.testing` under `pytest11`, so pytest imports it in every environment where the
+    package is installed — including one with the engine's dependency shape, where the ORM is
+    deliberately absent (ADR 0002) and the import failed at collection. The database imports are
+    guarded; the fixtures skip with a sentence saying what to install.
+  - **Jira spliced instants from stored state into quoted JQL literals** with only an
+    `isinstance(str)` check. A discovery window's bounds, a resume point and a stored watermark all
+    round-trip through the database, and a `"` in one would close the literal and change the query.
+    Each is now checked against the single shape the connector writes; an unusable value is dropped
+    and the query widens.
+  - **Support code that had been copied into each connector is shared.** `LazySandbox` was
+    byte-identical in two of them, and the extraction-outcome mapping was in all three — where it
+    had already drifted: a compression bomb was a `size_limit` on a file share and a `parse_error`
+    in Confluence and Jira. It is a `size_limit` everywhere now.
+  - **The enum CHECK-constraint question is decided, not left open**: no constraint. It would make
+    adding a value a locking migration again — the thing `native_enum=False` was chosen to avoid —
+    while defending only against a writer holding the database credentials, who could drop it as
+    easily as violate it. What makes that safe is that an unknown value cannot be *believed*:
+    reading one raises, naming the column's vocabulary, and a test pins that.
+
 - Four follow-ups from the codebase review (#197), all on the API:
 
   - **A duplicate name raced to a 500.** Sources, notification channels, hand-over targets, owner

@@ -255,6 +255,12 @@ space-shaped, so a 403 there means the credential.)
   scan belongs to the next one. Archived projects are requested explicitly rather than filtered out
   of the response, because Jira's project search returns live projects only by default.
 - Issue history is capped per issue; the remainder is reported as a scope gap.
+- Every instant this connector splices into a JQL literal — a discovery window's bounds, a resume
+  point, a stored watermark — is checked against the one shape it writes
+  (`YYYY-MM-DD HH:MM`) before it is used. All three arrive from stored state, and a `"` in one
+  would close the literal rather than fail the query. An unusable value is dropped, which widens
+  the query: re-reading costs a duplicate that dedupes on its fingerprint, and the alternative
+  costs coverage.
 - Custom fields are not scanned. Only `summary`, `description`, `environment`, comments,
   attachments, and (opt-in) field history are.
 - There is no free-text JQL option, by design: operator-authored query text spliced into the scan's
@@ -393,7 +399,11 @@ The engine maps connector/parser detail onto the stable public reasons in
 `iceberg_core.enums.CoverageReason` (permission denied, rate limited, size/output limits,
 unsupported/binary/empty content, invalid responses/metadata, parser timeout/failure, connector
 error, cancellation, and unreported legacy evidence). Parser enum values and exception messages do
-not cross this boundary.
+not cross this boundary. **One table does that mapping**, in `extraction.coverage_reason`, beside
+the outcomes it translates — a per-connector copy is how a compression bomb came to be a
+`size_limit` on a file share and a `parse_error` in Confluence (#197). It is a `size_limit` now
+everywhere: `REJECTED_*` is a decision about how big something would become, `FAILED_*` is
+something that broke.
 
 Skipped and failed objects receive a deterministic HMAC reference under the task's fingerprint
 pepper. This makes the same gap correlatable between manifests without exporting its page id,

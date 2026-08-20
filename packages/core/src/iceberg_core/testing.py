@@ -7,18 +7,47 @@ boilerplate. Importing it outside a test run is not intended.
 The database fixtures are SQLite-backed: fast, hermetic, and enough to exercise
 the models and queries. Postgres-specific behaviour (partial indexes, JSONB
 operators) is covered by the migration tests and by the compose stack.
+
+**The ORM imports are guarded, and that is not defensiveness** (#197). A
+``pytest11`` plugin is auto-loaded by *every* pytest run in an environment where
+this package is installed — including one carrying the engine's dependency shape,
+which is plain ``iceberg-core`` with no ``db`` extra and therefore no SQLAlchemy
+at all (ADR 0002). An unguarded import there fails at collection, before any test
+has run, in a package that deliberately does not depend on the thing it needs.
+So the module always imports, and the database fixtures skip with a sentence
+saying what to install. Nothing silently passes: a test that asked for a session
+and did not get one is reported as skipped, not green.
 """
 
 import secrets
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
-from sqlalchemy import Engine, StaticPool
-from sqlmodel import Session, SQLModel, create_engine
 
-from iceberg_core.db import enforce_sqlite_foreign_keys
-from iceberg_core.models import DEFAULT_RESPONSE_TARGET_HOURS, ResponseTarget
 from iceberg_core.secrets import EnvKeyBackend
+
+#: What to do about it, said once and reported by every fixture that cannot run.
+MISSING_DB_EXTRA = (
+    "the shared database fixtures need iceberg-core's `db` extra "
+    "(install `iceberg-core[testing]`); this environment has the engine's "
+    "dependency shape, where the ORM is deliberately absent (ADR 0002)"
+)
+
+try:
+    from sqlalchemy import Engine, StaticPool
+    from sqlmodel import Session, SQLModel, create_engine
+
+    from iceberg_core.db import enforce_sqlite_foreign_keys
+    from iceberg_core.models import DEFAULT_RESPONSE_TARGET_HOURS, ResponseTarget
+
+    DB_FIXTURES_AVAILABLE = True
+except ImportError:  # pragma: no cover — exercised by a subprocess test
+    DB_FIXTURES_AVAILABLE = False
+    # Bound so the annotations below still resolve for anything that evaluates
+    # them; the fixtures themselves never get far enough to use these.
+    Engine = Any  # type: ignore[assignment, misc]
+    Session = Any  # type: ignore[assignment, misc]
 
 
 @pytest.fixture(name="db_engine")
@@ -28,6 +57,8 @@ def db_engine_fixture() -> Iterator[Engine]:
     ``StaticPool`` keeps every checkout on the same connection — without it each
     session would get a fresh, empty in-memory database.
     """
+    if not DB_FIXTURES_AVAILABLE:
+        pytest.skip(MISSING_DB_EXTRA)
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
