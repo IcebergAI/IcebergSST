@@ -1,0 +1,129 @@
+{#- File-share scope and policy fields (#145, #196).
+
+    Included unconditionally and toggled with `x-show`, like the Confluence and
+    Jira blocks, so switching type does not discard what an analyst already typed.
+    Nothing here carries a static `required`: a hidden required input blocks
+    submit with no visible cause, so `mount_path` is bound with `:required`
+    instead and is only required while this block is the one on screen.
+
+    There is deliberately no credential field. The engine walks a read-only
+    mount, which is where the host, the share name and the authentication all
+    live — a token box here would invite an admin to store a secret nothing
+    reads. -#}
+<div x-show="type === 'fileshare'" x-cloak class="stack">
+  <div class="field-row">
+    <label>
+      Protocol
+      <select class="field" name="protocol">
+        {% for option in protocols %}
+        <option value="{{ option.value }}"
+                {{ 'selected' if connection.get('protocol') == option.value }}>{{ option.value | upper }}</option>
+        {% endfor %}
+      </select>
+      <span class="field-hint">Recorded, not used — the walk is identical either way.</span>
+    </label>
+    <label>
+      Mount path
+      <input class="field field-mono" name="mount_path" maxlength="1024"
+             :required="type === 'fileshare'"
+             value="{{ connection.get('mount_path', '') }}"
+             placeholder="/mnt/shares/finance">
+      <span class="field-hint">
+        Absolute, and as the <strong>engine</strong> sees it. Mount it read-only there
+        (<code>ro</code>), not on the API.
+      </span>
+    </label>
+  </div>
+
+  <div>
+    <span class="field-label">Roots</span>
+    <div class="row-inline" style="margin-bottom:8px">
+      <input class="field field--sm field-mono" style="max-width:260px"
+             x-model="rootDraft" @keydown.enter.prevent="addRoot()"
+             placeholder="finance/payroll" aria-label="Root to add">
+      <button type="button" class="btn btn--ghost btn--sm" @click="addRoot()">
+        <svg class="btn-ic" aria-hidden="true"><use href="#ic-plus"/></svg>
+        Add
+      </button>
+    </div>
+    <div class="row-inline">
+      <template x-for="path in roots" :key="path">
+        <span class="tag">
+          <span x-text="path"></span>
+          <button type="button" class="btn-link" style="line-height:1"
+                  @click="removeRoot(path)" :aria-label="'Remove ' + path">×</button>
+          <input type="hidden" name="roots" :value="path">
+        </span>
+      </template>
+      <span class="empty" x-show="roots.length === 0">The whole mount.</span>
+    </div>
+    <span class="field-hint">
+      Relative to the mount, no leading <code>/</code>. Each becomes one fetch task, which is what
+      parallelises a scan — and how you say "finance, not the entire file server".
+    </span>
+  </div>
+
+  <div class="field-row">
+    <div>
+      <span class="field-label">Include globs</span>
+      <div class="row-inline" style="margin-bottom:8px">
+        <input class="field field--sm field-mono" style="max-width:200px"
+               x-model="includeDraft" @keydown.enter.prevent="addInclude()"
+               placeholder="**/*.env" aria-label="Include glob to add">
+        <button type="button" class="btn btn--ghost btn--sm" @click="addInclude()">Add</button>
+      </div>
+      <div class="row-inline">
+        <template x-for="glob in include" :key="glob">
+          <span class="tag">
+            <span x-text="glob"></span>
+            <button type="button" class="btn-link" style="line-height:1"
+                    @click="removeInclude(glob)" :aria-label="'Remove ' + glob">×</button>
+            <input type="hidden" name="include" :value="glob">
+          </span>
+        </template>
+        <span class="empty" x-show="include.length === 0">Every file.</span>
+      </div>
+    </div>
+
+    <div>
+      <span class="field-label">Exclude globs</span>
+      <div class="row-inline" style="margin-bottom:8px">
+        <input class="field field--sm field-mono" style="max-width:200px"
+               x-model="excludeDraft" @keydown.enter.prevent="addExclude()"
+               placeholder="**/node_modules/**" aria-label="Exclude glob to add">
+        <button type="button" class="btn btn--ghost btn--sm" @click="addExclude()">Add</button>
+      </div>
+      <div class="row-inline">
+        <template x-for="glob in exclude" :key="glob">
+          <span class="tag">
+            <span x-text="glob"></span>
+            <button type="button" class="btn-link" style="line-height:1"
+                    @click="removeExclude(glob)" :aria-label="'Remove ' + glob">×</button>
+            <input type="hidden" name="exclude" :value="glob">
+          </span>
+        </template>
+        <span class="empty" x-show="exclude.length === 0">Nothing.</span>
+      </div>
+      <span class="field-hint">Exclude always wins.</span>
+    </div>
+  </div>
+
+  <label>
+    Maximum file size
+    {#- No `value=`: `x-model` owns this input and overwrites one on init, so the
+        server value travels through the island instead. -#}
+    <input class="field field-mono" name="max_file_bytes" inputmode="numeric"
+           x-model="maxFileBytes">
+    <span class="field-hint">
+      Bytes, checked before anything is read — <span x-text="maxFileSummary"></span>.
+      The ceiling is 32 MiB, which is what extraction would refuse above anyway.
+    </span>
+  </label>
+
+  <label class="check">
+    <input type="checkbox" name="follow_symlinks"
+           {{ 'checked' if connection.get('follow_symlinks', False) }}>
+    Follow symlinks
+    <span class="muted">— a share full of links into other shares is how a scan quietly grows</span>
+  </label>
+</div>

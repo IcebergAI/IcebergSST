@@ -16,7 +16,11 @@ from fastapi.testclient import TestClient
 from iceberg_api.pagination import DEFAULT_LIMIT
 from iceberg_api.scans.coverage import failure_report
 from iceberg_api.sources.routes import get_prober
-from iceberg_api.sources.schemas import ConnectivityResult
+from iceberg_api.sources.schemas import (
+    DEFAULT_MAX_FILE_BYTES,
+    SUPPORTED_SOURCE_TYPES,
+    ConnectivityResult,
+)
 from iceberg_core.enums import (
     CoverageReason,
     FindingEventKind,
@@ -128,17 +132,225 @@ def test_creating_a_jira_source_posts_a_jira_shaped_blob(
     assert "include_personal_spaces" not in source.connection
 
 
+FILESHARE_FORM = {
+    "name": "finance-share",
+    "type": "fileshare",
+    "protocol": "smb",
+    "mount_path": "/mnt/shares/finance",
+    "max_file_bytes": "33554432",
+    "enabled": "on",
+}
+
+
 def test_the_source_type_select_offers_every_supported_connector(
     client: TestClient,
     make_user: Callable[..., User],
     login_as: Callable[[User], dict[str, str]],
 ) -> None:
+    """Held against the API's own set rather than a list repeated here (#196).
+
+    A type the API supports and the select omits is one an operator can only
+    configure by hand-posting JSON, which is the state file shares were in.
+    """
     headers = login_as(make_user(UserRole.ADMIN))
 
     body = client.get("/sources", headers=headers).text
 
-    assert 'value="confluence"' in body
-    assert 'value="jira"' in body
+    for source_type in SUPPORTED_SOURCE_TYPES:
+        assert f'value="{source_type.value}"' in body, f"{source_type.value} is not offered"
+
+
+def test_creating_a_fileshare_source_posts_a_share_shaped_blob(
+    client: TestClient,
+    session: Session,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """A share has no URL, no comments and no attachments — `extra="forbid"` would
+    reject a blob carrying them, and every block posts on every save (#196)."""
+    headers = login_as(make_user(UserRole.ADMIN))
+
+    response = client.post(
+        "/sources",
+        data=FILESHARE_FORM
+        | {
+            "csrf_token": headers["X-CSRF-Token"],
+            "roots": ["finance/payroll", "finance/contracts"],
+            "include": ["**/*.env"],
+            "exclude": ["**/node_modules/**"],
+            "follow_symlinks": "on",
+            # The hidden HTTP block still posts these.
+            "base_url": "https://example.atlassian.net",
+            "include_comments": "on",
+            "spaces": ["DOCS"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 204, response.text
+    source = session.exec(select(Source).where(Source.name == "finance-share")).one()
+    assert source.type is SourceType.FILESHARE
+    assert source.connection["mount_path"] == "/mnt/shares/finance"
+    assert source.connection["roots"] == ["finance/payroll", "finance/contracts"]
+    assert source.connection["include"] == ["**/*.env"]
+    assert source.connection["exclude"] == ["**/node_modules/**"]
+    assert source.connection["follow_symlinks"] is True
+    assert source.connection["max_file_bytes"] == 33554432
+    for absent in ("base_url", "include_comments", "include_attachments", "spaces"):
+        assert absent not in source.connection
+
+
+def test_a_fileshare_source_is_created_without_a_credential(
+    client: TestClient,
+    session: Session,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """The mount carries the authentication (#145). The form offers no token box,
+    so the browser posts no credential at all — which must not be a 422."""
+    headers = login_as(make_user(UserRole.ADMIN))
+
+    response = client.post(
+        "/sources", data=FILESHARE_FORM | {"csrf_token": headers["X-CSRF-Token"]}, headers=headers
+    )
+
+    assert response.status_code == 204, response.text
+    source = session.exec(select(Source).where(Source.name == "finance-share")).one()
+    assert source.credential_ref is None
+    # And the page says so, rather than leaving a gap where the token box is on
+    # every other source type.
+    assert "No credential." in client.get(f"/sources/{source.id}").text
+
+
+def test_editing_a_fileshare_source_saves_it(
+    client: TestClient,
+    session: Session,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """The defect #187 could only refuse gracefully: the form had no fields for a
+    share, so saving one re-rendered "not available yet" (#196)."""
+    headers = login_as(make_user(UserRole.ADMIN))
+    client.post(
+        "/sources", data=FILESHARE_FORM | {"csrf_token": headers["X-CSRF-Token"]}, headers=headers
+    )
+    source = session.exec(select(Source).where(Source.name == "finance-share")).one()
+
+    response = client.post(
+        f"/sources/{source.id}",
+        data=FILESHARE_FORM | {"csrf_token": headers["X-CSRF-Token"], "roots": ["finance/payroll"]},
+        headers=headers,
+    )
+
+    assert response.status_code == 204, response.text
+    session.refresh(source)
+    assert source.connection["roots"] == ["finance/payroll"]
+
+
+def test_a_fileshare_source_is_not_offered_a_connectivity_check(
+    client: TestClient,
+    session: Session,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """A probe from the API would reach the wrong machine: the mount is the
+    engine's. A button that can only ever fail is worse than no button (#196)."""
+    headers = login_as(make_user(UserRole.ADMIN))
+    client.post(
+        "/sources", data=FILESHARE_FORM | {"csrf_token": headers["X-CSRF-Token"]}, headers=headers
+    )
+    share = session.exec(select(Source).where(Source.name == "finance-share")).one()
+    client.post(
+        "/sources", data=CONFLUENCE_FORM | {"csrf_token": headers["X-CSRF-Token"]}, headers=headers
+    )
+    http_source = session.exec(select(Source).where(Source.name == "confluence-eng")).one()
+
+    assert f"/sources/{share.id}/test" not in client.get(f"/sources/{share.id}").text
+    assert f"/sources/{http_source.id}/test" in client.get(f"/sources/{http_source.id}").text
+
+
+def test_the_details_card_describes_a_share_rather_than_a_site(
+    client: TestClient,
+    session: Session,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    headers = login_as(make_user(UserRole.ADMIN))
+    client.post(
+        "/sources",
+        data=FILESHARE_FORM | {"csrf_token": headers["X-CSRF-Token"], "roots": ["finance/payroll"]},
+        headers=headers,
+    )
+    source = session.exec(select(Source).where(Source.name == "finance-share")).one()
+
+    body = client.get(f"/sources/{source.id}").text
+
+    assert "/mnt/shares/finance" in body
+    assert "finance/payroll" in body
+    # The `<dt>` labels rather than the words: the edit form on the same page
+    # still carries a (hidden) Base URL input, and the card is what this is about.
+    assert "<dt>Base URL</dt>" not in body
+    assert "<dt>Mount</dt>" in body
+    assert "Server/DC (bearer token)" not in body
+    assert "carried by the mount" in body
+
+
+def test_the_form_carries_the_ceiling_alpine_will_post(
+    client: TestClient,
+    session: Session,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """`x-model` owns that input and overwrites whatever the server rendered into
+    it, so the value has to reach Alpine through the island. Without it an
+    untouched create or edit posts a blank ceiling — which is not a cosmetic
+    default, it is a save that fails validation."""
+    headers = login_as(make_user(UserRole.ADMIN))
+
+    new_form = client.get("/sources", headers=headers).text
+    assert f'"maxFileBytes": "{DEFAULT_MAX_FILE_BYTES}"' in new_form
+
+    client.post(
+        "/sources",
+        data=FILESHARE_FORM | {"csrf_token": headers["X-CSRF-Token"], "max_file_bytes": "1048576"},
+        headers=headers,
+    )
+    source = session.exec(select(Source).where(Source.name == "finance-share")).one()
+
+    # And an edit hydrates from the stored value, not the default.
+    assert '"maxFileBytes": "1048576"' in client.get(f"/sources/{source.id}").text
+
+
+def test_a_cleared_file_ceiling_is_refused_rather_than_read_as_zero(
+    client: TestClient, make_user: Callable[..., User], login_as: Callable[[User], dict[str, str]]
+) -> None:
+    headers = login_as(make_user(UserRole.ADMIN))
+
+    response = client.post(
+        "/sources",
+        data=FILESHARE_FORM | {"csrf_token": headers["X-CSRF-Token"], "max_file_bytes": ""},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert "maximum file size is required" in response.text
+
+
+def test_a_mistyped_file_ceiling_re_renders_the_form_rather_than_500ing(
+    client: TestClient, make_user: Callable[..., User], login_as: Callable[[User], dict[str, str]]
+) -> None:
+    """Read as text and converted here, so the message lands in the form the
+    analyst is looking at rather than in FastAPI's own 422."""
+    headers = login_as(make_user(UserRole.ADMIN))
+
+    response = client.post(
+        "/sources",
+        data=FILESHARE_FORM | {"csrf_token": headers["X-CSRF-Token"], "max_file_bytes": "32 MB"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert "whole number of bytes" in response.text
 
 
 def test_the_source_form_never_echoes_the_credential_back(
@@ -183,45 +395,13 @@ def test_a_rejected_source_re_renders_the_form_with_the_reason(
     assert 'id="source-form"' in response.text
 
 
-def test_editing_a_source_the_form_cannot_express_is_refused_not_a_500(
-    client: TestClient,
-    session: Session,
-    make_user: Callable[..., User],
-    login_as: Callable[[User], dict[str, str]],
-) -> None:
-    """A fileshare source is API-supported, so it can exist — but the console has
-    no form for it yet. Saving its edit page must re-render the form with the
-    reason, not crash on the type the form fields cannot describe."""
-    headers = login_as(make_user(UserRole.ADMIN))
-    source = Source(
-        name="finance-share",
-        type=SourceType.FILESHARE,
-        connection={"mount_path": "/mnt/shares/finance"},
-    )
-    session.add(source)
-    session.commit()
-
-    response = client.post(
-        f"/sources/{source.id}",
-        data={
-            "csrf_token": headers["X-CSRF-Token"],
-            "name": "finance-share",
-            "base_url": "https://irrelevant.example",
-            "enabled": "on",
-        },
-        headers=headers,
-    )
-
-    assert response.status_code == 200
-    assert "not available yet" in response.text
-    assert 'id="source-form"' in response.text
-
-
-def test_a_hand_posted_type_without_a_form_is_refused_not_a_500(
+def test_a_body_that_does_not_match_the_posted_type_is_refused_not_a_500(
     client: TestClient, make_user: Callable[..., User], login_as: Callable[[User], dict[str, str]]
 ) -> None:
-    """`fileshare` parses as a SourceType, so it gets past the enum guard — the
-    connection-blob assembly is what has no shape for it."""
+    """Every supported type has form fields now (#196), so the way to get here is
+    a hand-posted body: `type=fileshare` carrying Confluence's fields and no
+    mount. The API's model rejects it and the analyst sees the reason in the form
+    they are looking at."""
     headers = login_as(make_user(UserRole.ADMIN))
 
     response = client.post(
@@ -231,7 +411,8 @@ def test_a_hand_posted_type_without_a_form_is_refused_not_a_500(
     )
 
     assert response.status_code == 200
-    assert "not available yet" in response.text
+    assert 'id="source-form"' in response.text
+    assert "mount_path" in response.text
 
 
 def test_a_viewer_cannot_create_a_source_from_the_ui(

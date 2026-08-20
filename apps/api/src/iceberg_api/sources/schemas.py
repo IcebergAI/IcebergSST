@@ -38,6 +38,11 @@ SUPPORTED_SOURCE_TYPES = frozenset({SourceType.CONFLUENCE, SourceType.JIRA, Sour
 _JIRA_PROJECT_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,254}$")
 
 
+#: Per-file ceiling when nobody chooses one, named so the console can render the
+#: same number the model would have applied.
+DEFAULT_MAX_FILE_BYTES = 32 * 1024 * 1024
+
+
 class FileshareProtocol(StrEnum):
     """What backs a mounted share. Documentation, not behaviour — see
     :class:`FileshareConnection`."""
@@ -268,7 +273,7 @@ class FileshareConnection(BaseModel):
     follow_symlinks: bool = False
     #: Per-file ceiling, before anything is read. Bounded above by what
     #: extraction would refuse anyway, so raising it past that changes nothing.
-    max_file_bytes: int = Field(default=32 * 1024 * 1024, ge=1, le=32 * 1024 * 1024)
+    max_file_bytes: int = Field(default=DEFAULT_MAX_FILE_BYTES, ge=1, le=DEFAULT_MAX_FILE_BYTES)
 
     @field_validator("mount_path")
     @classmethod

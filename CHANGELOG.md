@@ -24,6 +24,15 @@ says is recorded beside the finding, never written onto it. Both are reversible.
 
 ### Added
 
+- File-share sources are configurable from the console (#196). The create/edit form gained the
+  share's own fields — protocol, mount path, roots, include/exclude globs, symlink policy and the
+  per-file ceiling — and `fileshare` joins the type select, so the connector the API has supported
+  since #145 is no longer API-only to set up. It is deliberately not the Confluence form with
+  different labels: there is no base URL, no deployment choice, and **no credential box**, because
+  a share is authenticated by the mount an operator configures on the engine. The details card
+  describes the share rather than a site, and the connectivity-test button is not offered — a probe
+  from the API would reach the wrong machine, which is worse than no answer.
+
 - External hand-over (#141, #179–#186): admin-configured targets receive a signed POST with a
   finding's context, delivered through the same outbox pattern as notifications; the receiver can
   report its own state back through a signed callback, and an analyst resolves any divergence from

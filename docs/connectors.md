@@ -280,7 +280,9 @@ walks it, and one connector covers both protocols because at that level they are
 The consequence is where the credential lives: in the mount, configured by whoever runs the
 engine, and never in a lease. `POST /sources/{id}/test` therefore refuses a file share and says
 why — the API cannot see the engine's mounts, and "connectivity OK" reported from the wrong
-machine is worse than no answer.
+machine is worse than no answer. The console does not offer the button on a share for the same
+reason, and its create/edit form has no credential field: there is nothing here to store and
+nothing this console could rotate (#196).
 
 **Mounting it.** Read-only, and nothing else on the mount:
 
