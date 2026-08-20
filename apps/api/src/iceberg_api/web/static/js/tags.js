@@ -175,6 +175,9 @@ document.addEventListener('alpine:init', () => {
       this.roots = Array.isArray(data.roots) ? data.roots.slice() : [];
       this.include = Array.isArray(data.include) ? data.include.slice() : [];
       this.exclude = Array.isArray(data.exclude) ? data.exclude.slice() : [];
+      // `x-model` writes the model into the input on init, so an unhydrated one
+      // would blank the server-rendered ceiling and post nothing.
+      this.maxFileBytes = typeof data.maxFileBytes === 'string' ? data.maxFileBytes : '';
       this.email = typeof data.email === 'string' ? data.email : '';
       this.deployment = this.email ? 'cloud' : (data.isNew ? 'cloud' : 'server');
       this.hasCredential = data.hasCredential === true;

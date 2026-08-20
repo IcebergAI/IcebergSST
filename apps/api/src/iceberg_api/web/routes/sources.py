@@ -24,6 +24,7 @@ from iceberg_api.sources.probe import PROBEABLE_TYPES
 from iceberg_api.sources.routes import ProberDep
 from iceberg_api.sources.schedule_routes import list_schedules
 from iceberg_api.sources.schemas import (
+    DEFAULT_MAX_FILE_BYTES,
     FileshareProtocol,
     SourceCreate,
     SourceRead,
@@ -80,8 +81,14 @@ def _fileshare_connection(fields: _FileshareFields) -> dict[str, Any]:
     offered a token box here would be inviting an admin to store a secret that
     nothing reads.
     """
+    typed = fields.max_file_bytes.strip()
+    if not typed:
+        # Said here rather than left to become a zero the API rejects with a
+        # schema message: the form always renders a value, so a blank one is
+        # somebody having cleared it.
+        raise ValueError("maximum file size is required")
     try:
-        ceiling = int(fields.max_file_bytes.strip() or 0)
+        ceiling = int(typed)
     except ValueError as exc:
         raise ValueError("maximum file size must be a whole number of bytes") from exc
     return {
@@ -173,6 +180,10 @@ def _form_state(source: SourceRead | None, connection: dict[str, Any]) -> dict[s
             "roots": connection.get("roots", []),
             "include": connection.get("include", []),
             "exclude": connection.get("exclude", []),
+            # Alpine owns this input (`x-model`), so it has to arrive through the
+            # island: a `value=` on the element is overwritten by the model on
+            # init, and an unhydrated model posts a blank ceiling.
+            "maxFileBytes": str(connection.get("max_file_bytes", DEFAULT_MAX_FILE_BYTES)),
             "hasCredential": source.has_credential if source else False,
             "isNew": source is None,
         },

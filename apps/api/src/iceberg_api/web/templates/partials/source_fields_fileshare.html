@@ -110,9 +110,10 @@
 
   <label>
     Maximum file size
+    {#- No `value=`: `x-model` owns this input and overwrites one on init, so the
+        server value travels through the island instead. -#}
     <input class="field field-mono" name="max_file_bytes" inputmode="numeric"
-           x-model="maxFileBytes"
-           value="{{ connection.get('max_file_bytes', 33554432) }}">
+           x-model="maxFileBytes">
     <span class="field-hint">
       Bytes, checked before anything is read — <span x-text="maxFileSummary"></span>.
       The ceiling is 32 MiB, which is what extraction would refuse above anyway.

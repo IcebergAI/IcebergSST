@@ -16,7 +16,11 @@ from fastapi.testclient import TestClient
 from iceberg_api.pagination import DEFAULT_LIMIT
 from iceberg_api.scans.coverage import failure_report
 from iceberg_api.sources.routes import get_prober
-from iceberg_api.sources.schemas import SUPPORTED_SOURCE_TYPES, ConnectivityResult
+from iceberg_api.sources.schemas import (
+    DEFAULT_MAX_FILE_BYTES,
+    SUPPORTED_SOURCE_TYPES,
+    ConnectivityResult,
+)
 from iceberg_core.enums import (
     CoverageReason,
     FindingEventKind,
@@ -289,6 +293,47 @@ def test_the_details_card_describes_a_share_rather_than_a_site(
     assert "<dt>Mount</dt>" in body
     assert "Server/DC (bearer token)" not in body
     assert "carried by the mount" in body
+
+
+def test_the_form_carries_the_ceiling_alpine_will_post(
+    client: TestClient,
+    session: Session,
+    make_user: Callable[..., User],
+    login_as: Callable[[User], dict[str, str]],
+) -> None:
+    """`x-model` owns that input and overwrites whatever the server rendered into
+    it, so the value has to reach Alpine through the island. Without it an
+    untouched create or edit posts a blank ceiling — which is not a cosmetic
+    default, it is a save that fails validation."""
+    headers = login_as(make_user(UserRole.ADMIN))
+
+    new_form = client.get("/sources", headers=headers).text
+    assert f'"maxFileBytes": "{DEFAULT_MAX_FILE_BYTES}"' in new_form
+
+    client.post(
+        "/sources",
+        data=FILESHARE_FORM | {"csrf_token": headers["X-CSRF-Token"], "max_file_bytes": "1048576"},
+        headers=headers,
+    )
+    source = session.exec(select(Source).where(Source.name == "finance-share")).one()
+
+    # And an edit hydrates from the stored value, not the default.
+    assert '"maxFileBytes": "1048576"' in client.get(f"/sources/{source.id}").text
+
+
+def test_a_cleared_file_ceiling_is_refused_rather_than_read_as_zero(
+    client: TestClient, make_user: Callable[..., User], login_as: Callable[[User], dict[str, str]]
+) -> None:
+    headers = login_as(make_user(UserRole.ADMIN))
+
+    response = client.post(
+        "/sources",
+        data=FILESHARE_FORM | {"csrf_token": headers["X-CSRF-Token"], "max_file_bytes": ""},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert "maximum file size is required" in response.text
 
 
 def test_a_mistyped_file_ceiling_re_renders_the_form_rather_than_500ing(
