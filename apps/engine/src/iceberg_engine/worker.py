@@ -251,7 +251,8 @@ def main(settings: EngineSettings | None = None) -> None:
 
     Docker stops containers with SIGTERM, so handling it is what makes
     ``docker compose down`` a clean shutdown rather than a ten-second wait
-    followed by SIGKILL.
+    followed by SIGKILL. What that shutdown does — and does not — promise the
+    tasks in flight is :func:`drain`.
 
     The consumer is started here rather than by the `dramatiq` CLI so that
     importing this module stays free of side effects. The CLI configures a broker
@@ -282,7 +283,7 @@ def main(settings: EngineSettings | None = None) -> None:
     # Stop consuming before the metrics server goes: a message picked up during
     # shutdown still holds a lease, and finishing it is cheaper for the scan than
     # waiting out an expiry.
-    consumer.stop()
+    drain(consumer, resolved.drain_seconds)
     if heartbeat is not None:
         heartbeat.stop()
     # Only once both are stopped: until then, threads are still reporting through
@@ -290,6 +291,43 @@ def main(settings: EngineSettings | None = None) -> None:
     close_api_client()
     server.shutdown()
     logger.info("engine_stopped")
+
+
+def drain(consumer: dramatiq.Worker, seconds: float) -> list[uuid.UUID]:
+    """Stop taking work and wait, bounded, for the tasks this engine already holds.
+
+    Returns the tasks still running when the budget ran out, which are abandoned:
+    the worker threads are daemons, so they die with the process, and the API
+    reclaims each task when its lease lapses and hands it to another engine. A
+    connector that checkpoints resumes from its last flushed batch (#143); one
+    that does not re-reads its spec. **That latency is the deliberate price.**
+
+    The alternative — interrupting the task so it reports what it has — was
+    considered and rejected (#192). An engine may only report `completed` or
+    `failed`, and a failed task is terminal: it is never reclaimed, it makes its
+    scan `partial`, and a partial scan may not auto-resolve findings (ADR 0009
+    §4). So interrupting would trade one lease TTL of latency for a scan that
+    cannot close a secret somebody has already fixed — on every rolling deploy
+    that lands mid-scan. Waiting, then letting the lease do its job, keeps the
+    API's reclaim the single re-delivery authority (ADR 0009 §2).
+
+    What the budget buys is the shutdown *after* it. Dramatiq's default is ten
+    minutes; every grace period this project ships is two, so the wait was still
+    running when SIGKILL arrived and the heartbeat, the client pool and the
+    metrics server were never stopped at all.
+    """
+    consumer.stop(timeout=int(seconds * 1000))
+    abandoned = TASKS.held()
+    if abandoned:
+        # Named, because these are the tasks a scan is about to sit on until their
+        # leases lapse — the one operator-visible cost of a drain that timed out.
+        logger.warning(
+            "engine_drain_incomplete",
+            drain_seconds=seconds,
+            tasks=[str(task_id) for task_id in abandoned],
+            detail="left to lease expiry and API reclaim",
+        )
+    return abandoned
 
 
 def _start_heartbeat(settings: EngineSettings, client: EngineClient) -> Heartbeat | None:

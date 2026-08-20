@@ -55,9 +55,11 @@ spec:
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      # A draining engine finishes the task it leased rather than dropping it and
-      # waiting for the lease to lapse. Longer than the longest fetch, shorter
-      # than the lease.
+      # A draining engine waits ICEBERG_DRAIN_SECONDS (90s) for the tasks it
+      # already holds, so most finish rather than waiting out a lease. Longer than
+      # that budget — the shutdown after it only runs if the process is still
+      # alive — and shorter than the 300s lease, so a task this engine does
+      # abandon is reclaimed rather than held by a pod that is gone.
       terminationGracePeriodSeconds: 120
       containers:
         - name: engine

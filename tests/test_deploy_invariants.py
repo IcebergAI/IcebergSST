@@ -28,6 +28,7 @@ from typing import Any
 
 import pytest
 import yaml
+from iceberg_core.config import EngineSettings
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCKER_DIR = REPO_ROOT / "deploy" / "docker"
@@ -403,20 +404,41 @@ def test_the_engine_service_can_be_scaled(compose: dict[str, Any]) -> None:
 
 
 def test_the_engine_service_is_given_time_to_finish_its_task(compose: dict[str, Any]) -> None:
-    """worker.py catches SIGTERM and finishes the task it leased.
+    """worker.py catches SIGTERM and waits for the task it leased.
 
     Docker's default 10s would SIGKILL a fetch in progress, and the scan then
     waits out its 300s lease before anything reclaims it — so the shutdown the
     worker documents is only clean with this set. Matches
     ``terminationGracePeriodSeconds`` in the chart, deliberately.
     """
-    chart_grace = re.search(
+    assert _service(compose, "engine")["stop_grace_period"] == f"{_chart_grace_seconds()}s"
+
+
+def test_a_draining_engine_finishes_shutting_down_before_it_is_killed(
+    compose: dict[str, Any],
+) -> None:
+    """The drain budget has to fit inside every grace period that ships (#192).
+
+    The wait is not the point of the wait: what follows it — stopping the
+    heartbeat, closing the API pool, stopping the metrics server — only happens if
+    the process is still alive to do it. A budget at or past the grace means
+    SIGKILL lands mid-wait and none of that runs, which is the state this project
+    shipped in, with dramatiq's ten-minute default against a two-minute grace.
+    """
+    budget = EngineSettings.model_fields["drain_seconds"].default
+    compose_grace = float(_service(compose, "engine")["stop_grace_period"].removesuffix("s"))
+
+    assert budget < compose_grace
+    assert budget < _chart_grace_seconds()
+
+
+def _chart_grace_seconds() -> int:
+    grace = re.search(
         r"terminationGracePeriodSeconds:\s*(\d+)",
         (CHART_DIR / "templates" / "engine-deployment.yaml").read_text(),
     )
-
-    assert chart_grace is not None
-    assert _service(compose, "engine")["stop_grace_period"] == f"{chart_grace.group(1)}s"
+    assert grace is not None
+    return int(grace.group(1))
 
 
 def test_the_engine_service_waits_for_a_token_that_only_the_api_can_mint(

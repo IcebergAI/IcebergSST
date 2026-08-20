@@ -280,6 +280,18 @@ class EngineSettings(CoreSettings):
     #: against load on the control plane; scale replicas as well (`make scale`).
     worker_threads: int = Field(default=4, ge=1, le=64)
 
+    #: How long a draining engine waits for the tasks it already holds before it
+    #: stops waiting and lets their leases lapse (#192).
+    #:
+    #: It has to fit *inside* the deployment's termination grace period, because
+    #: what follows the wait — stopping the heartbeat, closing the API pool,
+    #: stopping the metrics server — only happens if the process is still alive to
+    #: do it. Dramatiq's own default is ten minutes, five times either grace this
+    #: project ships, so the wait was still running when SIGKILL arrived and none
+    #: of the shutdown ran at all. `tests/test_deploy_invariants.py` holds this
+    #: default against both graces.
+    drain_seconds: float = Field(default=90.0, gt=0)
+
 
 @lru_cache(maxsize=1)
 def get_core_settings() -> CoreSettings:
