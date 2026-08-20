@@ -31,6 +31,7 @@ from sqlmodel import col, select
 from iceberg_api import audit
 from iceberg_api.auth.dependencies import CsrfProtected, SecretStoreDep, SessionDep
 from iceberg_api.auth.rbac import AdminUser
+from iceberg_api.conflicts import commit_or_conflict
 from iceberg_api.notifications.schemas import (
     SECRET_REF_KEY,
     EventFilter,
@@ -164,7 +165,7 @@ async def create_channel(
             target_type=AUDIT_TARGET_CHANNEL,
             target_id=channel.id,
         )
-    db.commit()
+    commit_or_conflict(db, "a channel with that name already exists")
     db.refresh(channel)
     logger.info(
         "notification_channel_created",
@@ -245,7 +246,7 @@ async def update_channel(
         )
 
     db.add(channel)
-    db.commit()
+    commit_or_conflict(db, "a channel with that name already exists")
     db.refresh(channel)
     return _read(channel)
 

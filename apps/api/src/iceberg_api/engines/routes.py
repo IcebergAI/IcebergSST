@@ -418,6 +418,8 @@ async def submit_progress(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
 
     now = datetime.now(UTC)
+    # Scan first, then the task row inside `advance_checkpoint`. `submit_results`
+    # takes the same two in the same order; see the note there (#197).
     scan = db.exec(select(Scan).where(col(Scan.id) == task.scan_id).with_for_update()).one_or_none()
     if scan is None:  # pragma: no cover — FK guarantees it
         raise HTTPException(status.HTTP_404_NOT_FOUND, "scan not found")
@@ -564,10 +566,28 @@ async def submit_results(
 
     now = datetime.now(UTC)
 
+    # Lock the scan row for the rest of the transaction: two tasks of one scan can
+    # be submitted concurrently, and `merge_scan_counts` is a read-modify-write of
+    # the whole counts blob. Without the lock, the second commit clobbers the
+    # first's tallies (findings, units_scanned, …). FOR UPDATE serialises the two
+    # so each merges onto the other's committed result.
+    #
+    # **Before** the task row is touched, which is the only ordering that agrees
+    # with `submit_progress` (#197). It takes the same two locks, scan then task;
+    # taking them task-then-scan here made a retried progress racing this task's
+    # final results the textbook AB/BA deadlock. Postgres would abort one side and
+    # the retry ladder would recover, so it was never likely to be seen — and it is
+    # free to make impossible. One rule for the pair: **scan first, always.**
+    scan = db.exec(select(Scan).where(col(Scan.id) == task.scan_id).with_for_update()).one_or_none()
+    if scan is None:  # pragma: no cover — FK guarantees it
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "scan not found")
+
     # Claiming result_key is a conditional UPDATE: of two concurrent submissions,
     # exactly one records results. The loser re-reads and answers as a replay or a
     # conflict — never a second ingest, never double-counted tallies.
     if not service.claim_result(db, task, body.idempotency_key):
+        # Releases the scan lock with it, which is why nothing below this point
+        # may assume `scan` is still current.
         db.rollback()
         db.refresh(task)
         if task.result_key == body.idempotency_key:
@@ -577,15 +597,6 @@ async def submit_results(
         # Cancelled, reclaimed, or already terminal: whatever this engine computed is
         # no longer wanted, and accepting it would resurrect work the API moved on from.
         raise HTTPException(status.HTTP_409_CONFLICT, "task is not leased")
-
-    # Lock the scan row for the rest of the transaction: two tasks of one scan can
-    # be submitted concurrently, and `merge_scan_counts` is a read-modify-write of
-    # the whole counts blob. Without the lock, the second commit clobbers the
-    # first's tallies (findings, units_scanned, …). FOR UPDATE serialises the two
-    # so each merges onto the other's committed result.
-    scan = db.exec(select(Scan).where(col(Scan.id) == task.scan_id).with_for_update()).one_or_none()
-    if scan is None:  # pragma: no cover — FK guarantees it
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "scan not found")
 
     outcome = ingest.IngestOutcome()
     fetch_tasks: list[ScanTask] = []

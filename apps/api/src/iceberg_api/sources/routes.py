@@ -33,6 +33,7 @@ from sqlmodel import col, select
 from iceberg_api import audit
 from iceberg_api.auth.dependencies import CsrfProtected, SecretStoreDep, SessionDep
 from iceberg_api.auth.rbac import AdminUser, ViewerUser
+from iceberg_api.conflicts import commit_or_conflict
 from iceberg_api.pagination import DEFAULT_LIMIT, MAX_LIMIT, after, build_page, position
 from iceberg_api.schemas import Page
 from iceberg_api.sources.probe import ProbeError, probe_source
@@ -162,7 +163,7 @@ async def create_source(
             target_type=AUDIT_TARGET_SOURCE,
             target_id=source.id,
         )
-    db.commit()
+    commit_or_conflict(db, "a source with that name already exists")
     db.refresh(source)
     return _read(source)
 
@@ -240,7 +241,7 @@ async def update_source(
         )
 
     db.add(source)
-    db.commit()
+    commit_or_conflict(db, "a source with that name already exists")
     db.refresh(source)
     return _read(source)
 

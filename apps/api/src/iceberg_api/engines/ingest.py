@@ -77,25 +77,29 @@ def ingest_findings(
     policy = ownership.load(db, scan.source_id)
     outcome = IngestOutcome()
 
-    for payload in payloads:
-        # An unscored finding is kept: `None` means the engine did not judge it,
-        # which is not the same as judging it noise, and dropping it would lose a
-        # finding over a missing field.
-        if payload.confidence is not None and payload.confidence < threshold:
-            outcome.below_threshold += 1
-            continue
+    # An unscored finding is kept: `None` means the engine did not judge it,
+    # which is not the same as judging it noise, and dropping it would lose a
+    # finding over a missing field.
+    scored = [
+        payload
+        for payload in payloads
+        if payload.confidence is None or payload.confidence >= threshold
+    ]
+    outcome.below_threshold = len(payloads) - len(scored)
+    # One query for the batch instead of one or two per payload (#197). This is
+    # the hottest path in the API — a 500-finding batch issued up to a thousand
+    # point selects inside the ingest transaction, each holding the scan lock a
+    # little longer.
+    known = _load_findings(db, scan.source_id, scored)
 
+    for payload in scored:
         suppression = suppressions.first_match(
             rules,
             fingerprint=payload.fingerprint,
             rule_id=payload.rule_id,
             resource_locator=payload.resource_locator,
         )
-        existing = db.exec(
-            select(Finding)
-            .where(col(Finding.source_id) == scan.source_id)
-            .where(col(Finding.fingerprint) == payload.fingerprint)
-        ).first()
+        existing = known.get(payload.fingerprint)
 
         rekeyed = False
         if existing is None and payload.previous_fingerprint:
@@ -104,11 +108,7 @@ def ingest_findings(
             # *same* finding, so it is re-keyed in place — which is what carries
             # the analyst's state, notes, assignee and event trail across a
             # rotation that no recomputation could perform.
-            existing = db.exec(
-                select(Finding)
-                .where(col(Finding.source_id) == scan.source_id)
-                .where(col(Finding.fingerprint) == payload.previous_fingerprint)
-            ).first()
+            existing = known.get(payload.previous_fingerprint)
             if existing is not None and not _same_secret(existing, payload):
                 # The old identity matched but the stored hash of the secret does
                 # not, so this is a different secret wearing a colliding
@@ -135,9 +135,19 @@ def ingest_findings(
                 )
                 rekeyed = True
                 outcome.rekeyed += 1
+                # The row now answers to the new identity and no longer to the
+                # old, which is what a re-read would have found. Keeping the map
+                # in step is what makes it a cache of the table rather than a
+                # snapshot of it.
+                known.pop(payload.previous_fingerprint, None)
+                known[payload.fingerprint] = existing
 
         if existing is None:
-            _create(
+            # Registered under its fingerprint so a second payload for the same
+            # one — the same secret reported twice in a batch — refreshes it
+            # rather than inserting a duplicate the unique constraint refuses.
+            # The per-payload select used to get this from autoflush.
+            known[payload.fingerprint] = _create(
                 db,
                 scan,
                 payload,
@@ -194,6 +204,46 @@ def _same_secret(existing: Finding, payload: FindingPayload) -> bool:
     return payload.previous_secret_hash is None or (
         payload.previous_secret_hash == existing.secret_hash
     )
+
+
+#: How many fingerprints go into one `IN (...)`. A batch is capped at 500
+#: findings and each may carry a second identity during a rotation window, so
+#: this is one or two round trips — while staying well under the bind-parameter
+#: ceiling of every database this runs on.
+_LOOKUP_CHUNK = 500
+
+
+def _load_findings(
+    db: Session,
+    source_id: uuid.UUID,
+    payloads: list[FindingPayload],
+) -> dict[str, Finding]:
+    """Every stored finding this batch could be about, keyed by fingerprint.
+
+    Both identities are looked up together: the one each payload carries now, and
+    the one it carried under the outgoing pepper during a rotation window (#64).
+    Fetching them in one pass is the whole point — asking per payload made ingest
+    an N+1 on the API's busiest transaction.
+
+    The result is used as a live map, not a snapshot: the loop registers what it
+    creates and re-keys what it moves, so a second payload for the same
+    fingerprint sees what the per-payload select used to see through autoflush.
+    """
+    wanted = {payload.fingerprint for payload in payloads}
+    wanted.update(
+        payload.previous_fingerprint for payload in payloads if payload.previous_fingerprint
+    )
+    ordered = sorted(wanted)
+    found: dict[str, Finding] = {}
+    for start in range(0, len(ordered), _LOOKUP_CHUNK):
+        chunk = ordered[start : start + _LOOKUP_CHUNK]
+        for finding in db.exec(
+            select(Finding)
+            .where(col(Finding.source_id) == source_id)
+            .where(col(Finding.fingerprint).in_(chunk))
+        ):
+            found[finding.fingerprint] = finding
+    return found
 
 
 def _create(

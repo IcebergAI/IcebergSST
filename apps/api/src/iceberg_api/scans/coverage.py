@@ -258,6 +258,22 @@ def failure_report(
     }
 
 
+def cancelled_report(task: ScanTask) -> dict[str, object]:
+    """What a task's coverage becomes when its scan is cancelled (#197).
+
+    The cancellation scope gap **merged onto** what the task already reported,
+    not written over it. A fetch task that flushed batches has coverage in the
+    database describing objects the API demonstrably ingested findings for;
+    replacing it with a zero-count failure report told the manifest that a task
+    which had plainly read something read nothing.
+    """
+    cancelled = TaskCoverageReport.model_validate(
+        failure_report(task.kind, CoverageReason.CANCELLED)
+    )
+    merged = merge_task_report(stored_task_report(task), cancelled)
+    return merged.model_dump(mode="json")
+
+
 def _validated_report(task: ScanTask) -> TaskCoverageReport | None:
     if not task.coverage:
         return None

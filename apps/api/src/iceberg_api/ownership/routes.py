@@ -44,6 +44,7 @@ from sqlmodel import col, select
 from iceberg_api import audit
 from iceberg_api.auth.dependencies import CsrfProtected, SessionDep
 from iceberg_api.auth.rbac import AdminUser, ViewerUser
+from iceberg_api.conflicts import commit_or_conflict
 from iceberg_api.findings import ownership
 from iceberg_api.ownership.schemas import (
     OwnerGroupCreate,
@@ -137,7 +138,7 @@ async def create_owner_group(
         target_id=group.id,
         to_value=group.name,
     )
-    db.commit()
+    commit_or_conflict(db, "a group with that name already exists")
     db.refresh(group)
     return OwnerGroupRead.model_validate(group)
 
@@ -183,7 +184,7 @@ async def update_owner_group(
         to_value=group.name,
         detail={"changed": ",".join(changed)},
     )
-    db.commit()
+    commit_or_conflict(db, "a group with that name already exists")
     db.refresh(group)
     return OwnerGroupRead.model_validate(group)
 
@@ -308,7 +309,7 @@ async def create_routing_rule(
         # what the rule matched on, not by its name.
         detail={"priority": str(rule.priority), "matchers": _matchers(rule)},
     )
-    db.commit()
+    commit_or_conflict(db, "a rule with that name already exists")
     db.refresh(rule)
     return RoutingRuleRead.model_validate(rule)
 
@@ -372,7 +373,7 @@ async def update_routing_rule(
         to_value=rule.name,
         detail={"changed": ",".join(changed), "matchers": _matchers(rule)},
     )
-    db.commit()
+    commit_or_conflict(db, "a rule with that name already exists")
     db.refresh(rule)
     return RoutingRuleRead.model_validate(rule)
 

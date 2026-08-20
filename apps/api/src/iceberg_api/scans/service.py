@@ -24,7 +24,6 @@ from typing import Any
 import structlog
 from iceberg_core.enums import (
     ACTIVE_SCAN_STATUSES,
-    CoverageReason,
     CoverageState,
     ScanMode,
     ScanStatus,
@@ -685,22 +684,37 @@ def cancel_scan(db: Session, scan: Scan, *, now: datetime | None = None) -> Scan
 
     Both writes are conditional in SQL rather than read-then-write, so a task
     that completes while the cancellation is in flight keeps its completion.
+
+    The cancellation gap is **merged onto** what each task had already reported,
+    not written over it (#197). A fetch task that flushed batches has coverage in
+    the database describing objects the API demonstrably ingested findings for;
+    replacing that with a zero-count failure report made a cancelled scan's
+    manifest say the task read nothing, which is both false and the opposite of
+    what a manifest is for.
     """
     at = now or datetime.now(UTC)
-    for kind in ScanTaskKind:
+    for task in db.exec(
+        select(ScanTask).where(
+            col(ScanTask.scan_id) == scan.id,
+            col(ScanTask.status).not_in(list(TERMINAL_TASK_STATUSES)),
+        )
+    ):
+        # Still conditional, and still per row: a task that reaches a terminal
+        # state between the select above and this update keeps whatever it
+        # reported, exactly as the single bulk statement guaranteed.
         db.exec(
             update(ScanTask)
             .where(
-                col(ScanTask.scan_id) == scan.id,
-                col(ScanTask.kind) == kind,
+                col(ScanTask.id) == task.id,
                 col(ScanTask.status).not_in(list(TERMINAL_TASK_STATUSES)),
             )
             .values(
                 status=ScanTaskStatus.CANCELLED,
                 finished_at=at,
                 lease_expires_at=None,
-                coverage=coverage_service.failure_report(kind, CoverageReason.CANCELLED),
+                coverage=coverage_service.cancelled_report(task),
             )
+            .execution_options(synchronize_session="fetch")
         )
     db.exec(
         update(Scan)

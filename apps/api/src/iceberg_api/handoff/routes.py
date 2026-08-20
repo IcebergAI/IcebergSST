@@ -52,6 +52,7 @@ from iceberg_api.auth.dependencies import (
     SettingsDep,
 )
 from iceberg_api.auth.rbac import ROLE_RANK, AdminUser, AnalystUser
+from iceberg_api.conflicts import commit_or_conflict
 from iceberg_api.handoff import callback, service
 from iceberg_api.handoff.schemas import (
     FindingHandoffRead,
@@ -252,7 +253,7 @@ async def create_target(
             target_type=AUDIT_TARGET_HANDOFF_TARGET,
             target_id=target.id,
         )
-    db.commit()
+    commit_or_conflict(db, "a target with that name already exists")
     db.refresh(target)
     logger.info("handoff_target_created", target_id=str(target.id), actor_id=str(admin.id))
     return _read_target(target)
@@ -327,7 +328,7 @@ async def update_target(
         )
 
     db.add(target)
-    db.commit()
+    commit_or_conflict(db, "a target with that name already exists")
     db.refresh(target)
     return _read_target(target)
 
