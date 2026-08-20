@@ -291,6 +291,26 @@ def test_ci_actions_are_pinned_to_a_commit() -> None:
     assert floating == [], f"actions pinned to a tag rather than a commit: {floating}"
 
 
+def test_ci_container_images_are_pinned_to_a_digest() -> None:
+    """The docstring above said this repository pins "the gitleaks image", and it
+    did not: `docker run` had a mutable tag (#197).
+
+    The same argument applies with more force, because that container runs with
+    the whole repository history mounted into it — the thing this project exists
+    to keep secrets out of.
+
+    Scoped to the workflow rather than to every `docker run` in the tree: this is
+    about what CI's own supply chain consumes. `verify-chart.sh`'s helm image is a
+    laptop fallback CI never reaches, and says so where it is set.
+    """
+    workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    images = re.findall(r"^\s*((?:ghcr\.io|docker\.io|quay\.io)/\S+)", workflow, re.M)
+
+    assert images, "no container image found; has the scan job moved?"
+    floating = [image for image in images if "@sha256:" not in image]
+    assert floating == [], f"images pinned to a tag rather than a digest: {floating}"
+
+
 def test_the_chart_does_not_advertise_an_unimplemented_secret_backend() -> None:
     """``secretStoreBackend: vault`` CrashLoops every api pod after a clean upgrade.
 
@@ -424,12 +444,23 @@ def test_a_draining_engine_finishes_shutting_down_before_it_is_killed(
     the process is still alive to do it. A budget at or past the grace means
     SIGKILL lands mid-wait and none of that runs, which is the state this project
     shipped in, with dramatiq's ten-minute default against a two-minute grace.
+
+    A margin rather than a bare "less than": `Worker.stop` spends the budget on
+    the worker threads as a group and then joins the *consumers* under a second
+    budget of the same size. A consumer exits within its poll interval, so the
+    second join costs seconds in practice — but "in practice" is not a bound, and
+    the shutdown after both still has to run (#197).
     """
     budget = EngineSettings.model_fields["drain_seconds"].default
     compose_grace = float(_service(compose, "engine")["stop_grace_period"].removesuffix("s"))
 
-    assert budget < compose_grace
-    assert budget < _chart_grace_seconds()
+    assert compose_grace - budget >= _DRAIN_MARGIN_SECONDS
+    assert _chart_grace_seconds() - budget >= _DRAIN_MARGIN_SECONDS
+
+
+#: How much of the grace period must be left once the drain budget is spent:
+#: enough for the consumer join and the shutdown after it.
+_DRAIN_MARGIN_SECONDS = 20
 
 
 def _chart_grace_seconds() -> int:

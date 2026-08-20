@@ -14,8 +14,10 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import HTTPException, Response
+from iceberg_core.config import ApiSettings
 from pydantic import ValidationError
 
+from iceberg_api.auth.session import issue_flash
 from iceberg_api.web.templating import hx_redirect
 
 #: What a checked box posts. An unchecked one posts nothing, so absence is False.
@@ -74,16 +76,23 @@ def error_text(exc: Exception) -> str:
     return "The request could not be completed."  # pragma: no cover — defensive
 
 
-def redirect_with_error(path: str, exc: Exception) -> Response:
+def redirect_with_error(path: str, exc: Exception, settings: ApiSettings) -> Response:
     """Send the browser to ``path`` carrying the reason the request failed.
 
     The message rides in the query string rather than a swapped fragment because
     these forms sit on a listing: a full reload is what shows the analyst the rows
-    their change did — or did not — affect. Encoded with no safe characters, since
-    an API message is free text and a ``&`` in one would otherwise split it into
-    parameters the page never reads.
+    their change did — or did not — affect.
+
+    **Signed, not carried as text** (#197). The listing pages render whatever
+    arrives here inside the console's own chrome, so plain text meant a crafted
+    link could put attacker-chosen words in a trusted frame — autoescaped, so not
+    script, but a `/login?error=Your account is locked, call 555-0100` reads
+    exactly as though this console said it. The token is minted for a
+    two-minute window under the same key as the session cookie, and a page shows
+    nothing at all for anything it cannot verify.
     """
-    return hx_redirect(f"{path}?error={quote(error_text(exc), safe='')}")
+    token = issue_flash(error_text(exc), settings)
+    return hx_redirect(f"{path}?error={quote(token, safe='')}")
 
 
 def _one_error(entry: Any) -> str:

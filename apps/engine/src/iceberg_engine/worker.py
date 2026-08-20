@@ -315,6 +315,14 @@ def drain(consumer: dramatiq.Worker, seconds: float) -> list[uuid.UUID]:
     minutes; every grace period this project ships is two, so the wait was still
     running when SIGKILL arrived and the heartbeat, the client pool and the
     metrics server were never stopped at all.
+
+    ``seconds`` bounds the worker threads as a group — ``join_all`` deducts the
+    elapsed time after each join, so four threads share one budget rather than
+    taking one each. ``Worker.stop`` then joins the *consumers* under a second
+    budget of the same size, which is why the invariant is a comfortable margin
+    below the grace period rather than merely under it: a consumer thread exits
+    within its poll interval, so the second join costs seconds, but the two are
+    not one number (#197).
     """
     consumer.stop(timeout=int(seconds * 1000))
     abandoned = TASKS.held()

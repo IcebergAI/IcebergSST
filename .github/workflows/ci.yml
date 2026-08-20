@@ -200,11 +200,16 @@ jobs:
       # --config is explicit rather than left to gitleaks' lookup: the allowlist in
       # .gitleaks.toml is what keeps this job green, and "which config did it use?"
       # should be answerable from the workflow.
+      #
+      # The image is pinned by digest for the same reason every `uses:` here is
+      # pinned to a commit, and a test holds both: a tag is mutable, and this one
+      # runs with the whole repository history mounted (#197). The digest is
+      # gitleaks v8.30.0 — bump the comment and the digest together.
       - name: Run gitleaks over full git history
         run: |
           docker run --rm -v "$PWD:/repo" \
             -e GIT_CONFIG_COUNT=1 \
             -e GIT_CONFIG_KEY_0=safe.directory \
             -e GIT_CONFIG_VALUE_0='*' \
-            ghcr.io/gitleaks/gitleaks:v8.30.0 \
+            ghcr.io/gitleaks/gitleaks@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9 \
             git /repo --redact --verbose --config /repo/.gitleaks.toml

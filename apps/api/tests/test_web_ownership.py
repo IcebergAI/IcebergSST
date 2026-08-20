@@ -437,7 +437,8 @@ def test_an_analyst_can_take_ownership_from_the_triage_panel(
         headers=headers,
     )
 
-    assert response.status_code == 200, response.text
+    assert response.status_code == 204, response.text
+    assert response.headers["HX-Redirect"] == f"/findings/{finding.id}"
     session.refresh(finding)
     assert finding.owner_group_id == group.id
     assert finding.owner_pinned is True

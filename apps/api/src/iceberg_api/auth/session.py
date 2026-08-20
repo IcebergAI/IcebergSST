@@ -41,6 +41,12 @@ MIN_SESSION_SECRET_BYTES = 32
 
 _SESSION_AUDIENCE = "iceberg:session"
 _LOGIN_AUDIENCE = "iceberg:login"
+_FLASH_AUDIENCE = "iceberg:flash"
+
+#: How long a message survives being carried across a redirect. Long enough for
+#: the browser to follow one, short enough that a URL pasted into a chat later
+#: shows nothing rather than a stale complaint.
+FLASH_TTL = timedelta(minutes=2)
 
 
 class SessionError(Exception):
@@ -213,6 +219,48 @@ def clear_login_cookie(response: Response, settings: ApiSettings) -> None:
         samesite="lax",
         path="/",
     )
+
+
+def issue_flash(message: str, settings: ApiSettings, *, ttl: timedelta = FLASH_TTL) -> str:
+    """Sign a message so it can ride a redirect without becoming forgeable (#197).
+
+    These messages are the API's own prose about why a save failed, and they are
+    rendered inside the console's own chrome. Carried as plain query text they
+    were the console rendering **attacker-chosen words in a trusted frame** — a
+    crafted `/login?error=…` could tell somebody their account was disabled and
+    give them a number to call. Autoescaping stops it being script; nothing
+    stopped it being convincing.
+
+    Signed rather than replaced by an enum of codes because the API's sentence is
+    the useful part ("base_url: is not a valid URL"), and rather than a
+    server-side flash because this deployment keeps no per-user state between
+    requests — the same reason the login state rides in a cookie.
+    """
+    issued_at = datetime.now(UTC)
+    payload = {
+        "msg": message,
+        "iat": issued_at,
+        "exp": issued_at + ttl,
+        "aud": _FLASH_AUDIENCE,
+    }
+    return jwt.encode(payload, signing_key(settings), algorithm=ALGORITHM)
+
+
+def read_flash(token: str | None, settings: ApiSettings) -> str | None:
+    """The message this deployment signed, or None for anything else.
+
+    Every failure is None: unsigned, expired, signed for another audience, or
+    simply absent. A page that cannot tell them apart shows no banner, which is
+    the correct outcome for all four.
+    """
+    if not token:
+        return None
+    try:
+        claims = _decode(token, settings, audience=_FLASH_AUDIENCE)
+    except SessionError, AuthConfigError:
+        return None
+    message = claims.get("msg")
+    return message if isinstance(message, str) else None
 
 
 def _decode(token: str, settings: ApiSettings, *, audience: str) -> dict[str, Any]:

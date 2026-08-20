@@ -193,9 +193,13 @@ work back to the lease** (#192).
 4. The heartbeat stops, the API connection pool closes, the metrics server stops, and the process
    logs `engine_stopped`.
 
-Step 4 is why the budget matters: it has to be **shorter than the termination grace period**
+Step 4 is why the budget matters: it has to leave **room inside the termination grace period**
 (`stop_grace_period` in compose, `terminationGracePeriodSeconds` in the chart — both 120s), or
-SIGKILL lands mid-wait and none of it runs. A test holds the default against both.
+SIGKILL lands mid-wait and none of it runs. A test holds the default at least 20 seconds below
+both — a margin rather than a bare "less than", because Dramatiq spends the budget on the worker
+threads and then joins its consumers under a second budget of the same size. A consumer exits
+within its poll interval, so that second join costs seconds; "in practice" is not a bound, so the
+margin is.
 
 An abandoned task is not failed. An engine may only report a task `completed` or `failed`, and a
 failed task is terminal — never reclaimed, and it makes its scan `partial`, which may not

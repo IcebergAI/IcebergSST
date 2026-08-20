@@ -19,6 +19,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CHART_DIR="$REPO_ROOT/deploy/helm/icebergsst"
 VALUES="$REPO_ROOT/deploy/helm/example-values.yaml"
+# A developer convenience for a machine with no helm binary: CI installs a real
+# one and never reaches this. Deliberately not pinned by digest, unlike the
+# images in ci.yml — this one renders a chart on a laptop, where a pin would go
+# stale and buy nothing, rather than running over the repository's history.
 HELM_IMAGE="${HELM_IMAGE:-alpine/helm:latest}"
 
 failures=0
@@ -199,12 +203,28 @@ for job in jobs:
 # Nothing else may migrate. An engine that ran migrations would need a database
 # URL, which is the invariant above stated a second way.
 for deployment in by_kind.get("Deployment", []):
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
-    command = " ".join(container.get("command", []) + container.get("args", []))
-    if "migrate" in command:
-        bad(f"{deployment['metadata']['name']} migrates on start")
+    spec = deployment["spec"]["template"]["spec"]
+    # Every container again: a sidecar or an initContainer running migrations is
+    # exactly the shape this is here to refuse.
+    for key in ("initContainers", "containers"):
+        for container in spec.get(key, []):
+            command = " ".join(container.get("command", []) + container.get("args", []))
+            if "migrate" in command:
+                bad(f"{deployment['metadata']['name']} migrates on start")
 
 # ── Hardening ─────────────────────────────────────────────────────────────────
+# Every container, not `containers[0]`: a sidecar added later would inherit the
+# pod's securityContext but not this check, and would have walked straight past
+# it (#197). initContainers count for the same reason — they run as the same pod.
+def all_containers(spec: dict) -> list[tuple[str, dict]]:
+    return [
+        (container.get("name", "?"), container)
+        for key in ("initContainers", "containers")
+        for container in spec.get(key, [])
+    ]
+
+
+hardening_failures = failures
 for kind in ("Deployment", "Job"):
     for doc in by_kind.get(kind, []):
         spec = doc["spec"]["template"]["spec"]
@@ -212,17 +232,25 @@ for kind in ("Deployment", "Job"):
         pod_ctx = spec.get("securityContext", {})
         if not pod_ctx.get("runAsNonRoot"):
             bad(f"{name} does not set runAsNonRoot")
-        container = spec["containers"][0]
-        ctx = container.get("securityContext", {})
-        if ctx.get("allowPrivilegeEscalation") is not False:
-            bad(f"{name} allows privilege escalation")
-        if ctx.get("readOnlyRootFilesystem") is not True:
-            bad(f"{name} has a writable root filesystem")
-        if ctx.get("capabilities", {}).get("drop") != ["ALL"]:
-            bad(f"{name} does not drop all capabilities")
-        if not container.get("resources", {}).get("requests"):
-            bad(f"{name} declares no resource requests")
-ok("every workload runs non-root, unprivileged, read-only, with requests set")
+        containers = all_containers(spec)
+        if not containers:
+            bad(f"{name} declares no containers")
+        for container_name, container in containers:
+            where = f"{name}/{container_name}"
+            ctx = container.get("securityContext", {})
+            if ctx.get("allowPrivilegeEscalation") is not False:
+                bad(f"{where} allows privilege escalation")
+            if ctx.get("readOnlyRootFilesystem") is not True:
+                bad(f"{where} has a writable root filesystem")
+            if ctx.get("capabilities", {}).get("drop") != ["ALL"]:
+                bad(f"{where} does not drop all capabilities")
+            if not container.get("resources", {}).get("requests"):
+                bad(f"{where} declares no resource requests")
+# Only if it is true. The green line used to print regardless of what the loop
+# had just recorded — the exit code was still right, but the log contradicted it,
+# and the log is what somebody reads (#197).
+if failures == hardening_failures:
+    ok("every workload runs non-root, unprivileged, read-only, with requests set")
 
 # ── Scaling ───────────────────────────────────────────────────────────────────
 hpas = by_kind.get("HorizontalPodAutoscaler", [])

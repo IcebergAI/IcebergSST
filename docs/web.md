@@ -90,7 +90,10 @@ The conventions a fragment follows:
 - a mutation answers with the fragment its change affected, so the browser never
   has to re-request to find out what happened;
 - where a change is bigger than one region, the mutation answers `hx_redirect()`
-  (`HX-Redirect`) and the browser navigates normally.
+  (`HX-Redirect`) and the browser navigates normally. Triage is the example:
+  a state change moves the header chips and the Record card as well as the panel,
+  so it redirects — while a *rejected* triage answers the panel, because nothing
+  moved and navigating away would take the analyst off the explanation.
 
 **CSRF is set once, on the shell.** `base.html` carries
 `hx-headers='{"X-CSRF-Token": …}'` on `.app`, so every `hx-` request inherits it
@@ -271,5 +274,11 @@ either exists.
 - **No credential is ever rendered.** The source form never receives one to echo,
   the channels screen shows `sealed`/`none` rather than a secret or its ref, and
   an engine token appears exactly once — in the response that minted it.
+- **Nothing in the chrome is attacker-authored.** A save that fails redirects with
+  its reason, and that reason is a **signed, two-minute token** rather than the
+  text itself: rendered as plain text it was autoescaped, so never script, but a
+  crafted `?error=` still put a stranger's words inside the console's own frame
+  ("your account is locked, call this number"). Pages show nothing for anything
+  they cannot verify (#197).
 - **Autoescaping everywhere**, with `StrictUndefined` so a typo'd variable is a
   loud failure rather than a silently empty severity cell.

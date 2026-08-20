@@ -29,7 +29,7 @@
   </a>
   <a class="stat" href="/findings?state=open&amp;suppressed=false&amp;assignee=me">
     <div class="stat-label">Assigned to you</div>
-    <div class="stat-num">{{ mine_count }}</div>
+    <div class="stat-num">{{ mine_count }}{{ '+' if mine_capped }}</div>
     <div class="stat-foot">Waiting on your decision</div>
   </a>
   <a class="stat {{ 'stat--crit' if overdue_count }}" href="/findings?overdue=true">

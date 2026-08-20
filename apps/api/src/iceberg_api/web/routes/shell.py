@@ -21,7 +21,7 @@ from iceberg_api.auth.dependencies import (
     SettingsDep,
     current_session,
 )
-from iceberg_api.auth.session import safe_return_path
+from iceberg_api.auth.session import read_flash, safe_return_path
 from iceberg_api.engines.routes import list_engines
 from iceberg_api.findings.routes import list_findings
 from iceberg_api.pagination import MAX_LIMIT
@@ -83,7 +83,7 @@ async def login_page(
             # Reduced to a local path here as well as in /auth/login: this value
             # is round-tripped through a form and must not become an open redirect.
             "next_path": safe_return_path(next_path) if next_path else None,
-            "error": error,
+            "error": read_flash(error, settings),
         },
     )
 
@@ -140,7 +140,22 @@ async def overview(
         cursor=None,
     )
     unassigned = [finding for finding in open_findings.items if finding.assignee_id is None]
-    mine = [finding for finding in open_findings.items if finding.assignee_id == user.id]
+
+    # Asked of the API rather than counted from `open_findings` above, for the
+    # same reason as the two ownership queues below: a figure derived from one
+    # capped page under-reports exactly when the backlog is large enough to
+    # matter, and this one did not even admit the cap the way its `unassigned`
+    # sibling does (#197). "Nothing assigned to me" is a sentence a console
+    # should only say when it is true.
+    mine = await list_findings(
+        user=user,
+        db=db,
+        state=FindingState.OPEN,
+        suppressed=False,
+        assignee_id=user.id,
+        limit=OVERVIEW_LIMIT,
+        cursor=None,
+    )
 
     # The two ownership queues (#146). Asked of the API rather than counted from
     # `open_findings` above: both are questions the database answers precisely,
@@ -181,6 +196,7 @@ async def overview(
     source_count, source_capped = _tally(sources)
     overdue_count, overdue_capped = _tally(overdue)
     unowned_count, unowned_capped = _tally(unowned)
+    mine_count, mine_capped = _tally(mine)
 
     return render_page(
         request,
@@ -192,7 +208,8 @@ async def overview(
             "critical_count": critical_count,
             "critical_capped": critical_capped,
             "unassigned_count": len(unassigned),
-            "mine_count": len(mine),
+            "mine_count": mine_count,
+            "mine_capped": mine_capped,
             "source_count": source_count,
             "source_capped": source_capped,
             "overdue_count": overdue_count,
