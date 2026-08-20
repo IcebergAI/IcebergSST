@@ -39,7 +39,12 @@ import structlog
 from iceberg_core.enums import CoverageObjectKind, CoverageReason
 from iceberg_core.fingerprint import CoarseLocator
 
-from iceberg_connectors.extraction import ExtractionLimits, ExtractionOutcome, extract_text
+from iceberg_connectors.extraction import (
+    ExtractionLimits,
+    ExtractionOutcome,
+    coverage_reason,
+    extract_text,
+)
 from iceberg_connectors.protocol import (
     Checkpoint,
     ConnectorCapability,
@@ -497,21 +502,9 @@ def _record_extraction(outcome: FetchOutcome, entry: _Entry, result: ExtractionO
     findings absent from it as remediated.
     """
     reference = {"path": entry.key}
-    match result:
-        case ExtractionOutcome.REJECTED_TOO_LARGE:
-            outcome.failed_for(CoverageReason.SIZE_LIMIT, CoverageObjectKind.PATH, reference)
-        case ExtractionOutcome.SKIPPED_BINARY:
-            outcome.skipped_for(CoverageReason.BINARY_CONTENT, CoverageObjectKind.PATH, reference)
-        case ExtractionOutcome.SKIPPED_EMPTY:
-            outcome.skipped_for(CoverageReason.EMPTY_CONTENT, CoverageObjectKind.PATH, reference)
-        case ExtractionOutcome.SKIPPED_UNSUPPORTED:
-            outcome.skipped_for(CoverageReason.UNSUPPORTED_TYPE, CoverageObjectKind.PATH, reference)
-        case ExtractionOutcome.FAILED_TIMEOUT:
-            outcome.failed_for(CoverageReason.TIMEOUT, CoverageObjectKind.PATH, reference)
-        case ExtractionOutcome.REJECTED_BOMB:
-            outcome.failed_for(CoverageReason.SIZE_LIMIT, CoverageObjectKind.PATH, reference)
-        case _:
-            outcome.failed_for(CoverageReason.PARSE_ERROR, CoverageObjectKind.PATH, reference)
+    reason = coverage_reason(result)
+    record = outcome.failed_for if result.is_incomplete else outcome.skipped_for
+    record(reason, CoverageObjectKind.PATH, reference)
 
 
 def _contained(root: Path, candidate: Path) -> Path | None:

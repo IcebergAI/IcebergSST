@@ -28,11 +28,13 @@ every level rather than the top one.
 
 import codecs
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import PurePosixPath
 
 import structlog
+from iceberg_core.enums import CoverageReason
 
 from iceberg_connectors.sandbox import ExtractionSandbox, SandboxCrashed, SandboxTimeout
 
@@ -120,6 +122,71 @@ class ExtractionOutcome(StrEnum):
             ExtractionOutcome.FAILED_TIMEOUT,
             ExtractionOutcome.FAILED_PARSE,
         }
+
+
+#: Parser detail -> the stable public assurance vocabulary. One table, here,
+#: because it has to stay in lockstep with the outcomes above and with
+#: :attr:`ExtractionOutcome.is_incomplete` — which decides whether a connector
+#: records the reason as a *skip* or a *failure*. Each connector used to keep its
+#: own copy, and they had already drifted: a compression bomb was a size refusal
+#: to the file-share connector and a parse error to the other two, so one
+#: manifest reason depended on which connector met the file (#197).
+#:
+#: `REJECTED_BOMB` is a `SIZE_LIMIT`, which is the reading the enum's own names
+#: point at: `REJECTED_*` is a decision this code made about how big something
+#: would become, `FAILED_*` is something that broke. An operator reading
+#: "parse error" would go looking for a malformed file.
+_COVERAGE_REASONS: dict[ExtractionOutcome, CoverageReason] = {
+    ExtractionOutcome.REJECTED_TOO_LARGE: CoverageReason.SIZE_LIMIT,
+    ExtractionOutcome.REJECTED_BOMB: CoverageReason.SIZE_LIMIT,
+    ExtractionOutcome.FAILED_TIMEOUT: CoverageReason.TIMEOUT,
+    ExtractionOutcome.FAILED_PARSE: CoverageReason.PARSE_ERROR,
+    ExtractionOutcome.SKIPPED_BINARY: CoverageReason.BINARY_CONTENT,
+    ExtractionOutcome.SKIPPED_EMPTY: CoverageReason.EMPTY_CONTENT,
+    ExtractionOutcome.SKIPPED_UNSUPPORTED: CoverageReason.UNSUPPORTED_TYPE,
+}
+
+
+def coverage_reason(outcome: ExtractionOutcome) -> CoverageReason:
+    """The manifest reason for one extraction outcome, the same for every source.
+
+    ``EXTRACTED`` has no reason — nothing went wrong — so asking for one is a
+    caller bug rather than something to paper over with a default.
+    """
+    if outcome not in _COVERAGE_REASONS:  # pragma: no cover — a caller contract
+        raise ValueError(f"{outcome.value} is not an incomplete or skipped outcome")
+    return _COVERAGE_REASONS[outcome]
+
+
+@dataclass
+class LazySandbox:
+    """One extraction child per fetch, spawned only if a file needs it.
+
+    Per fetch rather than per connector because a connector is a shared singleton
+    and a sandbox is not thread-safe; lazily rather than eagerly because a process
+    spawn for a scope with no attachments is pure cost. Closed in the fetch's
+    ``finally``, so a cancelled generator does not leak a child.
+
+    Lives here rather than in each connector, which is where two byte-identical
+    copies used to live (#197).
+    """
+
+    factory: Callable[[], ExtractionSandbox] | None
+    _sandbox: ExtractionSandbox | None = None
+
+    def get(self) -> ExtractionSandbox | None:
+        if self.factory is None:
+            return None
+        if self._sandbox is None:
+            self._sandbox = self.factory()
+        return self._sandbox
+
+    def close(self) -> None:
+        # Cleared before closing, so a raising `close` cannot leave a closed
+        # sandbox behind for the next `get` to hand out.
+        sandbox, self._sandbox = self._sandbox, None
+        if sandbox is not None:
+            sandbox.close()
 
 
 @dataclass(frozen=True, slots=True)

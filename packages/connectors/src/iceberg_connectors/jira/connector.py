@@ -56,7 +56,12 @@ import structlog
 from iceberg_core.enums import CoverageObjectKind, CoverageReason
 from iceberg_core.fingerprint import CoarseLocator
 
-from iceberg_connectors.extraction import ExtractionLimits, ExtractionOutcome, extract_text
+from iceberg_connectors.extraction import (
+    ExtractionLimits,
+    LazySandbox,
+    coverage_reason,
+    extract_text,
+)
 from iceberg_connectors.http import (
     Credential,
     PermissionDenied,
@@ -101,6 +106,35 @@ BODY_FIELDS = ("summary", "description", "environment")
 #: A project key as Atlassian defines it. Validated before it reaches JQL, because
 #: the list it came from is the server's rather than ours.
 _PROJECT_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,254}$")
+
+#: The one shape this connector ever writes as a JQL instant — `_minute`'s output,
+#: which is all JQL accepts anyway.
+#:
+#: Everything spliced into a quoted JQL literal is checked against it, because the
+#: window bounds arrive on the lease and the resume point arrives on the
+#: checkpoint: both have round-tripped through the API's database since this
+#: connector wrote them, and a `"` in one would close the literal and change the
+#: query rather than merely fail it (#197). An `isinstance(str)` was the whole
+#: check before.
+_JQL_INSTANT = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+
+
+def _instant(value: object) -> str:
+    """``value`` if this connector could have written it, else the empty string.
+
+    A bound that does not survive this is **dropped**, not repaired and not
+    fatal: the query widens, so the worst case is re-reading issues that dedupe
+    on their fingerprint. That is the same trade the resume logic makes a few
+    lines down — re-reading costs a duplicate, skipping costs the secret.
+    """
+    if isinstance(value, str) and _JQL_INSTANT.fullmatch(value):
+        return value
+    if value not in (None, ""):
+        # Not the value itself: it is stored state of unknown provenance, and this
+        # log line crosses the engine boundary.
+        logger.warning("jira_discarded_unusable_instant", kind=type(value).__name__)
+    return ""
+
 
 #: Bucket widths, in days, tried in order until a project's span fits the window
 #: budget. A ladder rather than arithmetic so the choice is reproducible and reads
@@ -147,31 +181,6 @@ class _Window:
 
     def as_params(self) -> dict[str, Any]:
         return {"field": self.field, "from": self.start, "to": self.end}
-
-
-@dataclass(slots=True)
-class _LazySandbox:
-    """One extraction child per fetch, and only if an attachment turns up.
-
-    Spawning it with the connector would put a process behind every task including
-    the many that never see a file; spawning one per attachment would pay a fork per
-    file. Closed in ``fetch``'s ``finally``, so a cancelled generator does not leak.
-    """
-
-    factory: Callable[[], ExtractionSandbox] | None
-    _sandbox: ExtractionSandbox | None = None
-
-    def get(self) -> ExtractionSandbox | None:
-        if self.factory is None:
-            return None
-        if self._sandbox is None:
-            self._sandbox = self.factory()
-        return self._sandbox
-
-    def close(self) -> None:
-        sandbox, self._sandbox = self._sandbox, None
-        if sandbox is not None:
-            sandbox.close()
 
 
 @dataclass(slots=True)
@@ -459,7 +468,7 @@ class JiraConnector:
         finished: list[str] = []
 
         client = self._client(connection, credential)
-        sandbox = _LazySandbox(self.sandbox_factory)
+        sandbox = LazySandbox(self.sandbox_factory)
         try:
             for issue in client.search(
                 _jql(key, window, resume_from=resume.at if resume else ""),
@@ -742,7 +751,7 @@ class JiraConnector:
         issue: Mapping[str, Any],
         issue_id: str,
         display: dict[str, Any],
-        sandbox: _LazySandbox,
+        sandbox: LazySandbox,
         outcome: FetchOutcome,
     ) -> Iterator[ContentUnit]:
         fields = issue.get("fields")
@@ -791,13 +800,13 @@ class JiraConnector:
             if not extracted.outcome.is_text:
                 if extracted.outcome.is_incomplete:
                     outcome.failed_for(
-                        _incomplete_reason(extracted.outcome),
+                        coverage_reason(extracted.outcome),
                         CoverageObjectKind.ATTACHMENT,
                         reference,
                     )
                 else:
                     outcome.skipped_for(
-                        _skipped_reason(extracted.outcome),
+                        coverage_reason(extracted.outcome),
                         CoverageObjectKind.ATTACHMENT,
                         reference,
                     )
@@ -905,17 +914,20 @@ def _jql(key: str, window: Any, *, resume_from: str = "") -> str:
     """
     field = _window_field(window)
     clauses = [f'project = "{key}"']
-    start = window.get("from") if isinstance(window, Mapping) else None
-    end = window.get("to") if isinstance(window, Mapping) else None
-    if resume_from:
+    bounded = window if isinstance(window, Mapping) else {}
+    # Validated, not merely typed: each of these is spliced into a quoted literal
+    # and each arrives from stored state (#197).
+    start = _instant(bounded.get("from"))
+    end = _instant(bounded.get("to"))
+    if resumed := _instant(resume_from):
         # A resumed attempt starts at the boundary the last one published rather
         # than at the window's own start. `>=` and not `>`: JQL resolves to the
         # minute, so several issues can share the boundary value, and excluding
         # them would skip whichever ones had not been read.
-        start = resume_from
-    if isinstance(start, str) and start:
+        start = resumed
+    if start:
         clauses.append(f'{field} >= "{start}"')
-    if isinstance(end, str) and end:
+    if end:
         clauses.append(f'{field} < "{end}"')
     return " AND ".join(clauses) + f" ORDER BY {field} ASC"
 
@@ -954,10 +966,11 @@ def _resume_point(checkpoint: Checkpoint | None, window: Any) -> _Resume | None:
     if checkpoint is None or checkpoint.version != JIRA_CHECKPOINT_VERSION:
         return None
     position = checkpoint.position
-    at, seen = position.get("at"), position.get("seen")
-    if not isinstance(at, str) or not at or not isinstance(seen, list) or not seen:
+    at, seen = _instant(position.get("at")), position.get("seen")
+    if not at or not isinstance(seen, list) or not seen:
         # Includes a position written before the boundary minute was recorded as a
-        # set of ids. Unusable is not the same as empty: restart the spec.
+        # set of ids, and one whose instant is not a shape this connector writes.
+        # Unusable is not the same as empty: restart the spec.
         return None
     if position.get("field") != _window_field(window):
         # A position taken over `created` cannot bound an `updated` window: the
@@ -974,8 +987,9 @@ def _watermark(cursors: Mapping[str, Any] | None, key: str) -> str:
     position = cursors.get(key)
     if not isinstance(position, Mapping):
         return ""
-    updated = position.get("updated")
-    return updated if isinstance(updated, str) else ""
+    # Same validation as every other stored instant: an unusable watermark means
+    # a full window rather than a query built around it.
+    return _instant(position.get("updated"))
 
 
 def _field_at(issue: Mapping[str, Any], field: str) -> datetime | None:
@@ -1015,19 +1029,3 @@ def _minute(value: datetime) -> str:
 
 def _ceil_div(numerator: int, denominator: int) -> int:
     return -(-numerator // denominator)
-
-
-def _incomplete_reason(outcome: ExtractionOutcome) -> CoverageReason:
-    if outcome is ExtractionOutcome.REJECTED_TOO_LARGE:
-        return CoverageReason.SIZE_LIMIT
-    if outcome is ExtractionOutcome.FAILED_TIMEOUT:
-        return CoverageReason.TIMEOUT
-    return CoverageReason.PARSE_ERROR
-
-
-def _skipped_reason(outcome: ExtractionOutcome) -> CoverageReason:
-    if outcome is ExtractionOutcome.SKIPPED_BINARY:
-        return CoverageReason.BINARY_CONTENT
-    if outcome is ExtractionOutcome.SKIPPED_EMPTY:
-        return CoverageReason.EMPTY_CONTENT
-    return CoverageReason.UNSUPPORTED_TYPE

@@ -63,7 +63,12 @@ from iceberg_connectors.confluence.client import (
     RateLimitPolicy,
 )
 from iceberg_connectors.confluence.storage import storage_to_text, supported_body_text
-from iceberg_connectors.extraction import ExtractionLimits, ExtractionOutcome, extract_text
+from iceberg_connectors.extraction import (
+    ExtractionLimits,
+    LazySandbox,
+    coverage_reason,
+    extract_text,
+)
 from iceberg_connectors.protocol import (
     Checkpoint,
     ConnectorCapability,
@@ -247,7 +252,7 @@ class ConfluenceConnector:
         )
         want_comments = connection.get("include_comments", True)
         want_attachments = connection.get("include_attachments", True)
-        sandbox = _LazySandbox(self.sandbox_factory)
+        sandbox = LazySandbox(self.sandbox_factory)
 
         since = str(spec.params.get("since") or "")
         resume = _resume_after(outcome.resume_from)
@@ -510,7 +515,7 @@ class ConfluenceConnector:
         page_id: str,
         context: _PageContext,
         outcome: FetchOutcome,
-        sandbox: _LazySandbox,
+        sandbox: LazySandbox,
     ) -> Iterator[ContentUnit]:
         """Text-extractable attachments, downloaded and parsed in a child process.
 
@@ -576,13 +581,13 @@ class ConfluenceConnector:
                 # not be read, so it makes the task incomplete instead.
                 if extracted.outcome.is_incomplete:
                     outcome.failed_for(
-                        _incomplete_extraction_reason(extracted.outcome),
+                        coverage_reason(extracted.outcome),
                         CoverageObjectKind.ATTACHMENT,
                         reference,
                     )
                 else:
                     outcome.skipped_for(
-                        _skipped_extraction_reason(extracted.outcome),
+                        coverage_reason(extracted.outcome),
                         CoverageObjectKind.ATTACHMENT,
                         reference,
                     )
@@ -648,50 +653,6 @@ class ConfluenceConnector:
         if self.sleep is not None:
             kwargs["sleep"] = self.sleep
         return ConfluenceClient(**kwargs)
-
-
-def _incomplete_extraction_reason(outcome: ExtractionOutcome) -> CoverageReason:
-    """Map parser-specific values onto the stable public assurance vocabulary."""
-    if outcome is ExtractionOutcome.REJECTED_TOO_LARGE:
-        return CoverageReason.SIZE_LIMIT
-    if outcome is ExtractionOutcome.FAILED_TIMEOUT:
-        return CoverageReason.TIMEOUT
-    # Compression bombs and parser crashes are both safe parser rejection: the
-    # connector detail stays in its local log, while the manifest stays stable.
-    return CoverageReason.PARSE_ERROR
-
-
-def _skipped_extraction_reason(outcome: ExtractionOutcome) -> CoverageReason:
-    if outcome is ExtractionOutcome.SKIPPED_BINARY:
-        return CoverageReason.BINARY_CONTENT
-    if outcome is ExtractionOutcome.SKIPPED_EMPTY:
-        return CoverageReason.EMPTY_CONTENT
-    return CoverageReason.UNSUPPORTED_TYPE
-
-
-@dataclass(slots=True)
-class _LazySandbox:
-    """One extraction child per fetch, spawned only if an attachment needs it.
-
-    Per fetch rather than per connector because the connector is a shared singleton
-    and a sandbox is not thread-safe; lazily rather than eagerly because a process
-    spawn for a space with no attachments is pure cost.
-    """
-
-    factory: Callable[[], ExtractionSandbox] | None
-    _sandbox: ExtractionSandbox | None = None
-
-    def get(self) -> ExtractionSandbox | None:
-        if self.factory is None:
-            return None
-        if self._sandbox is None:
-            self._sandbox = self.factory()
-        return self._sandbox
-
-    def close(self) -> None:
-        if self._sandbox is not None:
-            self._sandbox.close()
-            self._sandbox = None
 
 
 @dataclass(frozen=True, slots=True)
