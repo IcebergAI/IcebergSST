@@ -133,14 +133,19 @@ document.addEventListener('alpine:init', () => {
    *     Server/DC by omitting it, which is a rule nobody should have to know —
    *     the select makes it explicit and the hidden email field carries the
    *     actual API contract;
-   *   - `type` toggles which scope block is shown (#144). Both stay in the DOM,
-   *     so switching back does not discard what was already typed.
+   *   - `type` toggles which scope block is shown (#144, #196). All three stay in
+   *     the DOM, so switching back does not discard what was already typed.
    *
-   * The scope keys go to the server as repeated `spaces`/`projects` inputs
-   * rather than JSON: the route assembles the connection blob, so there is
-   * exactly one place that knows the shape and the API's validation is the only
-   * validation that counts. The block that is hidden still posts its inputs; the
-   * route reads only the ones belonging to the source's type.
+   * The scope keys go to the server as repeated `spaces`/`projects`/`roots`/
+   * `include`/`exclude` inputs rather than JSON: the route assembles the
+   * connection blob, so there is exactly one place that knows the shape and the
+   * API's validation is the only validation that counts. The blocks that are
+   * hidden still post their inputs; the route reads only the ones belonging to
+   * the source's type.
+   *
+   * A file share is the odd one out and stays odd on purpose: no base URL, no
+   * deployment choice, and **no credential**, because the mount carries all three
+   * (#145). Its chips are paths rather than keys, so they are not upper-cased.
    *
    * The Cloud-vs-DC email rule is identical for both products, which is the
    * whole point of sharing one credential type across connectors.
@@ -153,6 +158,13 @@ document.addEventListener('alpine:init', () => {
     spaceDraft: '',
     projects: [],
     projectDraft: '',
+    roots: [],
+    rootDraft: '',
+    include: [],
+    includeDraft: '',
+    exclude: [],
+    excludeDraft: '',
+    maxFileBytes: '',
     rotating: false,
     hasCredential: false,
     init() {
@@ -160,6 +172,9 @@ document.addEventListener('alpine:init', () => {
       this.type = typeof data.type === 'string' ? data.type : 'confluence';
       this.spaces = Array.isArray(data.spaces) ? data.spaces.slice() : [];
       this.projects = Array.isArray(data.projects) ? data.projects.slice() : [];
+      this.roots = Array.isArray(data.roots) ? data.roots.slice() : [];
+      this.include = Array.isArray(data.include) ? data.include.slice() : [];
+      this.exclude = Array.isArray(data.exclude) ? data.exclude.slice() : [];
       this.email = typeof data.email === 'string' ? data.email : '';
       this.deployment = this.email ? 'cloud' : (data.isNew ? 'cloud' : 'server');
       this.hasCredential = data.hasCredential === true;
@@ -187,6 +202,41 @@ document.addEventListener('alpine:init', () => {
     },
     removeProject(key) {
       this.projects = this.projects.filter((item) => item !== key);
+    },
+    // Paths and globs, not keys: case is significant on the filesystems these
+    // describe, so unlike a space or project key nothing here is upper-cased. A
+    // leading slash is trimmed because a root is relative to the mount and the
+    // API answers 422 for one — better to take the obvious meaning than to teach
+    // the rule with an error.
+    addRoot() {
+      this.pushPath('roots', 'rootDraft');
+    },
+    removeRoot(path) {
+      this.roots = this.roots.filter((item) => item !== path);
+    },
+    addInclude() {
+      this.pushPath('include', 'includeDraft');
+    },
+    removeInclude(glob) {
+      this.include = this.include.filter((item) => item !== glob);
+    },
+    addExclude() {
+      this.pushPath('exclude', 'excludeDraft');
+    },
+    removeExclude(glob) {
+      this.exclude = this.exclude.filter((item) => item !== glob);
+    },
+    pushPath(list, draft) {
+      const value = this[draft].trim().replace(/^\/+/, '');
+      if (value && !this[list].includes(value)) this[list].push(value);
+      this[draft] = '';
+    },
+    get maxFileSummary() {
+      const bytes = Number.parseInt(this.maxFileBytes, 10);
+      if (!Number.isFinite(bytes) || bytes < 1) return 'not a size';
+      const mib = bytes / (1024 * 1024);
+      // Whole MiB is the common case and reads better without a decimal point.
+      return `${mib >= 1 ? `${Number.isInteger(mib) ? mib : mib.toFixed(1)} MiB` : `${bytes} bytes`}`;
     },
     startRotation() {
       this.rotating = true;

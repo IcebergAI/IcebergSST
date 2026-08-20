@@ -45,9 +45,10 @@
       {% endif %}
     </div>
 
+    <div x-show="type !== 'fileshare'" x-cloak class="stack">
     <label>
       Base URL
-      <input class="field" name="base_url" required inputmode="url"
+      <input class="field" name="base_url" :required="type !== 'fileshare'" inputmode="url"
              value="{{ connection.get('base_url', '') }}"
              placeholder="https://example.atlassian.net">
       <span class="field-hint" x-show="type === 'confluence'" x-cloak>
@@ -87,9 +88,13 @@
       <span class="field-hint">Leave blank for Cloud. Server/DC deployments mount the API elsewhere.</span>
     </label>
 
+    </div>
+
     {% include "partials/source_fields_confluence.html" %}
     {% include "partials/source_fields_jira.html" %}
+    {% include "partials/source_fields_fileshare.html" %}
 
+    <div x-show="type !== 'fileshare'" x-cloak class="stack">
     <label class="check">
       <input type="checkbox" name="include_comments"
              {{ 'checked' if connection.get('include_comments', True) }}>
@@ -123,10 +128,21 @@
     <label>
       Credential
       <input class="field field-mono" type="password" name="credential" autocomplete="new-password"
-             {{ 'required' if not source }} placeholder="API token or personal access token">
+             {% if not source %}:required="type !== 'fileshare'"{% endif %}
+             placeholder="API token or personal access token">
       <span class="field-hint">Sealed through the secret store on save. It is never shown again.</span>
     </label>
     {% endif %}
+    </div>
+
+    {#- Said rather than left blank: an admin who has configured a Confluence
+        source will look for the token box, and its absence should read as a
+        decision instead of a missing field (#145). -#}
+    <p class="field-hint" x-show="type === 'fileshare'" x-cloak>
+      <strong>No credential.</strong> A share is authenticated by the mount, which an operator
+      configures on the engine — so there is nothing to store here, and nothing this console could
+      rotate.
+    </p>
 
     <label class="check">
       <input type="checkbox" name="enabled" {{ 'checked' if (source.enabled if source else True) }}>

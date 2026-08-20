@@ -55,6 +55,11 @@ _PROBES: dict[SourceType, tuple[type[ConfluenceConnection] | type[JiraConnection
     SourceType.JIRA: (JiraConnection, JIRA_DEFAULT_API_PREFIX, "/myself"),
 }
 
+#: The types a connectivity check exists for, for callers that want to ask before
+#: offering one — the console hides the button rather than showing one that can
+#: only ever answer "not from here" (#196).
+PROBEABLE_TYPES = frozenset(_PROBES)
+
 TIMEOUT_SECONDS = 10.0
 
 logger = structlog.get_logger()

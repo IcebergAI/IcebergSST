@@ -24,7 +24,11 @@
       <span id="scan-launch">Scan now</span>
     </button>
     {% endif %}
-    {% if role == 'admin' %}
+    {#- Only where a check exists. A share is reached from an engine, through a
+        mount this process cannot see, so a probe from here would check the wrong
+        machine — and "connectivity OK" from the wrong machine is worse than no
+        answer (#145, #196). -#}
+    {% if role == 'admin' and probeable %}
     <button class="btn btn--ghost"
             hx-post="/sources/{{ source.id }}/test"
             hx-target="#connectivity"
@@ -80,7 +84,7 @@
     {% if role == 'admin' %}
     <section>
       <h2 class="section-title" style="margin-bottom:12px">Configuration</h2>
-      {% with source = form.source, connection = form.connection, types = form.types,
+      {% with source = form.source, connection = form.connection, types = form.types, protocols = form.protocols,
               island = form.island, error = none %}
         {% include "partials/source_form.html" %}
       {% endwith %}
@@ -134,6 +138,37 @@
       <dl class="kv">
         <dt>Id</dt><dd class="mono" style="font-size:12px">{{ source.id }}</dd>
         <dt>Type</dt><dd>{{ source.type.value }}</dd>
+        {% if source.type.value == 'fileshare' %}
+        <dt>Protocol</dt><dd>{{ source.connection.get('protocol', '—') | upper }}</dd>
+        <dt>Mount</dt><dd class="mono" style="font-size:12px">{{ source.connection.get('mount_path', '—') }}</dd>
+        <dt>Auth</dt><dd><span class="muted">carried by the mount, on the engine</span></dd>
+        <dt>Roots</dt>
+        <dd>
+          {% if source.connection.get('roots') %}
+            {% for root in source.connection.roots %}<span class="tag">{{ root }}</span> {% endfor %}
+          {% else %}
+            <span class="muted">the whole mount</span>
+          {% endif %}
+        </dd>
+        <dt>Include</dt>
+        <dd>
+          {% if source.connection.get('include') %}
+            {% for glob in source.connection.include %}<span class="tag">{{ glob }}</span> {% endfor %}
+          {% else %}
+            <span class="muted">every file</span>
+          {% endif %}
+        </dd>
+        <dt>Exclude</dt>
+        <dd>
+          {% if source.connection.get('exclude') %}
+            {% for glob in source.connection.exclude %}<span class="tag">{{ glob }}</span> {% endfor %}
+          {% else %}
+            <span class="muted">nothing</span>
+          {% endif %}
+        </dd>
+        <dt>Max file</dt><dd class="mono" style="font-size:12px">{{ source.connection.get('max_file_bytes', 33554432) }} bytes</dd>
+        <dt>Symlinks</dt><dd>{{ 'followed' if source.connection.get('follow_symlinks', False) else 'not followed' }}</dd>
+        {% else %}
         <dt>Base URL</dt><dd class="mono" style="font-size:12px">{{ source.connection.get('base_url', '—') }}</dd>
         <dt>Auth</dt><dd>{{ 'Cloud (email + token)' if source.connection.get('email') else 'Server/DC (bearer token)' }}</dd>
         {% if source.type.value == 'confluence' %}
@@ -162,6 +197,7 @@
         {% elif source.type.value == 'jira' %}
         <dt>History</dt><dd>{{ 'scanned' if source.connection.get('include_history', False) else 'skipped' }}</dd>
         <dt>Archived</dt><dd>{{ 'included' if source.connection.get('include_archived_projects', False) else 'excluded' }}</dd>
+        {% endif %}
         {% endif %}
         <dt>Created</dt><dd class="mono" style="font-size:12px">{{ source.created_at | dt }}</dd>
         <dt>Updated</dt><dd class="mono" style="font-size:12px">{{ source.updated_at | dt }}</dd>

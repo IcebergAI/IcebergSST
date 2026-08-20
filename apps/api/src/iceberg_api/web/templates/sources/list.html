@@ -28,7 +28,7 @@
     {#- The partial reads these names from the surrounding context; `with` is
         what supplies them when a page embeds it rather than a route rendering
         it on its own. -#}
-    {% with source = form.source, connection = form.connection, types = form.types,
+    {% with source = form.source, connection = form.connection, types = form.types, protocols = form.protocols,
             island = form.island, error = none %}
       {% include "partials/source_form.html" %}
     {% endwith %}
