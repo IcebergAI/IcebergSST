@@ -3,8 +3,8 @@
 Two audiences, two roles, and the split is the point:
 
 * **Configuring a target is admin-only**, like a notification channel and for a
-  stronger version of the same reason (ADR 0005, docs/security.md § Notification
-  egress). A target carries finding context off the deployment *and* creates work
+  stronger version of the same reason (ADR 0005, ADR 0014, docs/security.md
+  § Outbound requests). A target carries finding context off the deployment *and* creates work
   items in another system. "Who approved that destination" must have an answer.
 * **Requesting a hand-over is analyst+**, like triage. Deciding that this finding
   belongs in that queue is an analyst's judgement, and the destinations they may

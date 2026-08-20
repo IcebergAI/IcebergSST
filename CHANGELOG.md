@@ -38,6 +38,18 @@ says is recorded beside the finding, never written onto it. Both are reversible.
 
 ### Changed
 
+- The threat model knows about external hand-over (#194). `docs/security.md` § Outbound requests
+  listed two features that send traffic out of the deployment; hand-over targets were a third, and
+  the signed `POST /handoff/callback` — sessionless, CSRF-exempt, authenticated only by the
+  target's own secret — was a trust boundary the numbered list did not contain. Both are written
+  up now, including what a verified receiver may and may not drive, and "external ticket creation"
+  is off the out-of-scope list it was still sitting on.
+- [ADR 0014](./docs/adr/0014-external-handover.md) records the hand-over decisions that until now
+  lived only as prose in `docs/handoff.md` and migration docstrings: one target type, the
+  notification wire format reused deliberately, dedup by both a unique constraint and a
+  never-regenerated idempotency key, admin-decides-where/analyst-decides-which, and the reply
+  recorded beside the finding rather than written onto it.
+
 - `make docs-check` now also verifies that every documented `make` target and every `ICEBERG_*`
   setting the docs name still exists, and reads only the files git tracks — so it no longer fails
   on a contributor's unrelated local directory (#150).

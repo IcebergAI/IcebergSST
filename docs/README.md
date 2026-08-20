@@ -43,3 +43,4 @@ Design specification and reference docs. Start with [`../ARCHITECTURE.md`](../AR
 - [0011 — Credential correlation & exposure clusters](./adr/0011-credential-correlation.md)
 - [0012 — Rotation guidance & remediation evidence](./adr/0012-remediation-evidence.md)
 - [0013 — Incremental & resumable scanning](./adr/0013-incremental-scanning.md)
+- [0014 — External hand-over: one signed POST, a recorded reply](./adr/0014-external-handover.md)

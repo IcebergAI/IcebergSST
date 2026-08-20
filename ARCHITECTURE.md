@@ -10,9 +10,12 @@ IcebergSST finds secrets (passwords, API keys, tokens, private keys) that have b
 inappropriately stored in enterprise collaboration systems and file shares. It deliberately
 targets sources that git-oriented scanners miss:
 
-- **Confluence** — pages, comments, and text-extractable attachments (MVP).
+- **Confluence** — pages, comments, and text-extractable attachments.
 - **Jira** — issues, comments, attachments, and opt-in field history (Cloud; DC not certified).
-- **File shares** — SMB/CIFS and NFS (post-MVP).
+- **File shares** — SMB/CIFS and NFS, over a read-only mount rather than two protocol clients.
+
+All three ship, on a versioned connector SDK with a conformance kit
+([`docs/connectors.md`](./docs/connectors.md), [`docs/connector-sdk.md`](./docs/connector-sdk.md)).
 
 It is a **single-organization** internal security tool: one deployment serves one org. There is
 no tenant partitioning.
@@ -24,7 +27,8 @@ no tenant partitioning.
                     │            Management Plane             │
    Browser ──HTMX──▶│  FastAPI (API-first, OpenAPI)          │
    (Alpine+HTMX)    │   • Auth (OIDC / RBAC)                  │
-                    │   • Sources / Scans / Findings / Rules  │◀── results (REST, token-auth)
+                    │   • Sources / Scans / Findings / Rules  │◀── progress + results
+                    │   • Ownership / clusters / hand-over    │    (REST, token-auth)
                     │   • Scheduler (cron → enqueue)          │        ▲
                     │   • Notifications                       │        │
                     └───────┬─────────────────┬──────────────┘         │
@@ -82,28 +86,53 @@ never contains a usable secret.
 master key injected via environment / k8s secret. A `VaultBackend` seam is documented for
 production. This is the ".env now, Vault later" path.
 
-## 4. Data flow: a scan (two-phase, ADR 0009)
+## 4. Data flow: a scan (two-phase, ADR 0009 and ADR 0013)
 
 1. A scan is triggered — **on-demand** (user or API) or by the **cron scheduler** (guarded by a
-   Postgres advisory lock so multiple API replicas never double-fire).
+   Postgres advisory lock so multiple API replicas never double-fire). A schedule's **mode** is a
+   request, not a guarantee: the API promotes an incremental scan to a full one whenever a
+   watermark cannot be trusted — a rule-pack change, a source edit, a pepper rotation, a fleet that
+   disagrees about its rule pack, or the source's full-scan interval having elapsed — and records
+   why (ADR 0013 §5).
 2. The API creates a `Scan` row and enqueues a single **discovery task** (the broker message is
    an id-only hint — no secrets, no specs).
 3. An **engine** leases the discovery task — the lease response delivers the task spec, the
-   task-scoped source credential, the fingerprint pepper, and applicable suppressions — runs
-   `connector.discover()`, and POSTs the resulting `TaskSpec`s back.
-4. The API persists them as **fetch tasks** and enqueues each; engines lease fetch tasks, run
-   connector fetch → detection → redaction, and POST findings + completion (idempotency-keyed).
-5. The API validates the engine credential, applies suppressions, and persists findings. Dead
-   engines are handled by lease expiry → API reclaim (Dramatiq retries are disabled).
-6. When the **last task completes** (atomic DB count), and only if the scan reached
-   `completed`, the API runs **reconciliation** (see §6), then fires notifications for newly
-   opened findings. `partial`/`failed` scans never auto-resolve.
+   task-scoped source credential, the fingerprint pepper, applicable suppressions, and, for an
+   incremental scan against a connector that declares `INCREMENTAL`, the per-scope **cursors** —
+   runs `connector.discover()`, and POSTs the resulting `TaskSpec`s back.
+4. The API persists them as **fetch tasks** and enqueues each; engines lease fetch tasks and run
+   connector fetch → detection → redaction. Redaction happens **inside the engine**: only a masked
+   snippet and a salted hash ever leave it (ADR 0004).
+5. A fetch does not have to end before it reports. A connector declaring `CHECKPOINTS` flushes
+   batches mid-fetch to `POST /scan-tasks/{id}/progress`, which ingests the findings **and**
+   advances the task's resume position in one transaction — a checkpoint that outran its findings
+   would tell the next attempt to start past content nobody stored (ADR 0013 §1). The batch is cut
+   where the connector's published position and the accumulated findings describe the same prefix
+   of the work, so a resumed attempt neither skips nor double-counts.
+6. The terminal submission (idempotency-keyed) carries what the batches did not, plus a proposed
+   **cursor** for the next scan of that scope. The API validates the engine credential, applies
+   suppressions, and persists findings. Task outcome is judged from the **merged** totals, not the
+   last body, so a unit that failed in the first batch still fails the task (ADR 0013 §3).
+7. Every task also reports **coverage**: each enumerated object classified exactly once as scanned,
+   skipped or failed, plus scope gaps for work whose cardinality could not be established. Gap
+   references are HMACs under the scan's pepper, so the same blind spot correlates across manifests
+   without exporting a page id, filename or path. That is what makes "what did this scan actually
+   read?" a question with an answer.
+8. Dead engines are handled by lease expiry → API reclaim; Dramatiq retries are disabled so that
+   this is the **single** re-delivery path (ADR 0009 §2). A reclaimed task resumes from its stored
+   checkpoint when the configuration it was taken under still holds.
+9. When the **last task completes** (atomic DB count), and only if the scan reached `completed`
+   **and** ran in full mode, the API runs **reconciliation** (see §6) and commits the proposed
+   cursors, then fires notifications for newly opened findings. `partial`/`failed` scans never
+   auto-resolve, and neither does an incremental scan — it deliberately did not look at unchanged
+   content, so a finding it did not see is not evidence of anything (ADR 0013 §4). Notifications
+   are outside that gate: finding new secrets sooner is the point of an incremental scan.
 
 ## 5. Technology decisions (summary)
 
 | Area | Decision | ADR |
 |------|----------|-----|
-| Runtime | Python 3.14, containers (3.13 fallback if M0 compat spike finds blockers) | — |
+| Runtime | Python 3.14, containers | — |
 | API | FastAPI, API-first | — |
 | ORM/DB | SQLModel + PostgreSQL | — |
 | Web UI | HTMX + Alpine.js | — |
@@ -116,6 +145,11 @@ production. This is the ".env now, Vault later" path.
 | Secret store | Pluggable; env-key default, Vault later | [0007](./docs/adr/0007-secret-store.md) |
 | Rule mgmt | Code rules + DB suppressions | [0008](./docs/adr/0008-rule-management.md) |
 | Task lifecycle | Two-phase scans; API-authoritative lease; broker = dumb transport | [0009](./docs/adr/0009-task-lifecycle.md) |
+| Liveness validation | Opt-in, policy-gated, never persists plaintext | [0010](./docs/adr/0010-secret-liveness-validation.md) |
+| Correlation | API-minted ids under a dedicated key; the value never leaves | [0011](./docs/adr/0011-credential-correlation.md) |
+| Remediation | Versioned guidance + structured evidence, one-way verification | [0012](./docs/adr/0012-remediation-evidence.md) |
+| Incremental scanning | Durable checkpoints, per-scope cursors; never auto-resolves | [0013](./docs/adr/0013-incremental-scanning.md) |
+| External hand-over | One signed POST; the receiver's reply is recorded, not applied | [0014](./docs/adr/0014-external-handover.md) |
 | Tenancy | Single-org | — |
 | Deployment | compose (dev) + Helm (prod) | — |
 
@@ -150,9 +184,16 @@ See [`docs/deployment.md`](./docs/deployment.md).
 ## 8. Security model
 
 The findings database is itself a high-value target (it maps where secrets live). The threat
-model, trust boundaries, and mitigations are documented in [`docs/security.md`](./docs/security.md).
-Key properties: no plaintext at rest, engines credential-isolated from the DB, encrypted
-connector credentials, full audit trail on finding state changes, and RBAC on every API route.
+model, its nine trust boundaries, and the mitigations are documented in
+[`docs/security.md`](./docs/security.md). Key properties: no plaintext at rest, engines
+credential-isolated from the DB, encrypted connector credentials, full audit trail on finding state
+changes, and RBAC on every API route.
+
+Three features deliberately send traffic **out** of the deployment — the source connectivity test,
+webhook notification channels, and hand-over targets — and one accepts traffic **in** from neither
+a browser nor an engine: the signed, sessionless `POST /handoff/callback`. All four are covered
+there; adding a fifth means revisiting that document, which is the rule the out-of-scope list
+carries.
 
 ## 9. Roadmap (see GitHub milestones)
 
@@ -163,6 +204,14 @@ connector credentials, full audit trail on finding state changes, and RBAC on ev
 - **M3 — Web UI:** HTMX/Alpine screens, served by the API at the application root and driving the
   same route handlers the JSON API exposes ([`docs/web.md`](./docs/web.md)).
 - **M4 — Notifications & prod deploy:** notification dispatch, Helm, hardening.
+- **M5 — Source coverage and scan assurance:** the connector SDK and conformance kit, coverage
+  manifests, the Jira connector, incremental and resumable scanning, and the SMB/NFS file-share
+  connector over a read-only mount.
+- **M6 — Remediation and exposure closure:** exposure clusters, rotation guidance and remediation
+  evidence, ownership with response targets and overdue escalation, and external hand-over.
 
-Non-goals for MVP: SMB connectors, incremental/delta scanning, image OCR, external ticket
-creation, multi-tenancy.
+M0–M6 are shipped; [`docs/backlog.md`](./docs/backlog.md) is the live list of what is left.
+
+Non-goals for MVP: image OCR and multi-tenancy. SMB connectors, incremental/delta scanning and
+external ticket hand-over were on this list and shipped in M5/M6 — which is why the roadmap above
+names them.

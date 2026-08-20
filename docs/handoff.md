@@ -7,6 +7,11 @@ state, a person assigned to it.
 
 The requirement everything here follows from: **repeated delivery creates one external work item.**
 
+This document is the contract — what gets sent, to whom, and what a receiver may say back.
+[ADR 0014](./adr/0014-external-handover.md) is *why* it has this shape, and
+[`security.md`](./security.md) holds the two boundaries it adds: hand-over egress under § Outbound
+requests, and the sessionless callback as trust boundary 9.
+
 ## One target type, deliberately
 
 A hand-over target is a signed HTTP `POST`, and that is the only type there is. Every ITSM and SOAR
@@ -39,8 +44,8 @@ Two roles, and the split is the control:
 
 - **Configuring a target is admin-only.** A target carries finding context off the deployment *and*
   creates work items in another system, so it is at least as consequential as a notification
-  channel ([`notifications.md`](./notifications.md), docs/security.md § Notification egress). Every
-  mutation is audited with the destination it points at — never with the secret.
+  channel ([`notifications.md`](./notifications.md), [`security.md`](./security.md) § Outbound
+  requests). Every mutation is audited with the destination it points at — never with the secret.
 - **Requesting a hand-over is analyst+**, like triage. Deciding that *this* finding belongs in that
   queue is an analyst's judgement, and the destinations they can choose from are the ones an admin
   already approved. Admins decide where; analysts decide which.

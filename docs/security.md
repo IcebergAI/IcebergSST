@@ -45,6 +45,27 @@ system itself a high-value target. This document states the trust boundaries and
    and an administrator-approved exact rule/provider policy both allow it, a detected credential
    is sent once to the fixed read-only HTTPS endpoint compiled into the reviewed adapter. The
    response body is discarded and only a fixed status/reason crosses back to the API (ADR 0010).
+9. **Hand-over receiver ↔ API** — the only inbound boundary that is neither a browser session nor
+   an engine token. `POST /handoff/callback` takes **no session and no CSRF token**, because the
+   caller is another system reporting what happened to a work item (ADR 0014). It is authenticated
+   by the same HMAC-SHA256 over `timestamp.body` that signs what goes *out* to that target, under
+   the same per-target secret — a receiver that can verify our signature can produce one, so there
+   is no second credential to issue or rotate, and a target with no secret cannot call back at all.
+   The timestamp is inside the MAC and must be within five minutes, so a captured callback has a
+   bounded replay window. The route is rate-limited per client address on the same bucket as failed
+   logins, charged **before** the body is read, and the body is read against a 64 KiB cap — the
+   order matters, because everything before authentication is work an unauthenticated caller gets
+   the API to do for free. Every failure answers `401` with one body: which of unknown key, bad signature,
+   stale timestamp and no-secret-configured actually failed is not something a caller gets to learn
+   by trying.
+
+   **What a verified receiver may drive is deliberately small.** It writes the external state, id
+   and URL onto the hand-over row and nothing else. It cannot change a finding's state, resolve it,
+   or add remediation evidence: those are decisions by a named analyst under the deployment's
+   evidence policy (ADR 0012), and a receiver is not a person. Where the two disagree the console
+   *shows* the disagreement for an analyst to settle rather than resolving it — so the worst a
+   compromised receiver achieves is a wrong claim about its own ticket, sitting next to the finding
+   with the analyst's own state intact beside it.
 
 ## Key mitigations
 - **No plaintext at rest.** Redaction happens in the engine; only masked snippet + salted hash
@@ -67,7 +88,7 @@ system itself a high-value target. This document states the trust boundaries and
 - **Transport.** TLS everywhere; engine↔API mutual auth (mTLS) available as hardening.
 
 ## Outbound requests
-Two features deliberately send traffic out of the deployment, both admin-gated and logged:
+Three features deliberately send traffic out of the deployment, all admin-gated and logged:
 
 - **`POST /sources/{id}/test`** attaches a decrypted source credential to a single request against
   the operator-supplied `base_url`. That URL may be internal — Confluence Server usually is — so
@@ -77,6 +98,28 @@ Two features deliberately send traffic out of the deployment, both admin-gated a
   bounded to ten seconds. It is a stopgap: ADR 0009 says the API runs no connector code, and this
   check belongs behind the connector interface (#45) or in an engine task (#35).
 - **Webhook notification channels**, below.
+- **Hand-over targets** — a signed `POST` of a finding's context to an admin-configured URL, which
+  creates a work item in somebody else's system (ADR 0014, [`handoff.md`](./handoff.md)). It shares
+  the notification transport and therefore its properties: an explicit field list rather than a
+  serialised row, HMAC signing with the timestamp inside the MAC, redirects refused, reply bodies
+  never logged. Three things differ, and each is a boundary of its own:
+
+  - **It carries more.** A hand-over adds `ownership` (owning team, due date) and up to ten
+    `remediation` actions, because the person picking up the ticket is not looking at this console.
+    That is more organisational context leaving the deployment than an announcement sends, which is
+    the reason configuring a target is admin-only and every mutation is audited with the
+    destination — never with the secret.
+  - **The reply is read.** A notification is fire-and-forget; a hand-over reads `external_id` and
+    `external_url` out of the response so an analyst can click through. That reply is somebody
+    else's data: bounded at 64 KiB, coerced to strings, stored, and never interpreted. An
+    unparseable reply is deliberately *not* a failure — the `2xx` already created the work item, and
+    retrying over a missing field would create a second one.
+  - **Requesting one is analyst+, not admin.** Admins decide which destinations exist; analysts
+    decide which findings go to them, and both the request and any replay are audit-logged with the
+    person who made them. An announcement is the system telling somebody; a hand-over is a named
+    person putting a finding into another team's queue.
+
+  The receiver's way back in is trust boundary 9 above.
 
 ## Notification egress
 Webhook channels send redacted snippets + resource locations to arbitrary URLs — a deliberate
@@ -242,5 +285,6 @@ With the default `EnvKeyBackend`, the operator owns:
 - Moving to the Vault backend for production-grade key separation (ADR 0007).
 
 ## Out of scope (MVP)
-Multi-tenancy isolation, image OCR, external ticket creation. Adding any of these must revisit
-this threat model.
+Multi-tenancy isolation and image OCR. Adding either must revisit this threat model — as external
+ticket creation, which used to be on this list, did when it shipped: trust boundary 9, the
+hand-over bullet under § Outbound requests, and [ADR 0014](./adr/0014-external-handover.md).
