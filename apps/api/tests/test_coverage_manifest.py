@@ -417,6 +417,41 @@ def test_cancel_freezes_cancelled_evidence_for_unfinished_tasks(
     assert scan.coverage_manifest["task_counts"]["cancelled"] == 1
 
 
+def test_cancelling_keeps_the_coverage_a_task_had_already_reported(
+    session: Session,
+    dispatcher: RecordingDispatcher,
+) -> None:
+    """A batching fetch task has coverage describing objects the API demonstrably
+    ingested findings for. Cancellation used to overwrite it with a zero-count
+    failure report, so a cancelled scan's manifest said the task read nothing
+    (#197). The gap is merged on instead: what was read stays read, and the
+    blind spot is added beside it."""
+    scan = service.launch_scan(
+        session,
+        _source(session, marker="cancel-merge"),
+        trigger=ScanTrigger.MANUAL,
+        dispatcher=dispatcher,
+    )
+    # A fetch task partway through: seven objects read and reported in batches,
+    # which is exactly the coverage a cancellation must not throw away.
+    task = ScanTask(
+        scan_id=scan.id,
+        kind=ScanTaskKind.FETCH,
+        status=ScanTaskStatus.RUNNING,
+        spec={"label": "space DOCS"},
+        coverage=_coverage(ScanTaskKind.FETCH, scanned=7),
+    )
+    session.add(task)
+    session.commit()
+
+    service.cancel_scan(session, scan)
+    session.refresh(task)
+
+    assert task.coverage["counts"]["scanned"] == 7
+    assert task.coverage["scope"]["gaps"] == 1
+    assert [entry["reason"] for entry in task.coverage["reasons"]] == ["cancelled"]
+
+
 def test_a_manifest_says_which_mode_the_scan_ran_in(
     client: TestClient, session: Session, login_as: Any, make_user: Any
 ) -> None:

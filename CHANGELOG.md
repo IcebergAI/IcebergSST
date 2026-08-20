@@ -65,6 +65,27 @@ says is recorded beside the finding, never written onto it. Both are reversible.
 
 ### Fixed
 
+- Four follow-ups from the codebase review (#197), all on the API:
+
+  - **A duplicate name raced to a 500.** Sources, notification channels, hand-over targets, owner
+    groups and routing rules all check "is this name free?" with a SELECT and then INSERT, which
+    only ever guarded the sequential case — two concurrent creates both find nothing, both insert,
+    and the loser got an unhandled `IntegrityError`. `commit_or_conflict` turns that into the 409
+    the route already had a message for, at ten call sites. Only a unique violation is converted;
+    a foreign key or a check constraint is still a bug and still raises.
+  - **A lock-order inversion between `submit_progress` and `submit_results`.** Both take the scan
+    row `FOR UPDATE` and write the task row; progress took them scan-then-task and results
+    task-then-scan, which is the AB/BA deadlock if a retried progress races the same task's final
+    results. Results now takes the scan first. Postgres would have aborted one side and the retry
+    ladder recovered, so nothing was lost — it was just free to make impossible.
+  - **Cancelling a scan threw away coverage the tasks had reported.** A running task's accumulated
+    per-batch report was replaced with a synthetic zero-count failure, so a cancelled scan's
+    manifest said a task that had demonstrably ingested findings scanned nothing. The cancellation
+    gap is merged onto the stored report instead.
+  - **Ingest was an N+1 on the API's busiest transaction.** One or two point selects per finding
+    payload, inside the transaction holding the scan row locked. The batch's findings — under both
+    identities during a pepper rotation — are now loaded in one pass.
+
 - A draining engine never finished shutting down (#192). `Worker.stop()` waits ten minutes by
   default and both grace periods this project ships are two, so an engine with a long fetch in
   flight was still waiting when SIGKILL arrived: the heartbeat, the API connection pool and the

@@ -10,11 +10,15 @@ the only writer of record, so a task's outcome is judged from what the API
 accumulated, never from the last thing it was told.
 """
 
+import ast
+from pathlib import Path
 from typing import Any
 
 import pytest
 from conftest import RecordingDispatcher
 from fastapi.testclient import TestClient
+from iceberg_api.engines import routes as engine_routes
+from iceberg_api.scans import service as scan_service
 from iceberg_core.enums import ScanTaskKind, ScanTaskStatus
 from iceberg_core.models import Engine, Finding, FindingEvent, ScanTask
 from iceberg_core.secrets import EnvKeyBackend
@@ -374,3 +378,62 @@ def test_a_fresh_task_is_handed_no_position_at_all(scan_fixture: Fixture) -> Non
     assert lease["checkpoint_sequence"] == 0
     assert lease["cursors"] == {}
     assert lease["mode"] == "full"
+
+
+# ─── The two writers take their locks in one order (#197) ────────────────────
+
+
+def _statement_index(function: ast.FunctionDef | ast.AsyncFunctionDef, needle: str) -> int:
+    """Where in the body the first statement mentioning ``needle`` appears."""
+    for index, statement in enumerate(function.body):
+        if needle in ast.dump(statement):
+            return index
+    raise AssertionError(f"{function.name} no longer contains {needle!r}")
+
+
+@pytest.mark.parametrize("handler", ["submit_progress", "submit_results"])
+def test_both_submission_paths_lock_the_scan_before_the_task(handler: str) -> None:
+    """Read from the source, because there is nothing to observe at runtime.
+
+    Both handlers take the same two row locks: the scan, `FOR UPDATE`, and the
+    task, through a conditional UPDATE. Taken in opposite orders they are the
+    textbook AB/BA deadlock — a retried progress racing the same task's final
+    results. Postgres aborts one side and the engine's retry ladder recovers, so
+    it would have been rare and confusing rather than fatal; the ordering is free
+    to fix and impossible to keep right by memory. SQLite has no `FOR UPDATE` at
+    all, so no test that runs these routes could ever catch it (#197).
+    """
+    tree = ast.parse(Path(engine_routes.__file__).read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef) and node.name == handler
+    )
+
+    scan_lock = _statement_index(function, "with_for_update")
+    task_write = _statement_index(
+        function, "advance_checkpoint" if handler == "submit_progress" else "claim_result"
+    )
+
+    assert scan_lock < task_write, f"{handler} locks the task before the scan"
+
+
+def test_cancellation_takes_the_same_scan_lock_before_it_merges() -> None:
+    """The third writer of a task's coverage, and the one that reads it first.
+
+    `cancel_scan` merges the cancellation gap onto what each task already
+    reported, which is a read-modify-write: a progress submission landing between
+    its read and its write would have its coverage overwritten by a report merged
+    from the snapshot before it. Same lock, same order, same reason (#197).
+    """
+    tree = ast.parse(Path(scan_service.__file__).read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "cancel_scan"
+    )
+
+    scan_lock = _statement_index(function, "with_for_update")
+    task_read = _statement_index(function, "cancelled_report")
+
+    assert scan_lock < task_read, "cancel_scan reads task coverage before locking the scan"
