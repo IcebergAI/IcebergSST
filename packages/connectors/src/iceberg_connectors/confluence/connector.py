@@ -168,16 +168,34 @@ class ConfluenceConnector:
         # specs and a scan that completes looking clean — the silent empty scan,
         # which is the failure this codebase treats as the dangerous one.
         wanted = {str(key).casefold() for key in connection.get("spaces") or ()}
+        include_personal = bool(connection.get("include_personal_spaces", False))
         matched: set[str] = set()
         matched_ids: set[str] = set()
+        unknown_types: set[str] = set()
         seen = 0
         malformed = False
 
         try:
             for space in client.paginate("/spaces", **_space_filters(connection)):
                 key = str(space.get("key") or "")
-                if wanted and key.casefold() not in wanted:
+                named = key.casefold() in wanted
+                if wanted and not named:
                     continue
+
+                # Decided here rather than by the API, which has no way to say
+                # "everything except personal" (#191).
+                #
+                # A space the operator listed by name is scanned whatever its type:
+                # naming it *is* the deliberate decision `include_personal_spaces`
+                # otherwise stands in for, and refusing would report a space that
+                # plainly exists as "not found".
+                if _is_personal(space) and not include_personal and not named:
+                    continue
+                if (space_type := str(space.get("type") or "")) not in KNOWN_SPACE_TYPES:
+                    # Scanned anyway — see `_is_personal`. Recorded so an operator
+                    # can check whether Atlassian has added something that ought to
+                    # be opt-in, rather than finding out from a coverage report.
+                    unknown_types.add(space_type)
                 space_id = str(space.get("id") or "")
                 if not space_id:
                     # Nothing can be fetched without it, and guessing would produce a
@@ -225,7 +243,17 @@ class ConfluenceConnector:
                 raise ConnectorError(
                     "Confluence discovery returned malformed or duplicate space identity"
                 )
-            logger.info("confluence_discovery_complete", spaces=seen, filtered=bool(wanted))
+            if unknown_types:
+                # A warning, not a failure: the spaces were scanned, so no content
+                # was missed and the manifest has no blind spot to report. What it
+                # may mean is that this build's idea of "personal" needs revisiting.
+                logger.warning("confluence_unknown_space_types", types=sorted(unknown_types))
+            logger.info(
+                "confluence_discovery_complete",
+                spaces=seen,
+                filtered=bool(wanted),
+                personal=include_personal,
+            )
         finally:
             # Reached on an abandoned generator too, so a discovery that stops early
             # does not leak the connection pool.
@@ -709,17 +737,62 @@ class _PageContext:
         }
 
 
-def _space_filters(connection: dict[str, Any]) -> dict[str, Any]:
-    """Narrow the spaces request where the API can do it for us.
+#: Space types this build knows about, from the v2 `GET /spaces` `type` enum.
+#:
+#: Recorded so a type Atlassian adds later is *noticed* — not so it can be
+#: filtered on. Nothing is excluded for being absent from this set; see
+#: :func:`_is_personal`.
+KNOWN_SPACE_TYPES = frozenset(
+    {
+        "global",
+        "collaboration",
+        "knowledge_base",
+        "personal",
+        "system",
+        "onboarding",
+        "xflow_sample_space",
+    }
+)
 
-    Personal spaces are excluded by default: they are every user's drafts, they
-    dominate the space count on a large site, and scanning them is a decision an
-    operator should make deliberately rather than inherit.
+#: The one type an operator opts out of, and the only one this connector decides
+#: anything from. Casefolded on comparison: the spec documents lower_case and the
+#: API has been reported returning UPPER_CASE, and a mismatch here would scan
+#: every user's drafts on a site that asked not to.
+_PERSONAL_SPACE_TYPE = "personal"
+
+
+def _is_personal(space: Mapping[str, Any]) -> bool:
+    """Whether this space is somebody's personal space.
+
+    Anything else — including a type this build has never heard of — is content
+    the operator asked to have scanned. That asymmetry is the point: a new
+    Atlassian space type must not become content nobody looks at (#191).
     """
-    filters: dict[str, Any] = {"status": "current"}
-    if not connection.get("include_personal_spaces", False):
-        filters["type"] = "global"
-    return filters
+    return str(space.get("type") or "").strip().casefold() == _PERSONAL_SPACE_TYPE
+
+
+def _space_filters(connection: dict[str, Any]) -> dict[str, Any]:
+    """Narrow the spaces request where the API can do it for us — which is
+    ``status`` only.
+
+    **Not ``type``.** This asked for ``type=global`` when personal spaces were
+    excluded, which reads as "everything except personal" and is not: the v2 enum
+    is ``global``, ``collaboration``, ``knowledge_base``, ``personal``,
+    ``system``, ``onboarding`` and ``xflow_sample_space``, so it silently dropped
+    five of the seven — including the two that Confluence's own space-creation
+    flow offers first. A knowledge base full of credentials was never read, and
+    the scan reported clean over a scope the operator believed was covered
+    (#191).
+
+    The filter takes a single value rather than a list, so there is no
+    server-side way to say "all but personal": the choice is one type or all of
+    them. So all of them, and :func:`_is_personal` decides. The cost is real and
+    accepted — personal spaces dominate the space count on a large site, so
+    discovery now pages past thousands of them to discard each one. That is a few
+    extra metadata requests once per scan, against silently missing every space
+    of a type this filter did not name.
+    """
+    return {"status": "current"}
 
 
 def _revision(page: Mapping[str, Any]) -> str:

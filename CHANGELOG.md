@@ -65,6 +65,23 @@ says is recorded beside the finding, never written onto it. Both are reversible.
 
 ### Fixed
 
+- Confluence scanned only `global` spaces and reported the scope clean (#191). Excluding personal
+  spaces was implemented as asking the v2 API for `type=global`, which reads as "everything except
+  personal" and is not: the enum is `global`, `collaboration`, `knowledge_base`, `personal`,
+  `system`, `onboarding` and `xflow_sample_space`, and the filter takes one value rather than a
+  list. So five of the seven were dropped — including collaboration spaces and knowledge bases,
+  the two types Confluence's own space-creation flow offers first. A knowledge base full of
+  credentials was never read, and the scan completed looking clean over a scope the operator
+  believed was covered. Discovery now lists every type and excludes personal spaces itself,
+  case-insensitively (the API has been reported returning `PERSONAL` where the spec documents
+  `personal`); a space named explicitly in `spaces` is scanned whatever its type; and a type this
+  build does not recognise is scanned and logged rather than dropped. The test fixture only ever
+  modelled `global` and `personal`, which is why the suite passed — it models the rest now.
+
+  **Operator action:** re-scan any Confluence source. Findings in non-global spaces have never
+  been seen, so this is new coverage rather than a correction — and until that scan runs, the
+  source's history describes only part of the site.
+
 - The last of the codebase-review follow-ups (#197), in the console and the deploy scripts:
 
   - **A crafted link could put words in the console's chrome.** A failed save redirects carrying
