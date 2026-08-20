@@ -1,5 +1,7 @@
 """What comes back from the receiving system, and what it is allowed to do (#141).
 
+ADR 0014 §6 is the decision; docs/security.md trust boundary 9 is the surface.
+
 Two rules, and the second is the one that shapes everything else.
 
 **The reply is authenticated by the same secret the request was signed with.**
